@@ -284,6 +284,7 @@ struct ScanPhoto: View {
     let url: URL?
     let maxDimension: Int
     var fit = false
+    var onImageLoaded: ((URL, Bool) -> Void)? = nil
     @State private var image: UIImage?
     @State private var loaded = false
 
@@ -309,15 +310,26 @@ struct ScanPhoto: View {
             }
         }
         .task(id: ImageRequest(url: url, maxDimension: maxDimension)) {
-            image = nil
-            loaded = false
-            guard let url else { loaded = true; return }
+            // 換圖／切換預覽解析度時保留上一張；首張載入才顯示 ProgressView。
+            guard let url else {
+                image = nil
+                loaded = true
+                return
+            }
+            if image == nil { loaded = false }
             let data = await Task.detached(priority: .utility) {
                 ScanLibrary.imageData(url, maxDimension: maxDimension)
             }.value
             guard !Task.isCancelled else { return }
-            image = data.flatMap(UIImage.init(data:))
-            loaded = true
+            let replacement = data.flatMap(UIImage.init(data:))
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                image = replacement
+                loaded = true
+                // 與替換照片在同一次更新通知路線；取消的舊請求不能覆蓋新照片。
+                onImageLoaded?(url, replacement != nil)
+            }
         }
         .accessibilityLabel("掃描影像")
     }

@@ -11,6 +11,8 @@ struct ScanRoutePlaybackView: View {
     @State private var expanded = false
     @State private var resetCameraToken = 0
     @State private var following = true
+    @State private var displayedFrame: ScanPlaybackFrame?
+    @State private var settledImageURL: URL?
 
     private var frames: [ScanPlaybackFrame] {
         preview.playbackFrames.isEmpty
@@ -43,6 +45,8 @@ struct ScanRoutePlaybackView: View {
                 do { try await Task.sleep(for: .seconds(ScanPlaybackTiming.interval(fps: playbackFPS))) }
                 catch { return }
                 guard !Task.isCancelled, playing else { return }
+                // 解碼較慢時等當張呈現再前進，避免高速播放不停取消載入而閃爍／凍結。
+                guard settledImageURL == frame?.image else { continue }
                 if currentIndex + 1 < frames.count { currentIndex += 1 }
                 if currentIndex >= frames.count - 1 { playing = false; return }
             }
@@ -62,7 +66,12 @@ struct ScanRoutePlaybackView: View {
     }
 
     private var photoPane: some View {
-        ScanPhoto(url: frame?.image, maxDimension: playing && playbackFPS >= 10 ? 960 : (allowsFullscreen ? 1600 : 2400), fit: true)
+        ScanPhoto(url: frame?.image,
+                  maxDimension: playing && playbackFPS >= 10 ? 960 : (allowsFullscreen ? 1600 : 2400),
+                  fit: true) { url, succeeded in
+            settledImageURL = url
+            displayedFrame = succeeded ? frames.first(where: { $0.image == url }) : nil
+        }
             .background(.black)
             .overlay(alignment: .topLeading) { badge("拍攝影像", icon: "photo") }
             .overlay(alignment: .bottomLeading) {
@@ -84,7 +93,7 @@ struct ScanRoutePlaybackView: View {
                 }.foregroundStyle(.white.opacity(0.7))
             } else {
                 ReviewPointCloudView(points: preview.points, trajectory: preview.trajectory,
-                                     highlightedPose: frame?.pose, resetCameraToken: resetCameraToken,
+                                     highlightedPose: displayedFrame?.pose, resetCameraToken: resetCameraToken,
                                      followsHighlightedPose: following, isPlaying: playing,
                                      followTransitionDuration: ScanPlaybackTiming.transitionDuration(fps: playbackFPS))
                     .accessibilityLabel("拍攝路線點雲；橘色標記為目前影像的相機位置與方向")
@@ -113,7 +122,7 @@ struct ScanRoutePlaybackView: View {
             .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 12)).padding(8)
         }
         .overlay(alignment: .bottomLeading) {
-            Text(frame?.pose == nil ? "此影像沒有對應位置" : (following ? "自動跟隨拍攝位置與方向" : "橘色：目前視角 · 綠色：拍攝路線"))
+            Text(displayedFrame?.pose == nil ? "此影像沒有對應位置" : (following ? "自動跟隨拍攝位置與方向" : "橘色：目前視角 · 綠色：拍攝路線"))
                 .font(.caption2).foregroundStyle(.white)
                 .padding(8).background(.black.opacity(0.65), in: Capsule()).padding(8)
                 .allowsHitTesting(false)
@@ -173,7 +182,7 @@ struct ScanRoutePlaybackView: View {
     }
 
     private var relativeTime: String? {
-        guard let start = frames.compactMap(\.timestamp).first, let timestamp = frame?.timestamp,
+        guard let start = frames.compactMap(\.timestamp).first, let timestamp = displayedFrame?.timestamp,
               timestamp >= start, timestamp - start < 86_400 else { return nil }
         let seconds = Int(timestamp - start)
         return String(format: "拍攝時間 +%02d:%02d", seconds / 60, seconds % 60)
