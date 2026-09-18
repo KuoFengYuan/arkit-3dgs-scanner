@@ -39,6 +39,7 @@ nonisolated struct TiledFusedGrid {
 
     struct Tile {
         var cells: [Int64: FusedVoxelGrid.Cell] = [:]   // 鍵為「局部」voxel
+        let center: SIMD3<Float>                      // 建錨當下的世界中心，ID 不再代表目前位置
         var originLatest: simd_float4x4                 // 最近一次換算所用的錨點變換
     }
 
@@ -50,6 +51,7 @@ nonisolated struct TiledFusedGrid {
     private let maxCells: Int
     private let weightCap: Float = 8
     private var totalCells = 0
+    private var nextDynamicKey: Int64 = -1
 
     init(voxelSize: Float, tileSize: Float, maxCells: Int) {
         self.voxelSize = voxelSize
@@ -65,21 +67,68 @@ nonisolated struct TiledFusedGrid {
     ///   融合品質改以方向多樣性衡量，不是觀測次數（同一角度看再多次，視差仍為零）。
     mutating func insert(_ candidates: [CloudPoint], anchorTransforms: [Int64: simd_float4x4],
                          cameraPosition: SIMD3<Float>) {
+        updateAnchorTransforms(anchorTransforms)
+        // 用修正後的磚邊界建立索引。只按原始世界格號選磚，跨格的漂移會產生重複表面。
+        var inverses = tiles.mapValues { $0.originLatest.inverse }
+        var buckets: [Int64: [Int64]] = [:]
+        let half = tileSize * 0.5
+        func register(_ id: Int64, origin: simd_float4x4) {
+            var lo = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+            var hi = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+            for x: Float in [-half, half] { for y: Float in [-half, half] { for z: Float in [-half, half] {
+                let p = origin * SIMD4<Float>(x, y, z, 1)
+                lo = simd_min(lo, SIMD3(p.x, p.y, p.z))
+                hi = simd_max(hi, SIMD3(p.x, p.y, p.z))
+            } } }
+            guard lo.x.isFinite, lo.y.isFinite, lo.z.isFinite,
+                  hi.x.isFinite, hi.y.isFinite, hi.z.isFinite else { return }
+            let lower = floor(lo / tileSize)
+            let upper = floor((hi - SIMD3<Float>(repeating: 0.00001)) / tileSize)
+            // ARAnchor 應是剛體；不讓毀損矩陣產生無界索引。
+            guard simd_reduce_min(upper - lower) >= 0, simd_reduce_max(upper - lower) <= 3,
+                  PointCloudMath.voxelKey(lo, size: tileSize) != nil else { return }
+            for x in Int(lower.x)...Int(upper.x) {
+                for y in Int(lower.y)...Int(upper.y) {
+                    for z in Int(lower.z)...Int(upper.z) {
+                        let p = (SIMD3<Float>(Float(x), Float(y), Float(z)) + 0.5) * tileSize
+                        if let key = PointCloudMath.voxelKey(p, size: tileSize) { buckets[key, default: []].append(id) }
+                    }
+                }
+            }
+        }
+        for id in tiles.keys.sorted() { register(id, origin: tiles[id]!.originLatest) }
         for pt in candidates {
             let world = SIMD3<Float>(pt.x, pt.y, pt.z)
-            let dirBit = Self.directionBit(cameraPosition - world)
-            guard let tileKey = PointCloudMath.voxelKey(world, size: tileSize) else { continue }
-
-            let origin = anchorTransforms[tileKey] ?? Self.translation(tileCenter(tileKey))
-            if tiles[tileKey] == nil {
-                tiles[tileKey] = Tile(originLatest: origin)
-                pendingAnchors.append(tileKey)
+            guard let worldKey = PointCloudMath.voxelKey(world, size: tileSize) else { continue }
+            let worldH = SIMD4<Float>(world, 1)
+            var selected: (id: Int64, local: SIMD3<Float>, distance: Float)?
+            for id in buckets[worldKey] ?? [] {
+                guard let inverse = inverses[id] else { continue }
+                let p = inverse * worldH
+                let local = SIMD3(p.x, p.y, p.z)
+                guard simd_reduce_min(local) >= -half, simd_reduce_max(local) < half else { continue }
+                let distance = simd_length_squared(local)
+                if selected == nil || distance < selected!.distance { selected = (id, local, distance) }
             }
-            tiles[tileKey]!.originLatest = origin
-
-            // 世界 → 錨點局部（剛體逆）：漂移下對同一表面穩定
-            let localH = origin.inverse * SIMD4<Float>(world.x, world.y, world.z, 1)
-            let local = SIMD3<Float>(localH.x, localH.y, localH.z)
+            let tileKey: Int64
+            let local: SIMD3<Float>
+            if let selected {
+                tileKey = selected.id
+                local = selected.local
+            } else {
+                // 原本 ID 所在的磚可能已移走；新區域用新 ID，不能覆寫舊錨點。
+                tileKey = tiles[worldKey] == nil ? worldKey : nextDynamicKey
+                if tileKey == nextDynamicKey { nextDynamicKey -= 1 }
+                let center = PointCloudMath.cellCenter(worldKey, size: tileSize)
+                let origin = Self.translation(center)
+                tiles[tileKey] = Tile(center: center, originLatest: origin)
+                inverses[tileKey] = origin.inverse
+                pendingAnchors.append(tileKey)
+                register(tileKey, origin: origin)
+                local = world - center
+            }
+            let cameraLocal = inverses[tileKey]! * SIMD4<Float>(cameraPosition, 1)
+            let dirBit = Self.directionBit(SIMD3(cameraLocal.x, cameraLocal.y, cameraLocal.z) - local)
             guard let cellKey = PointCloudMath.voxelKey(local, size: voxelSize) else { continue }
 
             let rgb = SIMD3<Float>(Float(pt.r), Float(pt.g), Float(pt.b))
@@ -107,6 +156,12 @@ nonisolated struct TiledFusedGrid {
         }
     }
 
+    mutating func updateAnchorTransforms(_ transforms: [Int64: simd_float4x4]) {
+        for (key, transform) in transforms where tiles[key] != nil {
+            tiles[key]!.originLatest = transform
+        }
+    }
+
     /// 觸頂自動粗化：voxel ×2、各磚局部 cell 加權合併 —— 記憶體有界、不停止收點
     private mutating func coarsen() {
         voxelSize *= 2
@@ -121,6 +176,7 @@ nonisolated struct TiledFusedGrid {
                     m.color += (cell.color - m.color) * (cell.weight / total)
                     m.weight = min(total, weightCap)
                     m.bestScore = max(m.bestScore, cell.bestScore)
+                    m.dirMask |= cell.dirMask
                     merged[key] = m
                 } else {
                     merged[key] = cell
@@ -212,7 +268,7 @@ nonisolated struct TiledFusedGrid {
     }
 
     func tileCenter(_ tileKey: Int64) -> SIMD3<Float> {
-        PointCloudMath.cellCenter(tileKey, size: tileSize)
+        tiles[tileKey]?.center ?? PointCloudMath.cellCenter(tileKey, size: tileSize)
     }
 
     /// 匯出（無 LiDAR 備援用）：局部 → 世界（乘最近錨點變換）後分層擇優下採樣

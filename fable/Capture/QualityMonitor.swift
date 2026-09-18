@@ -98,6 +98,12 @@ final class QualityMonitor {
     private var notSharpStreak = 0
 
     func start() {
+        lastPose = nil
+        lastTime = -1
+        smoothedAngular = 0
+        smoothedLinear = 0
+        sharpPeak = 0
+        notSharpStreak = 0
         guard motion.isDeviceMotionAvailable else { return }
         motion.deviceMotionUpdateInterval = 1.0 / 60.0
         motion.startDeviceMotionUpdates()   // 不帶 handler，由 assess() 輪詢最新值

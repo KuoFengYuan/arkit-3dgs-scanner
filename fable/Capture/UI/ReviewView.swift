@@ -13,6 +13,19 @@ import simd
 struct ReviewPointCloudView: UIViewRepresentable {
     let points: [CloudPoint]
     let trajectory: [simd_float4x4]
+    var highlightedPose: simd_float4x4? = nil
+    var resetCameraToken = 0
+    var followsHighlightedPose = false
+    var isPlaying = false
+    var followTransitionDuration: TimeInterval = 0.25
+
+    final class Coordinator {
+        var resetCameraToken = 0
+        var lastFollowedPose: simd_float4x4?
+        var wasFollowing = false
+        var wasPlaying = false
+    }
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView(frame: .zero)
@@ -21,11 +34,68 @@ struct ReviewPointCloudView: UIViewRepresentable {
         view.autoenablesDefaultLighting = false
         view.antialiasingMode = .none
         view.backgroundColor = UIColor(white: 0.07, alpha: 1)
-        view.pointOfView = Self.fittedCamera(for: points)
+        view.pointOfView = Self.fittedCamera(for: points, trajectory: trajectory)
+        view.defaultCameraController.target = SCNVector3(Self.sceneCenter(points: points, trajectory: trajectory))
+        context.coordinator.resetCameraToken = resetCameraToken
+        updateHighlight(in: view)
+        updateFollowCamera(in: view, coordinator: context.coordinator, animated: false)
         return view
     }
 
-    func updateUIView(_ uiView: SCNView, context: Context) {}
+    func updateUIView(_ uiView: SCNView, context: Context) {
+        // 更新標記與跟隨視角，不重建點雲；一般 3D 驗收仍保留自由旋轉／縮放。
+        updateHighlight(in: uiView)
+        if context.coordinator.resetCameraToken != resetCameraToken {
+            uiView.defaultCameraController.stopInertia()
+            uiView.pointOfView = Self.fittedCamera(for: points, trajectory: trajectory)
+            uiView.defaultCameraController.target = SCNVector3(Self.sceneCenter(points: points, trajectory: trajectory))
+            context.coordinator.resetCameraToken = resetCameraToken
+            context.coordinator.lastFollowedPose = nil
+        }
+        updateFollowCamera(in: uiView, coordinator: context.coordinator, animated: isPlaying)
+    }
+
+    private func updateFollowCamera(in view: SCNView, coordinator: Coordinator, animated: Bool) {
+        let playbackStarted = isPlaying && !coordinator.wasPlaying
+        coordinator.wasPlaying = isPlaying
+        guard followsHighlightedPose, let pose = highlightedPose,
+              let follow = PlaybackCameraPose.following(pose), let camera = view.pointOfView else {
+            coordinator.wasFollowing = false
+            coordinator.lastFollowedPose = nil
+            view.allowsCameraControl = true
+            return
+        }
+        // 播放時由資料驅動視角；暫停後仍可手動查看附近的點雲。
+        view.allowsCameraControl = !isPlaying
+        let samePose = coordinator.lastFollowedPose.map { previous in
+            (0..<4).allSatisfy { previous[$0] == pose[$0] }
+        } ?? false
+        guard !samePose || !coordinator.wasFollowing || playbackStarted else { return }
+        view.defaultCameraController.stopInertia()
+        // 過渡從上一個畫面實際呈現的位置開始，快速跳幀也不堆積動畫。
+        let visibleTransform = camera.presentation.simdTransform
+        camera.removeAllActions()
+        camera.removeAllAnimations()
+        SCNTransaction.begin()
+        SCNTransaction.disableActions = true
+        camera.simdTransform = visibleTransform
+        SCNTransaction.commit()
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = animated && coordinator.wasFollowing ? followTransitionDuration : 0
+        SCNTransaction.disableActions = !animated || !coordinator.wasFollowing
+        camera.simdTransform = follow.transform
+        SCNTransaction.commit()
+        view.defaultCameraController.target = SCNVector3(follow.target)
+        coordinator.lastFollowedPose = pose
+        coordinator.wasFollowing = true
+    }
+
+    private func updateHighlight(in view: SCNView) {
+        guard let marker = view.scene?.rootNode.childNode(withName: "selectedCamera", recursively: false) else { return }
+        marker.isHidden = highlightedPose == nil
+        if let highlightedPose { marker.simdTransform = highlightedPose }
+    }
+
 
     private static func buildScene(points: [CloudPoint], trajectory: [simd_float4x4]) -> SCNScene {
         let scene = SCNScene()
@@ -51,6 +121,20 @@ struct ReviewPointCloudView: UIViewRepresentable {
             scene.rootNode.addChildNode(marker(at: positions.first!, color: .systemGreen))
             scene.rootNode.addChildNode(marker(at: positions.last!, color: .systemRed))
         }
+        let cameraMarker = SCNNode()
+        cameraMarker.name = "selectedCamera"
+        // ARKit 相機往局部 -Z 看。橘色視錐與中心線標示拍攝位置及方向。
+        let origin = SCNVector3Zero
+        let corners = [SCNVector3(-0.13, -0.09, -0.25), SCNVector3(0.13, -0.09, -0.25),
+                       SCNVector3(0.13, 0.09, -0.25), SCNVector3(-0.13, 0.09, -0.25)]
+        for corner in corners {
+            cameraMarker.addChildNode(SCNNode(geometry: PointCloudRendering.polyline([origin, corner], color: .systemOrange)))
+        }
+        cameraMarker.addChildNode(SCNNode(geometry: PointCloudRendering.polyline(corners + [corners[0]], color: .systemOrange)))
+        cameraMarker.addChildNode(SCNNode(geometry: PointCloudRendering.polyline([origin, SCNVector3(0, 0, -0.45)], color: .systemOrange)))
+        cameraMarker.addChildNode(marker(at: origin, color: .systemOrange))
+        cameraMarker.isHidden = true
+        scene.rootNode.addChildNode(cameraMarker)
         return scene
     }
 
@@ -65,24 +149,34 @@ struct ReviewPointCloudView: UIViewRepresentable {
         return node
     }
 
-    /// 依點雲包圍盒放置初始相機（斜上方 45°，剛好框住整個場景）
-    private static func fittedCamera(for points: [CloudPoint]) -> SCNNode {
+    private static func bounds(points: [CloudPoint], trajectory: [simd_float4x4]) -> (SIMD3<Float>, SIMD3<Float>) {
         var lo = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
         var hi = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
-        let stride = max(1, points.count / 5000)
-        var i = 0
-        while i < points.count {
-            let p = SIMD3<Float>(points[i].x, points[i].y, points[i].z)
-            lo = simd_min(lo, p)
-            hi = simd_max(hi, p)
-            i += stride
+        var found = false
+        func include(_ p: SIMD3<Float>) {
+            guard p.x.isFinite, p.y.isFinite, p.z.isFinite else { return }
+            lo = simd_min(lo, p); hi = simd_max(hi, p); found = true
         }
-        let center = points.isEmpty ? SIMD3<Float>(0, 0, 0) : (lo + hi) * 0.5
-        let radius = points.isEmpty ? 2 : max(0.5, simd_length(hi - lo) * 0.5)
+        for i in stride(from: 0, to: points.count, by: max(1, points.count / 5000)) {
+            include(SIMD3<Float>(points[i].x, points[i].y, points[i].z))
+        }
+        for pose in trajectory { include(SIMD3<Float>(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)) }
+        return found ? (lo, hi) : (SIMD3<Float>(repeating: -1), SIMD3<Float>(repeating: 1))
+    }
 
+    private static func sceneCenter(points: [CloudPoint], trajectory: [simd_float4x4]) -> SIMD3<Float> {
+        let (lo, hi) = bounds(points: points, trajectory: trajectory)
+        return (lo + hi) * 0.5
+    }
+
+    /// 同時框住點雲與路線；只有路線的舊紀錄也能正常檢視。
+    private static func fittedCamera(for points: [CloudPoint], trajectory: [simd_float4x4]) -> SCNNode {
+        let (lo, hi) = bounds(points: points, trajectory: trajectory)
+        let center = (lo + hi) * 0.5
+        let radius = max(0.5, simd_length(hi - lo) * 0.5)
         let camera = SCNCamera()
         camera.zNear = 0.01
-        camera.zFar = 200
+        camera.zFar = Double(max(200, radius * 8))
         let node = SCNNode()
         node.camera = camera
         let offset = simd_normalize(SIMD3<Float>(1, 0.7, 1)) * (radius * 2.4)

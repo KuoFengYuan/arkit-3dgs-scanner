@@ -42,7 +42,7 @@ nonisolated enum PointExtractor {
     /// 主執行緒：只做 buffer 複製（memcpy 為記憶體頻寬受限，不受最佳化等級影響）
     static func makePacket(frame: ARFrame, pool: CVPixelBufferPool,
                            blurPixels: Float) -> FramePacket? {
-        guard let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth else { return nil }
+        guard let sceneDepth = frame.sceneDepth ?? frame.smoothedSceneDepth else { return nil }
         let depthMap = sceneDepth.depthMap
         let dw = CVPixelBufferGetWidth(depthMap)
         let dh = CVPixelBufferGetHeight(depthMap)
@@ -78,8 +78,7 @@ nonisolated enum PointExtractor {
         let minD = config.pointMinDepthM
         let maxD = config.pointMaxDepthM
         let minConf = config.minDepthConfidence
-        let edgeRatio = config.depthEdgeRejectRatio
-        let sharpness = 1 / (1 + packet.blurPixels / 4)
+        let sharpness = RefusionEngine.blurWeight(packet.blurPixels, config)
         // medium 信心深度降權（與重融合同一組參數，兩邊的覆蓋判定才一致 ——
         // 預覽熱圖必須 ⊇ 重融合實際會用到的，否則熱圖會把已經夠的地方標成缺）
         let mediumW = config.mediumConfidenceWeight
@@ -96,17 +95,9 @@ nonisolated enum PointExtractor {
                     let z = d[i]
                     let cv = conf?[i] ?? 2
                     if z.isFinite, z > minD, z < maxD, cv >= minConf {
-                        var ok = true
-                        // 飛點過濾：物體輪廓的前後景插值拖影點
-                        if u + 1 < dw {
-                            let dr = d[i + 1]
-                            if !dr.isFinite || abs(dr - z) > z * edgeRatio { ok = false }
-                        }
-                        if ok, v + 1 < dh {
-                            let db = d[i + dw]
-                            if !db.isFinite || abs(db - z) > z * edgeRatio { ok = false }
-                        }
-                        if ok {
+                        if let incidence = DepthSampleFilter.incidenceWeight(
+                            depth: d, confidence: conf, u: u, v: v, width: dw, height: dh,
+                            K: K, config: config) {
                             // CV 反投影 → 翻 Y/Z 回 GL 相機系 → 世界
                             let xc = (Float(u) - cx) / fx * z
                             let yc = (Float(v) - cy) / fy * z
@@ -117,10 +108,10 @@ nonisolated enum PointExtractor {
                             let ru = (Float(u) - cx) / Float(dw)
                             let rv = (Float(v) - cy) / Float(dh)
                             let central = 1 - min(1, (ru * ru + rv * rv).squareRoot() * 1.4) * 0.5
-                            let near = 1 / (0.5 + z)
+                            let near = 1 / (0.2 + z * z)
                             out.append(CloudPoint(x: w4.x, y: w4.y, z: w4.z, r: r, g: g, b: b,
                                                   score: central * near * sharpness
-                                                         * (cv >= 2 ? 1 : mediumW)))
+                                                         * (cv >= 2 ? 1 : mediumW) * incidence))
                         }
                     }
                     u += stride
@@ -181,7 +172,8 @@ actor PointCloudAccumulator {
     func markAllDirty() { grid.markAllDirty() }
 
     /// 匯出用擇優下採樣（無 LiDAR 時的備援輸出；LiDAR 路徑以 RefusionEngine 重融合為準）
-    func bestPoints(target: Int) -> [CloudPoint] {
-        grid.exportPoints(target: target)
+    func bestPoints(target: Int, anchorTransforms: [Int64: simd_float4x4] = [:]) -> [CloudPoint] {
+        grid.updateAnchorTransforms(anchorTransforms)
+        return grid.exportPoints(target: target)
     }
 }

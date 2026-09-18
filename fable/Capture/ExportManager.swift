@@ -24,6 +24,21 @@ nonisolated extension Data {
 }
 
 nonisolated enum ExportManager {
+    /// 先寫暫存檔；壓縮完整成功才以正式檔名發布，避免分享半個 ZIP。
+    static func makeArchive(of directory: URL) throws -> URL {
+        let parent = directory.deletingLastPathComponent()
+        let destination = parent.appendingPathComponent(directory.lastPathComponent + ".zip")
+        let temporary = parent.appendingPathComponent(UUID().uuidString + ".partial")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        try zipDirectory(directory, to: temporary)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
+        } else {
+            try FileManager.default.moveItem(at: temporary, to: destination)
+        }
+        return destination
+    }
+
 
     // MARK: - COLMAP sparse model
 

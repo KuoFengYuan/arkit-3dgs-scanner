@@ -34,6 +34,8 @@ struct CameraControlBar: View {
                 .hudGlass(Circle())
         }
         .foregroundStyle(controls.hasManualOverride ? .yellow : .white)
+        .accessibilityLabel("相機進階控制")
+        .accessibilityValue(controls.hasManualOverride ? "手動" : "自動")
     }
 
     // MARK: - 圖示列
@@ -62,6 +64,7 @@ struct CameraControlBar: View {
                         .frame(width: 40, height: 40)
                 }
                 .foregroundStyle(tint(for: item))
+                .accessibilityLabel(item.label)
             }
             Divider().frame(width: 24).overlay(.white.opacity(0.3))
             Button {

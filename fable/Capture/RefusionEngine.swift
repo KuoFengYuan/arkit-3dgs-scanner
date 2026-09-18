@@ -22,7 +22,13 @@ nonisolated enum PointCloudMath {
 
     /// 21 bits/軸 精確格子索引（±2^20 格，1cm 格距下 ≈ ±10km）
     static func voxelKey(_ p: SIMD3<Float>, size: Float) -> Int64? {
-        let ix = Int64((p.x / size).rounded(.down)) &+ (1 << 20)
+        guard size.isFinite, size > 0, p.x.isFinite, p.y.isFinite, p.z.isFinite else { return nil }
+        let scaled = p / size
+        let bound = Float(1 << 20)
+        guard scaled.x >= -bound, scaled.x < bound,
+              scaled.y >= -bound, scaled.y < bound,
+              scaled.z >= -bound, scaled.z < bound else { return nil }
+        let ix = Int64(scaled.x.rounded(.down)) &+ (1 << 20)
         let iy = Int64((p.y / size).rounded(.down)) &+ (1 << 20)
         let iz = Int64((p.z / size).rounded(.down)) &+ (1 << 20)
         let limit: Int64 = 1 << 21
@@ -164,6 +170,13 @@ nonisolated struct FusedVoxelGrid {
                     let pos = SIMD3<Float>(pt.x, pt.y, pt.z)
                     let rgb = SIMD3<Float>(Float(pt.r), Float(pt.g), Float(pt.b))
                     if var cell = buf[s][key] {
+                        // mesh 只補洞；反覆投影的同一網格頂點不能累積票數拉偏量測。
+                        if cell.measured && !measured { continue }
+                        if !cell.measured && measured {
+                            buf[s][key] = Cell(mean: pos, color: rgb, weight: max(0.01, pt.score),
+                                               bestScore: pt.score, measured: true)
+                            continue
+                        }
                         let w = max(0.01, pt.score)
                         let total = cell.weight + w
                         cell.mean += (pos - cell.mean) * (w / total)
@@ -202,6 +215,8 @@ nonisolated struct FusedVoxelGrid {
                 guard let key = PointCloudMath.voxelKey(cell.mean, size: voxelSize) else { continue }
                 let s = shardIndex(key)
                 if var m = merged[s][key] {
+                    if m.measured && !cell.measured { continue }
+                    if !m.measured && cell.measured { merged[s][key] = cell; continue }
                     let total = m.weight + cell.weight
                     m.mean += (cell.mean - m.mean) * (cell.weight / total)
                     m.color += (cell.color - m.color) * (cell.weight / total)
@@ -269,8 +284,11 @@ nonisolated enum RefusionEngine {
     /// 在背景執行緒同步執行；progress ∈ 0...1。
     /// - meshVertices: ARKit 場景重建網格的世界座標頂點（可空）。用來補上關鍵幀沒拍到的表面
     ///   —— ARKit 的 mesh 融合每一幀（60fps）的深度，而本函式只吃 ~120 個關鍵幀。
+    /// - target: 匯出點數上限的覆寫。nil ＝ 用 config.exportMaxPoints。
+    ///   平面圖要的密度遠高於訓練種子點能承受的量（見 CaptureConfig.floorPlanMaxPoints），
+    ///   兩者共用一個上限的話，平面圖會被訓練的記憶體預算綁住。
     static func refuse(records: [FrameRecord], sessionDir: URL, config: CaptureConfig,
-                       meshVertices: [SIMD3<Float>] = [],
+                       meshVertices: [SIMD3<Float>] = [], target: Int? = nil,
                        progress: @Sendable (Double) -> Void) -> [CloudPoint] {
         // 位姿在進來之前就已經定案（ARKit ＋ 錨點修正，必要時再加 BA ——
         // 見 CaptureController.processScan）。這裡只負責融合。
@@ -328,7 +346,7 @@ nonisolated enum RefusionEngine {
             // 權重同時吃兩個來源：估計的幾何劣化（運動/捲簾）與實測的清晰度判定。
             // 原本只看 estimatedBlurPx，於是「相機拿得很穩但失焦」的幀拿到滿分權重，
             // 它糊掉的顏色會主導那格的加權平均 —— 這是實測清晰度才看得到的破口。
-            let sharpness = 1 / (1 + Float(r.estimatedBlurPx) / 4)
+            let sharpness = blurWeight(Float(r.estimatedBlurPx), config)
             y.measured = unprojectStored(depth: depth, conf: conf, rgba: rgba,
                                          dw: dw, dh: dh, K: K, c2w: c2w,
                                          config: config, sharpness: sharpness)
@@ -391,7 +409,7 @@ nonisolated enum RefusionEngine {
         let inferredOnly = grid.inferredOnlyCount
         let gridVoxel = grid.voxelSize
         let tE = Date()
-        let out = grid.exportPoints(target: config.exportMaxPoints,
+        let out = grid.exportPoints(target: target ?? config.exportMaxPoints,
                                     minNeighbors: config.refuseMinNeighbors)
         print(String(format: "  匯出擇優 %.2fs（%d 格 → %d 點）",
                      Date().timeIntervalSince(tE), rawCells, out.count))
@@ -420,6 +438,21 @@ nonisolated enum RefusionEngine {
     /// simd_float4x4 → row-major 16（FrameRecord.transform 的格式）
     static func rowMajor(_ m: simd_float4x4) -> [Double] {
         (0..<4).flatMap { r in (0..<4).map { c in Double(m[c][r]) } }
+    }
+
+    /// 模糊 → 融合權重。曲線與錨點見 CaptureConfig.blurWeightPower。
+    ///
+    /// 以 refPx 錨定的用意：power 只該改變「幀之間的相對輕重」。若直接取 base^power，
+    /// 所有權重會一起縮小數十倍，而匯出端的 `min(1, weight/1.5)` 是有飽和點的 ——
+    /// 那會連帶改變下採樣的選點，把一個「相對權重」的實驗混進「絕對尺度」的副作用。
+    @inline(__always)
+    static func blurWeight(_ blurPx: Float, _ config: CaptureConfig) -> Float {
+        let half = max(0.1, config.blurWeightHalfPx)
+        let base = 1 / (1 + max(0, blurPx) / half)
+        let p = config.blurWeightPower
+        guard p != 1 else { return base }          // 預設路徑：與舊寫法逐位元相同
+        let ref = 1 / (1 + max(0, config.blurWeightRefPx) / half)
+        return pow(base, p) * pow(ref, 1 - p)
     }
 
     static func float4x4(rowMajor m: [Double]) -> simd_float4x4 {
@@ -485,9 +518,7 @@ nonisolated enum RefusionEngine {
         let minD = config.pointMinDepthM
         let maxD = config.pointMaxDepthM
         let minConf = config.minDepthConfidence
-        let edgeRatio = config.depthEdgeRejectRatio
         let stride = max(1, config.refuseSampleStride)
-        let minCosInc = cos(config.depthMaxIncidenceDeg * .pi / 180)
 
         return depth.withUnsafeBytes { raw -> [CloudPoint] in
             let d = raw.bindMemory(to: Float32.self)
@@ -501,37 +532,9 @@ nonisolated enum RefusionEngine {
                     let z = d[i]
                     let cv = conf?[i] ?? 2
                     if z.isFinite, z > minD, z < maxD, cv >= minConf {
-                        var ok = true
-                        // 入射角：由相鄰像素的深度梯度算出來。
-                        //
-                        // **這是牆面疊影的主因。** 一個深度像素在 z 處的橫向足跡是 z/fx，
-                        // 而相鄰像素的深度差 Δz 與入射角的關係是 tanθ = Δz·fx/z。
-                        // 掠射（θ→90°）時，同一個像素涵蓋牆面上一大片，深度沿光線的
-                        // 誤差被 1/cosθ 放大 —— 那些點會落在真實表面前後好幾公分處，
-                        // 每一趟掃描各偏一點，於是在 voxel 格上排成一片片平行的殼，
-                        // 就是畫面上看到的垂直條紋與「掃多次疊在一起」。
-                        //
-                        // 原本的 depthEdgeRejectRatio 是深度比例（5%），換算下來
-                        // 不論遠近都相當於放行到 84° —— 幾乎什麼掠射樣本都收。
-                        // 改成直接用角度，物理意義明確且與距離無關。
-                        var tanU: Float = 0, tanV: Float = 0
-                        if u + 1 < dw {
-                            let dr = d[i + 1]
-                            if !dr.isFinite || abs(dr - z) > z * edgeRatio { ok = false }
-                            else { tanU = abs(dr - z) * fx / z }
-                        }
-                        if ok, v + 1 < dh {
-                            let db = d[i + dw]
-                            if !db.isFinite || abs(db - z) > z * edgeRatio { ok = false }
-                            else { tanV = abs(db - z) * fy / z }
-                        }
-                        // cosθ = 1/√(1+tan²θ)。用它同時做硬拒絕與權重：
-                        // 硬拒絕留得寬（只擋掉幾乎與視線平行的），主要靠權重 ——
-                        // 直接刪會在只能斜看到的牆面上開洞，而降權不會：
-                        // 之後有正面觀測進來時，加權平均自然被拉回正確的表面。
-                        let cosInc = 1 / (1 + tanU * tanU + tanV * tanV).squareRoot()
-                        if cosInc < minCosInc { ok = false }
-                        if ok {
+                        if let incidence = DepthSampleFilter.incidenceWeight(
+                            depth: d, confidence: conf, u: u, v: v, width: dw, height: dh,
+                            K: K, config: config) {
                             let xc = (Float(u) - cx) / fx * z
                             let yc = (Float(v) - cy) / fy * z
                             let w4 = c2w * SIMD4<Float>(xc, -yc, -z, 1)
@@ -547,7 +550,7 @@ nonisolated enum RefusionEngine {
                                                   // （80° → cos²=0.03），正面觀測因此
                                                   // 一進來就主導這一格的加權平均
                                                   score: central * near * sharpness
-                                                         * confW * cosInc * cosInc))
+                                                         * confW * incidence))
                         }
                     }
                     u += stride
@@ -574,7 +577,14 @@ nonisolated enum RefusionEngine {
     /// 只用其中一半：另一半要留給匯出階段（點陣列 ＋ 分層下採樣的字典），
     /// 那兩個的尖峰跟融合格是**重疊**的。
     /// 觸頂粗化仍然保底 —— 真的到上限就加粗格距，是降級不是失敗。
+    ///
+    /// macOS 直接照用設定值：那裡沒有 jetsam，而 os_proc_available_memory() 本身
+    /// 也只存在於 iOS。本檔的用意之一是能在桌機重跑同一份融合做離線驗證
+    /// （見檔頭、tools/refuse_ply.swift），少了這個 #if 就編不過。
     static func safeMaxCells(_ configured: Int) -> Int {
+        #if !os(iOS)
+        return configured
+        #else
         let avail = os_proc_available_memory()
         guard avail > 0 else { return configured }
         let budget = Int(Double(avail) * 0.5) / kBytesPerCell
@@ -585,6 +595,7 @@ nonisolated enum RefusionEngine {
                          Double(avail) / 1e6, configured, capped))
         }
         return capped
+        #endif
     }
 
     /// JPEG →（縮圖解碼）→ 深度解析度的緊湊 RGBA buffer。

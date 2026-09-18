@@ -1,87 +1,121 @@
-//
-//  ContentView.swift
-//  fable
-//
-//  Created by 吳欣怡 on 2026/7/16.
-//
-
 import SwiftUI
 import ARKit
 
 struct ContentView: View {
     @State private var showCapture = false
+    @State private var showHistory = false
 
     private var hasLiDAR: Bool {
         ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
     }
 
     var body: some View {
-        VStack(spacing: 28) {
-            Spacer()
+        ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                HStack {
+                    Label("fable", systemImage: "viewfinder")
+                        .font(.title2.bold())
+                    Spacer()
+                    Label(hasLiDAR ? "LiDAR" : "標準相機",
+                          systemImage: hasLiDAR ? "sensor.tag.radiowaves.forward" : "camera")
+                        .font(.caption.weight(.medium))
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .background(.quaternary, in: Capsule())
+                }
 
-            Image(systemName: "camera.metering.matrix")
-                .font(.system(size: 60, weight: .light))
-                .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("把眼前的空間，\n留下來。")
+                        .font(.system(.largeTitle, design: .rounded, weight: .bold))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("走一圈、檢查成果，再把掃描轉成 3D 模型或平面圖。")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.top, 16)
 
-            VStack(spacing: 6) {
-                Text("fable")
-                    .font(.largeTitle.bold())
-                Text("COLMAP-free 3DGS 訓練資料採集")
-                    .font(.headline)
+                VStack(alignment: .leading, spacing: 24) {
+                    step("01", "緩慢掃描", "沿著空間移動，手機會自動擷取影像。", "viewfinder")
+                    step("02", "檢查與補掃", "旋轉點雲檢查缺漏，隨時回到原處補拍。", "cube.transparent")
+                    step("03", "建立與分享", "在手機上建立 3D 模型，或匯出掃描資料。", "square.and.arrow.up")
+                }
+                .padding(22)
+                .background(.background, in: RoundedRectangle(cornerRadius: 24))
+
+                Button { showHistory = true } label: {
+                    HStack(spacing: 14) {
+                        Image(systemName: "clock.arrow.circlepath").font(.title2)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("掃描紀錄").font(.headline)
+                            Text("預覽、分享或刪除之前的掃描").font(.subheadline).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                    }
+                    .padding(20)
+                    .background(.background, in: RoundedRectangle(cornerRadius: 20))
+                }
+                .buttonStyle(.plain)
+
+                Label("多走動、少原地旋轉，讓同一個表面被不同角度看見。",
+                      systemImage: "figure.walk")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if !hasLiDAR {
+                    Label("此裝置可擷取影像與稀疏點雲；完整幾何與平面圖建議使用 LiDAR 裝置。",
+                          systemImage: "info.circle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: 560)
+            .padding(24)
+            .frame(maxWidth: .infinity)
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+        .safeAreaInset(edge: .bottom) {
+            VStack(spacing: 10) {
+                Button { showCapture = true } label: {
+                    Label("開始掃描", systemImage: "camera.viewfinder")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(!ARWorldTrackingConfiguration.isSupported)
+                Text(ARWorldTrackingConfiguration.isSupported
+                     ? "掃描與模型訓練都在裝置上進行" : "此裝置不支援 AR 掃描")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
-
-            VStack(alignment: .leading, spacing: 12) {
-                bullet("camera.viewfinder", "ARKit 姿態直出：跳過 SfM，拍完即得相機內外參")
-                bullet("cube.transparent", "LiDAR 彩色點雲：作為 3DGS 初始化 Gaussians")
-                bullet("gauge.with.needle", "即時品質導引：速度 / 光線 / 距離 / 涵蓋率")
-                bullet("doc.zipper", "一鍵匯出 transforms.json + points.ply + 影像 zip")
-            }
-            .padding(20)
-            .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 16))
-            .padding(.horizontal)
-
-            Button {
-                showCapture = true
-            } label: {
-                Text("開始掃描")
-                    .font(.headline)
-                    .frame(maxWidth: 240)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-
-            if !hasLiDAR {
-                Label("此裝置無 LiDAR：仍可掃描，點雲將退回稀疏特徵點",
-                      systemImage: "exclamationmark.triangle")
-                    .font(.footnote)
-                    .foregroundStyle(.orange)
-            }
-
-            Spacer()
-
-            Text("拍攝訣竅：多平移、少原地旋轉，繞目標走出弧線")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+            .frame(maxWidth: 560)
+            .padding(.horizontal, 24).padding(.vertical, 16)
+            .frame(maxWidth: .infinity)
+            .background(.bar)
         }
-        .padding()
-        .fullScreenCover(isPresented: $showCapture) {
-            CaptureView()
-        }
+        .fullScreenCover(isPresented: $showCapture) { CaptureView() }
+        .sheet(isPresented: $showHistory) { ScanHistoryView() }
     }
 
-    private func bullet(_ symbol: String, _ text: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
+    private func step(_ number: String, _ title: String, _ detail: String, _ symbol: String) -> some View {
+        HStack(alignment: .top, spacing: 16) {
             Image(systemName: symbol)
-                .frame(width: 24)
+                .font(.title2)
                 .foregroundStyle(.tint)
-            Text(text)
-                .font(.subheadline)
-                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: 36, height: 40)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 5) {
+                Text("\(number)  \(title)").font(.headline)
+                Text(detail)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+        .accessibilityElement(children: .combine)
     }
 }
 
-#Preview {
-    ContentView()
-}
+#Preview { ContentView() }

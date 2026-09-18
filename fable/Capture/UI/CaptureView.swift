@@ -9,6 +9,7 @@ import ARKit
 
 struct CaptureView: View {
     @StateObject private var controller = CaptureController()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
@@ -51,7 +52,11 @@ struct CaptureView: View {
                               showFurniture: $controller.showPlanFurniture)
             }
         }
-        .onDisappear { controller.teardown() }
+        .onChange(of: scenePhase) { _, phase in
+            // 系統權限提示的 inactive 不等於離開 App。
+            if phase == .background { controller.sceneActivityChanged(isActive: false) }
+            if phase == .active { controller.sceneActivityChanged(isActive: true) }
+        }
     }
 
     private var showReview: Bool {
@@ -69,24 +74,22 @@ private struct ARViewContainer: UIViewRepresentable {
         let view = ARSCNView(frame: .zero)
         view.autoenablesDefaultLighting = true
         view.automaticallyUpdatesLighting = true
-        let tap = UITapGestureRecognizer(target: context.coordinator,
-                                         action: #selector(Coordinator.handleTap(_:)))
-        view.addGestureRecognizer(tap)
         controller.attach(arView: view)
         return view
     }
 
     func updateUIView(_ uiView: ARSCNView, context: Context) {}
 
+    static func dismantleUIView(_ uiView: ARSCNView, coordinator: Coordinator) {
+        // 開啟平面圖不應結束 session；只有 AR view 真正移除時釋放資源。
+        coordinator.controller.teardown()
+    }
+
     func makeCoordinator() -> Coordinator { Coordinator(controller: controller) }
 
     final class Coordinator: NSObject {
         let controller: CaptureController
         init(controller: CaptureController) { self.controller = controller }
-
-        // 物件模式移除後，點擊畫面已無作用（原本是放置涵蓋圓頂）。
-        // 保留 Coordinator 骨架 —— 之後若要加「點選重掃某區」之類的互動會用到。
-        @objc func handleTap(_ gesture: UITapGestureRecognizer) {}
     }
 }
 
