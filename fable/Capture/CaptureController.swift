@@ -11,6 +11,7 @@
 
 import Foundation
 import ARKit
+import AVFoundation
 import SceneKit
 import Combine
 import UIKit
@@ -20,7 +21,7 @@ import simd
 final class CaptureController: NSObject, ObservableObject {
 
     enum Phase: Equatable {
-        case idle          // 尚未開拍（可放置圓頂）
+        case idle          // 相機準備與取景
         case scanning
         case processing    // 掃描後：錨點姿態修正 + 點雲重融合（進度條）
         case review        // 3D 檢視優化後點雲，決定匯出 / 續掃 / 捨棄 / 訓練
@@ -30,7 +31,7 @@ final class CaptureController: NSObject, ObservableObject {
     }
 
     // MARK: - UI 狀態
-    @Published var phase: Phase = .idle
+    @Published private(set) var phase: Phase = .idle
     @Published var assessment = QualityAssessment()
     @Published var keyframeCount = 0
     @Published var pointCount = 0
@@ -39,7 +40,26 @@ final class CaptureController: NSObject, ObservableObject {
     @Published var fusionCompleteness: Double = 0
     @Published var exportedZip: URL?
     @Published var statusText: String?
-    @Published var trackingReady = false
+    @Published private(set) var sessionState: CaptureSessionState = .initializing
+    @Published private(set) var scanNotice: String?
+    var trackingReady: Bool { sessionState.canCapture }
+    var canStartScan: Bool { phase == .idle && sessionState.canCapture }
+    var canUseScan: Bool { refinedRecords.contains { $0.blurVerdict == .keep } }
+    var canTrain: Bool { canUseScan && !reviewPoints.isEmpty }
+    var canResumeScan: Bool {
+        guard phase == .review, writer != nil else { return false }
+        if case .failed = sessionState { return false }
+        return true
+    }
+    var canClose: Bool {
+        phase == .idle || phase == .review || phase == .done || (phase == .training && trainingComplete)
+    }
+    private var authorizationTask: Task<Void, Never>?
+    private var isAttached = false
+    private var isInBackground = false
+    private var needsSessionResume = false
+    private var scanGeneration = UUID()
+    private var trainingGeneration = UUID()
     /// 即時點雲疊加。**預設顯示** —— RoomPlan 的即時線框已經關掉了，
     /// 少了它，點雲就是掃描當下唯一能回答「這裡掃到了沒」的東西。
     @Published var showPointCloud = true
@@ -92,7 +112,7 @@ final class CaptureController: NSObject, ObservableObject {
     /// 同一次 session 內的續掃 ARKit 本來就會自動重定位，不需要它。
     @Published private(set) var continueFromLastMap = false
     /// ARKit 正在以舊地圖重定位（尚未接上）。此時姿態不可信，必須擋住開拍。
-    @Published private(set) var relocalizing = false
+    var relocalizing: Bool { sessionState == .relocalizing }
     /// 迴環閉合提示：走遠之後提醒回起點，讓 ARKit 修正整條軌跡的累積漂移
     @Published private(set) var loopHint: String?
     /// RoomPlan 的即時引導 ＋ 牆高不足提示（見 FloorPlanCapture.coachingHint）。
@@ -111,8 +131,22 @@ final class CaptureController: NSObject, ObservableObject {
     /// 預設關：建築製圖只畫固定設備，活動家具會蓋住圖面。
     /// 畫面與匯出共用這個旗標 —— 看到的就是匯出的。
     @Published var showPlanFurniture = false
-    let config = CaptureConfig()
-    let hasLiDAR = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
+    @Published var refineCameraPoses = true
+    private(set) var config = CaptureConfig()
+    private var trackingStability = TrackingStabilityGate()
+    let supportsLiDAR = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
+    @Published private(set) var useLiDAR = true
+    var hasLiDAR: Bool { supportsLiDAR && useLiDAR }
+
+    /// 僅能在開拍前切換；以新 session 移除既有深度／網格，避免混合兩種實驗資料。
+    func setLiDAREnabled(_ enabled: Bool) {
+        guard phase == .idle, supportsLiDAR, useLiDAR != enabled else { return }
+        useLiDAR = enabled
+        continueFromLastMap = false
+        sessionState = .initializing
+        pixelBufferPool = nil
+        prepareCamera()
+    }
 
     // MARK: - 內部元件
     private weak var arView: ARSCNView?
@@ -143,6 +177,8 @@ final class CaptureController: NSObject, ObservableObject {
     private var recentRejects: [TimeInterval] = []
     private var frameCounter = 0
     private var pendingWrites = 0
+    private var writeTasks: [Int: Task<Void, Never>] = [:]
+    private var previewTask: Task<Void, Never>?
     private var previewInFlight = false
     /// 本幀是否已進過預覽融合（關鍵幀路徑與 10Hz 路徑可能落在同一幀，避免 obs 重複累加）
     private var lastPreviewFrame = -1
@@ -164,6 +200,8 @@ final class CaptureController: NSObject, ObservableObject {
 
     func attach(arView: ARSCNView) {
         self.arView = arView
+        isAttached = true
+        arView.session.delegateQueue = .main
         arView.session.delegate = self
 
         let viz = CoverageVisualizer(config: config)
@@ -181,43 +219,81 @@ final class CaptureController: NSObject, ObservableObject {
         viz.setDollhouseHidden(!showRoomPlan)
         visualizer = viz
 
-        runSession()
+        prepareCamera()
+    }
+
+    /// 權限回覆可能晚於畫面離開，啟動前再次確認生命週期。
+    func prepareCamera() {
+        guard isAttached, !isInBackground, phase == .idle else { return }
+        guard ARWorldTrackingConfiguration.isSupported else {
+            sessionState = .unsupported
+            return
+        }
+        guard authorizationTask == nil else { return }
+        authorizationTask = Task { [weak self] in
+            guard let self else { return }
+            defer { authorizationTask = nil }
+            var authorized = AVCaptureDevice.authorizationStatus(for: .video) == .authorized
+            if AVCaptureDevice.authorizationStatus(for: .video) == .notDetermined {
+                sessionState = .requestingPermission
+                authorized = await AVCaptureDevice.requestAccess(for: .video)
+            }
+            guard !Task.isCancelled, isAttached, !isInBackground else { return }
+            guard authorized else {
+                sessionState = .permissionDenied
+                return
+            }
+            runSession()
+            monitor.start()
+        }
+    }
+
+    func sceneActivityChanged(isActive: Bool) {
+        isInBackground = !isActive
+        guard isAttached else { return }
+        if !isActive {
+            guard phase == .idle || phase == .scanning else { return }
+            needsSessionResume = true
+            sessionState = .interrupted
+            arView?.session.pause()
+            monitor.stop()
+            UIApplication.shared.isIdleTimerDisabled = false
+        } else if needsSessionResume {
+            needsSessionResume = false
+            if phase == .idle {
+                prepareCamera()
+            } else if phase == .scanning {
+                resumeTracking()
+            }
+        } else if phase == .idle, sessionState == .permissionDenied || sessionState == .requestingPermission {
+            prepareCamera()
+        }
+    }
+
+    private func resumeTracking() {
+        trackingStability.reset()
+        sessionState = .relocalizing
+        arView?.session.run(CaptureSessionConfiguration.make(config: config, useLiDAR: hasLiDAR), options: [])
         monitor.start()
+        shutter.reset()
+        if lockCameraParams { applyCameraLocks() }
+        UIApplication.shared.isIdleTimerDisabled = true
     }
 
     func teardown() {
+        isAttached = false
+        authorizationTask?.cancel()
+        authorizationTask = nil
         trainingCancel.cancel()
+        trainingTask?.cancel()
+        trainingGeneration = UUID()
+        scanGeneration = UUID()
+        arView?.session.delegate = nil
         session?.close(); session = nil
         releaseCameraLocks()
         arView?.session.pause()
         monitor.stop()
         UIApplication.shared.isIdleTimerDisabled = false
-    }
-
-    private func makeARConfig() -> ARWorldTrackingConfiguration {
-        let cfg = ARWorldTrackingConfiguration()
-        cfg.worldAlignment = .gravity          // 世界 +Y = 反重力 → 3DGS 場景天然正立
-        cfg.planeDetection = [.horizontal]     // 供物件模式 raycast 放置圓頂
-        cfg.environmentTexturing = .none       // 省下環境貼圖的 GPU/散熱成本
-        cfg.isAutoFocusEnabled = true          // 明示：對焦交給 ARKit 連續自動（見 CameraControls.lockForScan）
-        // 帶入上次的地圖 → ARKit 進入 relocalizing，鏡頭對回掃過的區域就會接上，
-        // 之後的姿態與上次同座標系。Apple 要求搭配 .resetTracking 執行（見 runSession）。
-        if continueFromLastMap, let map = WorldMapStore.loadLatest() {
-            cfg.initialWorldMap = map
-        }
-        if hasLiDAR {
-            cfg.frameSemantics.insert(.sceneDepth)          // 原始深度：存檔用
-            if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
-                cfg.frameSemantics.insert(.smoothedSceneDepth)  // 平滑深度：點雲融合用
-            }
-            // 場景重建網格：ARKit 以每一幀（60fps）的深度做 TSDF 融合並隨漂移修正更新。
-            // 我們的重融合只吃 ~120 個關鍵幀 → mesh 能補上關鍵幀漏掉的表面（天花板/角落）。
-            if config.useSceneMesh,
-               ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
-                cfg.sceneReconstruction = .mesh
-            }
-        }
-        return cfg
     }
 
     /// 印出本機可用的 ARKit 影像格式。
@@ -245,16 +321,19 @@ final class CaptureController: NSObject, ObservableObject {
     func setContinueFromLastMap(_ on: Bool) {
         guard phase == .idle else { return }
         continueFromLastMap = on && WorldMapStore.hasLatest
-        relocalizing = false
-        trackingReady = false
-        runSession()
-        statusText = continueFromLastMap
-            ? "請把鏡頭對準上次掃描過的區域，等待重新定位"
-            : nil
+        sessionState = .initializing
+        prepareCamera()
+        statusText = nil
     }
 
     private func runSession() {
-        arView?.session.run(makeARConfig(), options: [.resetTracking, .removeExistingAnchors])
+        guard isAttached, !isInBackground,
+              AVCaptureDevice.authorizationStatus(for: .video) == .authorized else { return }
+        trackingStability.reset()
+        let map = continueFromLastMap ? WorldMapStore.loadLatest() : nil
+        sessionState = map == nil ? .initializing : .relocalizing
+        arView?.session.run(CaptureSessionConfiguration.make(config: config, useLiDAR: hasLiDAR, initialWorldMap: map),
+                           options: [.resetTracking, .removeExistingAnchors])
         logVideoFormats()
         // 曝光上限要在取景階段就設好，AE 才有時間在上限內收斂；
         // session.run 會重設裝置設定，故必須在 run 之後。
@@ -264,13 +343,16 @@ final class CaptureController: NSObject, ObservableObject {
     // MARK: - 開始 / 停止
 
     func startScan() {
-        guard phase == .idle else { return }
+        guard canStartScan else { return }
+        config.baRounds = refineCameraPoses && hasLiDAR ? 6 : 0
         do {
             try beginSessionStorage()
         } catch {
             statusText = "無法建立掃描資料夾：\(error.localizedDescription)"
             return
         }
+        scanGeneration = UUID()
+        scanNotice = nil
         if lockCameraParams { applyCameraLocks() }
         startFloorPlan(fresh: true)
         // 掃描中收合：中途改曝光會讓前後幀成像不一致（外觀校正要修的正是這個）
@@ -304,13 +386,17 @@ final class CaptureController: NSObject, ObservableObject {
         guard phase == .scanning else { return }
         phase = .processing
         exportProgress = 0
-        statusText = nil
-        UIApplication.shared.isIdleTimerDisabled = false
+        statusText = "正在儲存最後的影像…"
+        UIApplication.shared.isIdleTimerDisabled = true
+        releaseCameraLocks()
         let refined = snapshotRefinedTransforms()   // 必須在 pause 前讀 anchors
         let meshVerts = snapshotMeshVertices()      // 同上：pause 後 anchors 就讀不到了
         floorPlan.stopCapture()                     // 只是 stop()，最終資料由 delegate 稍後送達
         let tStop = Date()
         Task {
+            // 等待已接受的工作真正落盤，也包含可選的特徵追蹤。
+            for task in Array(writeTasks.values) { await task.value }
+            await previewTask?.value
             // 世界地圖：只有「取圖」需要活著的 session，序列化不需要。
             // 所以取完就把序列化丟到背景並與 processScan 並行 ——
             // 先前是 await 整個存檔完成才開始後處理，那一整段是使用者的乾等，
@@ -328,9 +414,7 @@ final class CaptureController: NSObject, ObservableObject {
             // 把序列化搬到背景之後那段緩衝消失，平面圖就出不來了 ——
             // 一個「加速」改動意外拿掉了另一件事賴以成立的前提。
             //
-            // 正解是不要靠巧合：pause **不在使用者的等待路徑上**（使用者等的是
-            // processScan），所以讓它明確地等 RoomPlan，與後處理並行。
-            // 代價只是 ARSession 多活幾秒，而幀處理本來就被 phase != .scanning 擋掉了。
+            // 與重融合並行等待，並在兩者結束後才開放續掃。
             let roomTask = Task { @MainActor [weak self] in
                 await self?.floorPlan.waitForSegment(timeout: 12)
                 self?.arView?.session.pause()       // review 期間停止追蹤，省電省熱
@@ -338,11 +422,16 @@ final class CaptureController: NSObject, ObservableObject {
             }
 
             await processScan(refinedTransforms: refined, meshVertices: meshVerts, since: tStop)
-            // 兩者通常早就完成了；等一下只是確保摘要拿得到地圖大小、
-            // 以及 session 一定有被 pause 掉（不然 review 期間會一直吃電）
+            let reviewStatus = statusText
+            statusText = "正在完成掃描紀錄…"
             await mapTask.value
             await roomTask.value
             if scanSummary != nil { scanSummary?.worldMapMB = lastWorldMapMB }
+            // RoomPlan 的尾端 pause 完成後才能提供續掃，避免舊任務暫停新的掃描。
+            statusText = scanNotice ?? reviewStatus
+            exportProgress = 1
+            phase = .review
+            UIApplication.shared.isIdleTimerDisabled = false
         }
     }
 
@@ -406,8 +495,11 @@ final class CaptureController: NSObject, ObservableObject {
             stage("校正相機位姿…", 0.10)
             let obs = await featureTracker.observations()
             print(await featureTracker.stats())
-            let ba = BundleAdjuster.refine(records: refinedRecords, observations: obs,
-                                           rounds: config.baRounds)
+            let records = refinedRecords
+            let rounds = config.baRounds
+            let ba = await Task.detached(priority: .userInitiated) {
+                BundleAdjuster.refine(records: records, observations: obs, rounds: rounds)
+            }.value
             // ba.poses 只在保留集通過閘門時才非空（見 BundleAdjuster.kHoldoutGate）——
             // 也就是「這次掃描的 BA 確實讓沒參與求解的 track 也變準了」。
             if !ba.poses.isEmpty && config.baApplyPoses {
@@ -439,19 +531,14 @@ final class CaptureController: NSObject, ObservableObject {
                   + "、\(demoted) 幀（顏色糊，不進訓練但深度仍以降權併入點雲）")
         }
 
-        // 平面圖**不擋 review**。
-        //
-        // 實測 RoomPlan 從 stop() 到 didEndWith 要 8 秒以上（它自己的最終優化），
-        // 而重融合只花 1 秒。先前把兩者並行仍然要等較慢的那個 ——
-        // 使用者按下停止後乾等 8 秒才看到點雲，而平面圖其實只有
-        // 「review 按平面圖」和「匯出」兩個時機才需要。
-        // 改成背景建，好了再更新 @Published；review 的平面圖按鈕本來就綁 floorPlanData != nil，
-        // 所以它會自己出現。
+        // RoomPlan 建模可繼續在背景進行，但其回呼只能更新同一輪掃描。
         mark("模糊複核")
-        if config.captureFloorPlan, FloorPlanCapture.isSupported {
+        if hasLiDAR, config.captureFloorPlan, FloorPlanCapture.isSupported {
+            let generation = scanGeneration
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 let fp = await self.floorPlan.build()
+                guard self.isAttached, self.scanGeneration == generation else { return }
                 if let fp, !fp.walls.isEmpty {
                     self.floorPlanData = fp
                     self.logFloorPlan(fp)
@@ -485,7 +572,7 @@ final class CaptureController: NSObject, ObservableObject {
                                       progress: onProg)
             }.value
             // 平面圖吃高密度那一份；它只留下 floorPlanData（很小），dense 隨即釋放。
-            if !cfg.captureFloorPlan || !FloorPlanCapture.isSupported {
+            if !hasLiDAR || !cfg.captureFloorPlan || !FloorPlanCapture.isSupported {
                 usePointCloudPlan(dense)
             }
             points = dense.count > cfg.exportMaxPoints
@@ -494,14 +581,14 @@ final class CaptureController: NSObject, ObservableObject {
                 : dense
         }
         if points.isEmpty {                          // 無 LiDAR / 無深度時退回即時累積雲
-            points = await accumulator.bestPoints(target: config.exportMaxPoints)
+            points = await accumulator.bestPoints(target: config.exportMaxPoints,
+                                                   anchorTransforms: latestTileTransforms)
         }
         mark("重融合")
 
-        // 逐段列出，而且總計就是「按下停止到看到 review」的牆鐘時間 ——
-        // 這樣下次要優化才知道該動哪一段，不必再猜。
+        // 後處理時間不含最後等待世界地圖存檔與 RoomPlan 原始片段的時間。
         let total = seg.reduce(0) { $0 + $1.1 }
-        print(String(format: "處理耗時: 總計 %.2fs（按下停止 → review）= ", total)
+        print(String(format: "點雲處理耗時: %.2fs = ", total)
               + seg.map { String(format: "%@ %.2fs", $0.0, $0.1) }.joined(separator: " + ")
               + "（世界地圖與平面圖在背景，不計入）")
 
@@ -512,11 +599,15 @@ final class CaptureController: NSObject, ObservableObject {
         // 有 LiDAR 的路徑上這已經在融合那一段用高密度點雲算完了（見上），
         // 所以這裡只補「沒有深度、退回即時累積雲」那條路。
         if floorPlanData == nil,
-           !config.captureFloorPlan || !FloorPlanCapture.isSupported { usePointCloudPlan() }
+           !hasLiDAR || !config.captureFloorPlan || !FloorPlanCapture.isSupported { usePointCloudPlan() }
         reviewTrajectory = refinedRecords.map { RefusionEngine.float4x4(rowMajor: $0.transform) }
         pointCount = points.count
+        do {
+            try await ScanLibrary.shared.saveReview(directory: dir, points: points, records: refinedRecords)
+        } catch {
+            scanNotice = "掃描原始資料已保留，但歷史點雲預覽儲存失敗：\(error.localizedDescription)"
+        }
         statusText = corrected > 0 ? "姿態已修正 \(corrected) 幀（ARKit 地圖優化）" : nil
-        phase = .review
     }
 
     /// review 通過（或訓練完成）→ 寫 COLMAP sparse + PLY + 修正後姿態 + zip。
@@ -524,65 +615,67 @@ final class CaptureController: NSObject, ObservableObject {
     func exportAndShare() {
         guard phase == .review || (phase == .training && trainingComplete),
               let dir = sessionDir else { return }
+        guard canUseScan else {
+            statusText = "尚無可用影像，請繼續掃描後再匯出"
+            return
+        }
+        let returnPhase = phase
         phase = .exporting
-        statusText = "打包中…"
-        // 訓練/匯出只吃 .keep：.drop 幾何不可信、.demote 顏色糊，兩者都不該當訓練影像。
-        // （能走到這裡的 .demote 都是「鄰居夠多」才被判的，排除它不會少掉任何視角。）
+        exportedZip = nil
+        statusText = "正在整理影像與點雲…"
+        UIApplication.shared.isIdleTimerDisabled = true
         let records = refinedRecords.filter { $0.blurVerdict == .keep }
         let points = reviewPoints
+        let flipWorldUp = config.flipWorldUpForExport
         Task {
-            _ = await writer?.finish()
+            defer { UIApplication.shared.isIdleTimerDisabled = false }
             do {
-                try ExportManager.writeColmapSparse(records: records, points: points, to: dir,
-                                                    flipWorldUp: config.flipWorldUpForExport)
-                if !points.isEmpty {
-                    // points.ply 保留 ARKit 原生 +Y up（與 poses.jsonl 一致，供 validate/檢視）；
-                    // 訓練用點雲以 sparse/0/points3D.bin 為準（已對齊 COLMAP 慣例）
-                    try ExportManager.writePLY(points, to: dir.appendingPathComponent("points.ply"))
-                }
-                try ExportManager.writeRefinedPoses(records,
-                                                    to: dir.appendingPathComponent("poses_refined.jsonl"))
-                await writeFloorPlan(to: dir)
+                try await Task.detached(priority: .userInitiated) {
+                    try ExportManager.writeColmapSparse(records: records, points: points, to: dir,
+                                                        flipWorldUp: flipWorldUp)
+                    if !points.isEmpty {
+                        try ExportManager.writePLY(points, to: dir.appendingPathComponent("points.ply"))
+                    }
+                    try ExportManager.writeRefinedPoses(records,
+                        to: dir.appendingPathComponent("poses_refined.jsonl"))
+                }.value
+                try await writeFloorPlan(to: dir)
+                statusText = "正在壓縮檔案，完成後即可分享…"
+                let zip = try await Task.detached(priority: .userInitiated) {
+                    try ExportManager.makeArchive(of: dir)
+                }.value
+                _ = await writer?.finish()
+                exportedZip = zip
+                statusText = "已完成：\(records.count) 張影像・\(points.count) 個點"
+                phase = .done
+                writer = nil
+                accumulator = nil
             } catch {
-                statusText = "匯出 COLMAP 資料失敗：\(error.localizedDescription)"
+                // 保留 writer 與驗收資料，允許重試及續掃；失敗不能顯示完成。
+                statusText = "匯出失敗：\(error.localizedDescription)。資料已保留，可重新匯出。"
+                phase = returnPhase
             }
-
-            let zipURL = dir.deletingLastPathComponent()
-                .appendingPathComponent(dir.lastPathComponent + ".zip")
-            let zipOK: Bool = await Task.detached(priority: .userInitiated) {
-                do {
-                    try ExportManager.zipDirectory(dir, to: zipURL)
-                    return true
-                } catch {
-                    print("[Export] zip 失敗: \(error)")
-                    return false
-                }
-            }.value
-
-            exportedZip = zipOK ? zipURL : nil
-            statusText = zipOK
-                ? "完成：\(records.count) 幀 / \(points.count) 點（COLMAP 格式，可直接訓練）"
-                : "壓縮失敗；原始資料保留在「檔案 App → fable → scans」"
-            phase = .done
-            writer = nil
-            accumulator = nil
         }
     }
 
     /// review 發現破洞 → 回到掃描續拍（不 reset：保留地圖與錨點，ARKit 自動重新定位）
     func resumeScan() {
-        guard phase == .review, let arView else { return }
+        guard phase == .review, arView != nil, writer != nil, !isInBackground else { return }
+        if case .failed = sessionState {
+            statusText = "相機追蹤已失效。請先匯出目前資料，再開始新掃描。"
+            return
+        }
+        scanGeneration = UUID()
+        scanNotice = nil
         reviewPoints = []
         reviewTrajectory = []
-        arView.session.run(makeARConfig(), options: [])
-        if lockCameraParams { applyCameraLocks() }
+        floorPlanData = nil
+        resumeTracking()
         // 刻意不 reset：續掃的這一段會成為「另一個房間」，最後由 StructureBuilder 合併成整層。
         // 一間一間掃再合併的精度也優於一鏡到底（一鏡到底會在門口累積漂移）。
         startFloorPlan(fresh: false)
-        monitor.start()
-        shutter.reset()
         phase = .scanning
-        statusText = "重新定位中：回到剛才的位置附近即可繼續"
+        statusText = nil
         UIApplication.shared.isIdleTimerDisabled = true
     }
 
@@ -593,7 +686,7 @@ final class CaptureController: NSObject, ObservableObject {
     /// 訓練完成後 session 保留 → 可拖曳環繞檢視訓練結果。
     func startTraining() {
         guard phase == .review || (phase == .training && trainingComplete),
-              let dir = sessionDir, !refinedRecords.isEmpty else { return }
+              let dir = sessionDir, canTrain else { return }
         session?.close()                 // 重訓：先關舊 session
         phase = .training
         trainingComplete = false
@@ -604,6 +697,10 @@ final class CaptureController: NSObject, ObservableObject {
         statusText = "準備訓練資料…"
         UIApplication.shared.isIdleTimerDisabled = true
 
+        let generation = UUID()
+        trainingGeneration = generation
+        orbitInFlight = false
+        orbitPending = false
         let cancel = CancelFlag()
         trainingCancel = cancel
         let records = refinedRecords.filter { $0.blurVerdict == .keep }
@@ -617,13 +714,22 @@ final class CaptureController: NSObject, ObservableObject {
 
         // 回呼在 MainActor 層定義、各自弱捕獲 self（避免巢狀 Task 的「捕獲 var self」問題）
         let onProgress: @Sendable (MsplatSession.Progress) -> Void = { p in
-            Task { @MainActor [weak self] in self?.applyTrainingProgress(p) }
+            Task { @MainActor [weak self] in
+                guard let self, self.isAttached, self.trainingGeneration == generation else { return }
+                self.applyTrainingProgress(p)
+            }
         }
         let onError: @Sendable (Error) -> Void = { e in
-            Task { @MainActor [weak self] in self?.failTraining(e) }
+            Task { @MainActor [weak self] in
+                guard let self, self.isAttached, self.trainingGeneration == generation else { return }
+                self.failTraining(e)
+            }
         }
         let onDone: @Sendable (Bool) -> Void = { c in
-            Task { @MainActor [weak self] in self?.finishTraining(ply: plyURL, cancelled: c) }
+            Task { @MainActor [weak self] in
+                guard let self, self.isAttached, self.trainingGeneration == generation else { return }
+                self.finishTraining(ply: plyURL, cancelled: c)
+            }
         }
         let thermalPaused: @Sendable () -> Bool = {
             cfg.trainThermalThrottle &&
@@ -640,6 +746,8 @@ final class CaptureController: NSObject, ObservableObject {
             } catch {
                 onError(error); return
             }
+            guard !Task.isCancelled else { return }
+            if cancel.isCancelled { onDone(true); return }
             newSession.start(
                 colmapDir: dir.path, metallib: metallib,
                 iterations: cfg.trainIterations, shDegree: cfg.trainSHDegree,
@@ -661,7 +769,8 @@ final class CaptureController: NSObject, ObservableObject {
 
     /// 訓練完成後返回 review（點雲檢視）；zip 匯出已含 gaussians.ply
     func backToReviewFromTraining() {
-        guard phase == .training else { return }
+        guard phase == .training, trainingComplete else { return }
+        trainingGeneration = UUID()
         session?.close(); session = nil
         trainingComplete = false
         trainingPreview = nil
@@ -694,9 +803,11 @@ final class CaptureController: NSObject, ObservableObject {
         guard let session, phase == .training, trainingComplete else { return }
         if orbitInFlight { orbitPending = true; return }
         orbitInFlight = true
+        let generation = trainingGeneration
         session.renderView { img in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, self.isAttached, self.trainingGeneration == generation,
+                      self.phase == .training else { return }
                 if let img { self.setPreviewImage(img) }
                 self.orbitInFlight = false
                 if self.orbitPending { self.orbitPending = false; self.requestOrbitRender() }
@@ -719,17 +830,27 @@ final class CaptureController: NSObject, ObservableObject {
     }
 
     private func finishTraining(ply: URL, cancelled: Bool) {
+        guard phase == .training else { return }
         UIApplication.shared.isIdleTimerDisabled = false
+        if cancelled, trainingIteration == 0 {
+            session?.close(); session = nil
+            trainingComplete = false
+            phase = .review
+            statusText = "已取消建立模型，掃描資料仍保留"
+            return
+        }
         trainedPLY = FileManager.default.fileExists(atPath: ply.path) ? ply : nil
         trainingComplete = true
-        trainingIteration = trainingTotal
+        if !cancelled { trainingIteration = trainingTotal }
         statusText = cancelled
             ? "已停止：\(trainingSplatCount / 1000)k splats — 拖曳可轉動檢視、亦可匯出"
             : "訓練完成：\(trainingSplatCount / 1000)k splats — 拖曳可轉動檢視"
         session?.resetView()
+        let generation = trainingGeneration
         session?.renderView { img in   // 初始 trackball 視角（直立、直式、框住物件）
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, self.isAttached, self.trainingGeneration == generation,
+                      self.phase == .training else { return }
                 if let img { self.setPreviewImage(img) }
             }
         }
@@ -745,7 +866,7 @@ final class CaptureController: NSObject, ObservableObject {
 
     /// 捨棄本次掃描：刪除資料、全新開始
     func discardScan() {
-        guard phase == .review || phase == .done || phase == .training else { return }
+        guard phase == .review || phase == .done || (phase == .training && trainingComplete) else { return }
         trainingCancel.cancel()
         session?.close(); session = nil
         if let dir = sessionDir { try? FileManager.default.removeItem(at: dir) }
@@ -780,8 +901,28 @@ final class CaptureController: NSObject, ObservableObject {
     }
 
     private func cleanupToIdle() {
+        scanGeneration = UUID()
+        trainingGeneration = UUID()
+        trainingTask?.cancel()
+        needsSessionResume = false
         exportedZip = nil
         statusText = nil
+        scanNotice = nil
+        floorPlanData = nil
+        showFloorPlan = false
+        fusionCompleteness = 0
+        scanSummary = nil
+        loopHint = nil
+        floorPlanHint = nil
+        recentRejectCount = 0
+        recentRejects = []
+        frameCounter = 0
+        lastPreviewFrame = -1
+        lastSparseIntegration = 0
+        pixelBufferPool = nil
+        sessionDir = nil
+        writer = nil
+        accumulator = nil
         keyframeCount = 0
         pointCount = 0
         exportProgress = 0
@@ -821,7 +962,7 @@ final class CaptureController: NSObject, ObservableObject {
     /// 注意：ARGeometrySource 的頂點是 packed float3（stride 12B），
     /// 不可直接 bind 成 SIMD3<Float>（Swift 的 SIMD3<Float> 佔 16B）—— 必須逐分量讀。
     private func snapshotMeshVertices() -> [SIMD3<Float>] {
-        guard config.useSceneMesh,
+        guard hasLiDAR, config.useSceneMesh,
               let anchors = arView?.session.currentFrame?.anchors else { return [] }
         var out: [SIMD3<Float>] = []
         for case let mesh as ARMeshAnchor in anchors {
@@ -843,7 +984,7 @@ final class CaptureController: NSObject, ObservableObject {
     private func beginSessionStorage() throws {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd_HHmmss"
-        let stamp = formatter.string(from: Date())
+        let stamp = formatter.string(from: Date()) + "_" + UUID().uuidString.prefix(6)
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let dir = docs.appendingPathComponent("scans/scan_\(stamp)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -860,7 +1001,8 @@ final class CaptureController: NSObject, ObservableObject {
                                osVersion: UIDevice.current.systemVersion,
                                startedAt: ISO8601DateFormatter().string(from: Date()),
                                mode: "scene",   // 物件模式已移除；欄位保留給既有資料集相容
-                               lidarAvailable: hasLiDAR)
+                               lidarAvailable: supportsLiDAR,
+                               lidarEnabled: hasLiDAR)
         try ExportManager.writeMeta(meta, to: dir.appendingPathComponent("meta.json"))
     }
 
@@ -903,7 +1045,7 @@ final class CaptureController: NSObject, ObservableObject {
     ///   floorplan.svg  — 直接看得到的俯視平面圖（含 1m 網格、牆長標註、比例尺）
     /// 座標維持 ARKit 原生（+Y up、公尺），與 points.ply / poses.jsonl 一致；
     /// 匯出 COLMAP 用的世界翻轉**不**套用在這裡 —— 那是 3DGS 生態的慣例，平面圖不需要。
-    private func writeFloorPlan(to dir: URL) async {
+    private func writeFloorPlan(to dir: URL) async throws {
         // ── 點雲平面圖：不需要 RoomPlan，只要有掃到表面 ──
         //
         // 為什麼要有兩套：RoomPlan 是**房間**掃描器，它要有地板、成面的牆、
@@ -915,14 +1057,14 @@ final class CaptureController: NSObject, ObservableObject {
         // 這裡不重算；只有它還空著（例如匯出比 review 早）才補一次。
         if floorPlanData == nil { usePointCloudPlan() }
 
-        if config.captureFloorPlan, FloorPlanCapture.isSupported {
+        if hasLiDAR, config.captureFloorPlan, FloorPlanCapture.isSupported {
             // 平面圖是背景建的（見 processScan），匯出時若還沒好就在這裡等 ——
             // 匯出是使用者明確要求的動作，少一個檔比多等幾秒糟。
             if floorPlanData == nil { floorPlanData = await floorPlan.build() }
             await floorPlan.exportUSDZ(to: dir.appendingPathComponent("floorplan.usdz"))
         }
         guard let fp = floorPlanData else { return }
-        writePlan(fp, to: dir, prefix: "floorplan")
+        try writePlan(fp, to: dir, prefix: "floorplan")
     }
 
     /// 由已融合的點雲算出平面圖並填進 floorPlanData。
@@ -948,20 +1090,16 @@ final class CaptureController: NSObject, ObservableObject {
     ///   .json — 參數化資料 ＋ 已投影到水平面的 2D 線段，給程式化後處理用
     ///   .svg  — 直接看得到的俯視平面圖（含 1m 網格、牆長標註、比例尺）
     ///   .dxf  — 帶圖層的 CAD 圖元，AutoCAD / QCAD / Rhino 直接開，可量可續繪
-    private func writePlan(_ fp: FloorPlanData, to dir: URL, prefix: String) {
-        do {
-            let enc = JSONEncoder()
-            enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try enc.encode(fp).write(to: dir.appendingPathComponent("\(prefix).json"),
-                                     options: [.atomic])
-            let svg = fp.svg(showAllFurniture: showPlanFurniture)
-            try Data(svg.utf8).write(to: dir.appendingPathComponent("\(prefix).svg"),
-                                     options: [.atomic])
-            try Data(FloorPlanDXF.make(fp).utf8)
-                .write(to: dir.appendingPathComponent("\(prefix).dxf"), options: [.atomic])
-        } catch {
-            print("[FloorPlan] 寫檔失敗（\(prefix)）: \(error)")
-        }
+    private func writePlan(_ fp: FloorPlanData, to dir: URL, prefix: String) throws {
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try enc.encode(fp).write(to: dir.appendingPathComponent("\(prefix).json"),
+                                 options: [.atomic])
+        let svg = fp.svg(showAllFurniture: showPlanFurniture)
+        try Data(svg.utf8).write(to: dir.appendingPathComponent("\(prefix).svg"),
+                                 options: [.atomic])
+        try Data(FloorPlanDXF.make(fp).utf8)
+            .write(to: dir.appendingPathComponent("\(prefix).dxf"), options: [.atomic])
     }
 
     /// 取出 ARKit 當下的地圖並存檔。必須在 session 還活著時呼叫。
@@ -969,7 +1107,7 @@ final class CaptureController: NSObject, ObservableObject {
     /// 帶著它下次會一直重定位失敗。
     /// 非 Sendable 的 ARKit 物件單向交給背景。交出後 main 這邊不再碰它，
     /// 所以沒有共享可變狀態（與 Keyframe 的 pixelBuffer 同一個理由）。
-    private struct MapBox: @unchecked Sendable { let map: ARWorldMap }
+    nonisolated private struct MapBox: @unchecked Sendable { let map: ARWorldMap }
 
     /// 從**活著的** session 取出當下地圖。只有這一步需要 session，所以取完就能 pause。
     private func captureWorldMap() async -> MapBox? {
@@ -1095,7 +1233,7 @@ final class CaptureController: NSObject, ObservableObject {
 
     /// 開始一段平面圖擷取。fresh = 全新掃描（清空累積）；否則累積成另一個房間。
     private func startFloorPlan(fresh: Bool) {
-        guard config.captureFloorPlan, FloorPlanCapture.isSupported,
+        guard hasLiDAR, config.captureFloorPlan, FloorPlanCapture.isSupported,
               let session = arView?.session else { return }
         if fresh {
             floorPlan.reset()
@@ -1122,21 +1260,31 @@ final class CaptureController: NSObject, ObservableObject {
 extension CaptureController: @preconcurrency ARSessionDelegate {
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        guard isAttached, !isInBackground, phase == .idle || phase == .scanning else { return }
+        if case .failed = sessionState { return }
         frameCounter += 1
 
         let a = monitor.assess(frame: frame, config: config)
         // UI 每 6 幀（~0.1s）更新一次即可，避免 60Hz 重繪
         if frameCounter % 6 == 0 { assessment = a }
-        if !trackingReady, case .normal = frame.camera.trackingState { trackingReady = true }
-        // 重定位狀態：帶入舊地圖後 ARKit 會處於 relocalizing，此時姿態不可信
-        if case .limited(.relocalizing) = frame.camera.trackingState {
-            if !relocalizing { relocalizing = true }
-        } else if relocalizing {
-            relocalizing = false
-            if continueFromLastMap { statusText = "已接上上次的座標系" }
+        let nextState: CaptureSessionState
+        switch frame.camera.trackingState {
+        case .normal:
+            let stable = trackingStability.accepts(isNormal: true, timestamp: frame.timestamp)
+            nextState = stable ? .ready : (sessionState == .relocalizing ? .relocalizing : .initializing)
+        case .limited(.relocalizing): nextState = .relocalizing
+        case .limited(.initializing): nextState = .initializing
+        default: nextState = .limited
         }
-
+        if case .normal = frame.camera.trackingState { } else { trackingStability.reset() }
+        if sessionState != nextState { sessionState = nextState }
         guard phase == .scanning else { return }
+        if ProcessInfo.processInfo.thermalState == .critical {
+            scanNotice = "裝置過熱，已停止掃描並保留資料。請等手機降溫後再繼續。"
+            stopScan()
+            return
+        }
+        guard sessionState.canCapture else { return }
 
         // 遮斷級警告觸覺回饋（限流 1 次 / 1.5 秒）
         if a.captureBlocked, frame.timestamp - lastWarningHaptic > 1.5 {
@@ -1148,13 +1296,6 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
         // 掉幀率：只留近 4 秒。連續掉幀代表使用者正在流失資料而不自知
         recentRejects.removeAll { frame.timestamp - $0 > 4 }
         if recentRejectCount != recentRejects.count { recentRejectCount = recentRejects.count }
-
-        // 過熱保護：critical 直接停拍並保住已拍資料
-        if ProcessInfo.processInfo.thermalState == .critical {
-            statusText = "裝置過熱，已自動停止並匯出"
-            stopScan()
-            return
-        }
 
         // ARKit 修正了磚錨點（漂移校正/重定位）→ 更新快照並讓點雲磚跟著實體表面移動（防殘影）
         if !tileKeyByAnchor.isEmpty {
@@ -1240,7 +1381,7 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
                   let packet = PointExtractor.makePacket(frame: frame, pool: pool,
                                                          blurPixels: blurPixels) else { return }
             previewInFlight = true
-            Task {
+            previewTask = Task {
                 await accumulator.integrate(packet, anchorTransforms: anchorSnapshot)
                 await self.flushTiles()
                 self.previewInFlight = false
@@ -1251,7 +1392,7 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
             let points = featurePoints.points
             let camPos = MatrixUtil.position(frame.camera.transform)
             previewInFlight = true
-            Task {
+            previewTask = Task {
                 await accumulator.integrateSparse(points: points, anchorTransforms: anchorSnapshot,
                                                   cameraPosition: camPos)
                 await self.flushTiles()
@@ -1287,8 +1428,27 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
         fusionCompleteness = await accumulator.fusionCompleteness
     }
 
+    func sessionWasInterrupted(_ session: ARSession) {
+        trackingStability.reset()
+        guard phase == .idle || phase == .scanning else { return }
+        sessionState = .interrupted
+    }
+
+    func sessionInterruptionEnded(_ session: ARSession) {
+        guard isAttached, !isInBackground, phase == .idle || phase == .scanning else { return }
+        sessionState = .relocalizing
+        monitor.start()
+        shutter.reset()
+    }
+
+    func sessionShouldAttemptRelocalization(_ session: ARSession) -> Bool { true }
+
     func session(_ session: ARSession, didFailWithError error: Error) {
-        statusText = "AR Session 失敗：\(error.localizedDescription)"
+        sessionState = .failed(error.localizedDescription)
+        if phase == .scanning {
+            scanNotice = "相機追蹤中斷，已停止掃描並保留資料。匯出後請開始新掃描。"
+            stopScan()
+        }
     }
 
     private func captureKeyframe(_ frame: ARFrame, assessment a: QualityAssessment) {
@@ -1306,7 +1466,7 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
         var depthData: Data?
         var confData: Data?
         var dw = 0, dh = 0
-        if config.saveDepth, let sceneDepth = frame.sceneDepth {
+        if hasLiDAR, config.saveDepth, let sceneDepth = frame.sceneDepth {
             dw = CVPixelBufferGetWidth(sceneDepth.depthMap)
             dh = CVPixelBufferGetHeight(sceneDepth.depthMap)
             depthData = PixelBufferUtil.tightData(sceneDepth.depthMap, bytesPerPixel: 4)
@@ -1353,9 +1513,6 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
         }
 
         pendingWrites += 1
-        keyframeCount = frameIndex
-        visualizer?.addKeyframe(pose: camera.transform)
-        captureHaptic.impactOccurred(intensity: 0.6)
 
         // 點雲融合已由 integratePreview() 連續進行，關鍵幀只負責存檔
         guard let writer else {
@@ -1364,12 +1521,28 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
         }
         let cfg = config
         let tracker = featureTracker
-        Task {
-            await writer.write(keyframe)
-            self.pendingWrites -= 1
+        writeTasks[record.id] = Task {
+            defer {
+                pendingWrites -= 1
+                writeTasks[record.id] = nil
+            }
+            do {
+                try await writer.write(keyframe)
+                keyframeCount += 1
+                visualizer?.addKeyframe(pose: keyframe.c2w)
+                if phase == .scanning { captureHaptic.impactOccurred(intensity: 0.6) }
+            } catch {
+                if let id = keyframeAnchors.removeValue(forKey: record.id),
+                   let anchor = arView?.session.currentFrame?.anchors.first(where: { $0.identifier == id }) {
+                    arView?.session.remove(anchor: anchor)
+                }
+                scanNotice = "影像儲存失敗：\(error.localizedDescription)。已停止掃描，先前成功儲存的資料仍保留。"
+                stopScan()
+                return
+            }
             // 特徵抽取放在寫檔之後：兩者共用同一份 clone 的 pixel buffer
-            //（CVPixelBuffer 是 refcounted，兩個 actor 各自持有沒問題），
-            // 而寫檔先做可以早一點釋放背壓（pendingWrites）。
+            //（CVPixelBuffer 是 refcounted，兩個 actor 各自持有沒問題）。
+            // 背壓涵蓋特徵抽取，停止時也會等這份工作完成。
             guard cfg.baRounds > 0, let dData = keyframe.depthData, dw > 0, dh > 0 else { return }
             let confArr = keyframe.confidenceData.map { [UInt8]($0) }
             await tracker.add(frameID: record.id, luma: keyframe.pixelBuffer,

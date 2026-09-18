@@ -67,6 +67,8 @@ nonisolated struct SessionMeta: Codable, Sendable {
     var imageOrientation = "sensor_landscape_right"
     var depthFormat = "float32_raw_little_endian"
     var lidarAvailable: Bool
+    /// 硬體能力與這次是否啟用分開；nil 為舊版紀錄（依 lidarAvailable 判定）。
+    var lidarEnabled: Bool? = nil
 }
 
 /// 掃描結束後的品質摘要。

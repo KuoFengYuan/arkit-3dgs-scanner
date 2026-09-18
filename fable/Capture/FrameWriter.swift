@@ -51,47 +51,53 @@ actor FrameWriter {
         encoder = enc
     }
 
-    func write(_ kf: Keyframe) {
-        var record = kf.record
-        do {
-            // JPEG 編碼（sensor 原始方向，與 intrinsics / transform 自洽）
-            let src = CIImage(cvPixelBuffer: kf.pixelBuffer)
-            var ci = src
-            if let level = noiseLevel(forISO: record.iso) {
-                // inputSharpness 刻意壓在 0.2（Apple 預設 0.4）：降噪後的再銳化會沿邊緣造光暈，
-                // 那是憑空生出來、且各幀不一致的高頻 —— 3DGS 會試圖用高斯去解釋它。
-                ci = src.applyingFilter("CINoiseReduction",
-                                        parameters: ["inputNoiseLevel": level,
-                                                     "inputSharpness": 0.2])
-                        .cropped(to: src.extent)
+    enum WriteError: LocalizedError {
+        case closed, jpegEncoding
+        var errorDescription: String? {
+            switch self {
+            case .closed: return "掃描檔案已關閉"
+            case .jpegEncoding: return "無法編碼影像"
             }
-            let qualityKey = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
-            guard let jpeg = ciContext.jpegRepresentation(of: ci, colorSpace: colorSpace,
-                                                          options: [qualityKey: jpegQuality]) else {
-                print("[FrameWriter] JPEG 編碼失敗 frame \(record.id)")
-                return
-            }
-            try jpeg.write(to: imagesDir.appendingPathComponent(record.imageFile), options: [.atomic])
-
-            // 深度 / 信心圖（raw little-endian，Python 端 np.fromfile 直接讀）
-            if let depthDir, let depthData = kf.depthData, let depthName = record.depthFile {
-                try depthData.write(to: depthDir.appendingPathComponent(depthName))
-                if let confData = kf.confidenceData, let confName = record.confidenceFile {
-                    try confData.write(to: depthDir.appendingPathComponent(confName))
-                }
-            } else {
-                record.depthFile = nil
-                record.confidenceFile = nil
-            }
-
-            // poses.jsonl：一幀一行，即寫即 flush 到 handle（中途 crash 也不丟已拍資料）
-            let line = try encoder.encode(record)
-            try posesHandle?.write(contentsOf: line)
-            try posesHandle?.write(contentsOf: Data([0x0A]))
-            records.append(record)
-        } catch {
-            print("[FrameWriter] 寫入失敗 frame \(record.id): \(error)")
         }
+    }
+
+    func write(_ kf: Keyframe) throws {
+        guard let posesHandle else { throw WriteError.closed }
+        var record = kf.record
+        // JPEG 編碼（sensor 原始方向，與 intrinsics / transform 自洽）
+        let src = CIImage(cvPixelBuffer: kf.pixelBuffer)
+        var ci = src
+        if let level = noiseLevel(forISO: record.iso) {
+            // inputSharpness 刻意壓在 0.2（Apple 預設 0.4）：降噪後的再銳化會沿邊緣造光暈，
+            // 那是憑空生出來、且各幀不一致的高頻 —— 3DGS 會試圖用高斯去解釋它。
+            ci = src.applyingFilter("CINoiseReduction",
+                                    parameters: ["inputNoiseLevel": level,
+                                                 "inputSharpness": 0.2])
+                    .cropped(to: src.extent)
+        }
+        let qualityKey = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
+        guard let jpeg = ciContext.jpegRepresentation(of: ci, colorSpace: colorSpace,
+                                                      options: [qualityKey: jpegQuality]) else {
+            throw WriteError.jpegEncoding
+        }
+        try jpeg.write(to: imagesDir.appendingPathComponent(record.imageFile), options: [.atomic])
+
+        // 深度 / 信心圖（raw little-endian，Python 端 np.fromfile 直接讀）
+        if let depthDir, let depthData = kf.depthData, let depthName = record.depthFile {
+            try depthData.write(to: depthDir.appendingPathComponent(depthName))
+            if let confData = kf.confidenceData, let confName = record.confidenceFile {
+                try confData.write(to: depthDir.appendingPathComponent(confName))
+            }
+        } else {
+            record.depthFile = nil
+            record.confidenceFile = nil
+        }
+
+        // poses.jsonl：一幀一行，即寫即 flush 到 handle（中途 crash 也不丟已拍資料）
+        var line = try encoder.encode(record)
+        line.append(0x0A)
+        try posesHandle.write(contentsOf: line)
+        records.append(record)
     }
 
     /// ISO → 降噪強度。門檻以下回 nil（完全不套濾鏡，連 GPU pass 都省）。

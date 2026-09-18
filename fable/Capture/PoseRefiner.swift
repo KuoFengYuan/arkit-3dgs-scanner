@@ -57,15 +57,13 @@ nonisolated enum PoseRefiner {
     /// 而不是真的差這麼多 —— 夾住比信任它安全。
     static let kMaxTransM: Float = 0.05
     static let kMaxRotRad: Float = 0.02        // ≈1.15°
-    /// 小角度旋轉（繞 about 點）＋平移 → 4×4 世界變換。
-    /// 用 Rodrigues 的一階近似即可 —— 這裡的角度上限是 1.15°，二階項可忽略。
+    /// 真正的 SO(3) 旋轉；一階近似反覆相乘會引入縮放，破壞剛體外參。
     static func deltaTransform(omega: SIMD3<Float>, trans: SIMD3<Float>,
                                about c: SIMD3<Float>) -> simd_float4x4 {
-        // R ≈ I + [ω]×
-        let r0 = SIMD3<Float>(1, omega.z, -omega.y)          // 第 0 欄
-        let r1 = SIMD3<Float>(-omega.z, 1, omega.x)          // 第 1 欄
-        let r2 = SIMD3<Float>(omega.y, -omega.x, 1)          // 第 2 欄
-        let R = simd_float3x3(r0, r1, r2)
+        let angle = simd_length(omega)
+        let R = angle > 1e-8
+            ? simd_float3x3(simd_quatf(angle: angle, axis: omega / angle))
+            : matrix_identity_float3x3
         let t = c + trans - R * c
         return simd_float4x4(SIMD4<Float>(R[0], 0), SIMD4<Float>(R[1], 0),
                              SIMD4<Float>(R[2], 0), SIMD4<Float>(t, 1))

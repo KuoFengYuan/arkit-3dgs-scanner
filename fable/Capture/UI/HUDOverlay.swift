@@ -9,6 +9,9 @@ struct HUDOverlay: View {
     @ObservedObject var controller: CaptureController
     @Environment(\.dismiss) private var dismiss
     @State private var showDiscardConfirm = false
+    @State private var showExitConfirm = false
+    @State private var showAdvanced = false
+    @Environment(\.openURL) private var openURL
     /// 品質摘要是否展開（預設收合，見 scanSummaryCard）
     @State private var summaryExpanded = false
 
@@ -17,13 +20,15 @@ struct HUDOverlay: View {
             severeGlow
             VStack(spacing: 10) {
                 header
+                phaseIndicator
                 guidanceBanner
                 fusionLegend
                 speedGauge
-                HStack {
-                    Spacer()
-                    CameraControlBar(controls: controller.cameraControls,
-                                     enabled: controller.phase == .idle)
+                if controller.phase == .idle && controller.trackingReady && showAdvanced {
+                    HStack {
+                        Spacer()
+                        CameraControlBar(controls: controller.cameraControls, enabled: true)
+                    }
                 }
                 Spacer()
                 statusLine
@@ -31,12 +36,72 @@ struct HUDOverlay: View {
             }
             .padding()
         }
+        .confirmationDialog("離開掃描檢視？", isPresented: $showExitConfirm, titleVisibility: .visible) {
+            Button("離開並保留檔案") { dismiss() }
+            Button("留在這裡", role: .cancel) {}
+        } message: {
+            Text("掃描會保留在首頁的「掃描紀錄」，之後可預覽、分享或刪除。離開後無法接續這次即時掃描。")
+        }
+        .onChange(of: controller.phase) { _, _ in
+            showAdvanced = false
+            summaryExpanded = false
+        }
         .animation(.easeInOut(duration: 0.25), value: controller.assessment.worst)
         .animation(.easeInOut(duration: 0.25), value: controller.phase)
         .animation(.easeInOut(duration: 0.25), value: controller.loopHint)
         .animation(.easeInOut(duration: 0.25), value: controller.floorPlanHint)
         .animation(.easeInOut(duration: 0.25), value: controller.recentRejectCount >= 4)
         .animation(.easeInOut(duration: 0.25), value: controller.relocalizing)
+    }
+
+    private var phaseIndicator: some View {
+        Label(phaseTitle, systemImage: phaseSymbol)
+            .font(.subheadline.weight(.semibold))
+            .hudText()
+            .padding(.horizontal, 14).padding(.vertical, 8)
+            .hudGlass(Capsule())
+            .allowsHitTesting(false)
+    }
+
+    private var phaseTitle: String {
+        switch controller.phase {
+        case .idle: return controller.trackingReady ? "準備就緒" : "準備相機"
+        case .scanning: return controller.trackingReady ? "正在掃描" : "等待追蹤恢復"
+        case .processing: return "正在整理掃描"
+        case .review: return "檢查掃描成果"
+        case .training: return controller.trainingComplete ? "3D 模型已完成" : "正在建立 3D 模型"
+        case .exporting: return "正在匯出"
+        case .done: return "檔案已準備好"
+        }
+    }
+
+    private var phaseSymbol: String {
+        switch controller.phase {
+        case .idle: return "viewfinder"
+        case .scanning: return controller.trackingReady ? "record.circle" : "pause.circle"
+        case .processing, .exporting: return "hourglass"
+        case .review: return "cube.transparent"
+        case .training: return "sparkles"
+        case .done: return "checkmark.circle"
+        }
+    }
+
+    @ViewBuilder
+    private var sessionRecoveryControls: some View {
+        switch controller.sessionState {
+        case .permissionDenied:
+            Button("開啟相機設定") {
+                if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+            }
+            .buttonStyle(.borderedProminent)
+        case .failed:
+            Button("重新啟動相機") { controller.prepareCamera() }
+                .buttonStyle(.borderedProminent)
+        case .relocalizing where controller.continueFromLastMap:
+            Button("改為全新掃描") { controller.setContinueFromLastMap(false) }
+                .buttonStyle(.borderedProminent)
+        default: EmptyView()
+        }
     }
 
     // MARK: - 全螢幕紅框：遮斷級警告（暫停抓幀中）的強視覺提示
@@ -73,6 +138,10 @@ struct HUDOverlay: View {
     }
 
     private var guidance: Guidance? {
+        if controller.phase == .scanning && !controller.trackingReady {
+            return Guidance(text: controller.sessionState.message,
+                            symbol: "pause.circle.fill", tint: .orange)
+        }
         if controller.relocalizing {
             return Guidance(text: "重新定位中：請把鏡頭對準上次掃描過的區域",
                             symbol: "point.3.connected.trianglepath.dotted",
@@ -158,21 +227,25 @@ struct HUDOverlay: View {
         HStack(alignment: .top) {
             VStack(spacing: 10) {
                 Button {
-                    dismiss()
+                    if controller.phase == .idle || controller.phase == .done { dismiss() }
+                    else { showExitConfirm = true }
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 17, weight: .regular))
-                        .padding(10)
+                        .frame(width: 44, height: 44)
                         .hudGlass(Circle())
                 }
                 .foregroundStyle(.white)
-                .opacity(controller.phase == .scanning ? 0 : 1)
+                .disabled(!controller.canClose)
+                .opacity(controller.canClose ? 1 : 0)
+                .accessibilityHidden(!controller.canClose)
+                .accessibilityLabel("離開掃描")
 
                 if controller.phase == .scanning {
                     // RoomPlan 即時結構：掃到的牆／門／窗以發光邊框疊在實景上。
                     // **RoomPlan 關掉時要一起藏起來** —— 沒有資料來源，
                     // 留著就是一顆按了沒反應的按鈕，比沒有更糟。
-                    if controller.config.captureFloorPlan, FloorPlanCapture.isSupported {
+                    if controller.hasLiDAR, controller.config.captureFloorPlan, FloorPlanCapture.isSupported {
                     Button {
                         controller.toggleRoomPlan()
                     } label: {
@@ -196,6 +269,7 @@ struct HUDOverlay: View {
                             .hudGlass(Circle())
                     }
                     .foregroundStyle(controller.showPointCloud ? .cyan : .white)
+                    .accessibilityLabel(controller.showPointCloud ? "隱藏點雲" : "顯示點雲")
 
                     // 融合品質熱圖：直接把「這塊還沒掃夠」畫在表面上，
                     // 比任何數字或文字提示都直觀 —— 使用者看到紅色就知道要再繞一次。
@@ -210,13 +284,14 @@ struct HUDOverlay: View {
                                 .hudGlass(Circle())
                         }
                         .foregroundStyle(controller.colorMode == .fusionQuality ? .orange : .white)
+                        .accessibilityLabel(controller.colorMode == .fusionQuality ? "切換真實顏色" : "顯示掃描品質熱圖")
                     }
                 }
             }
 
             Spacer()
 
-            if controller.phase != .training {   // 訓練/檢視時隱藏掃描統計 bar
+            if controller.phase != .training && controller.phase != .idle {   // 訓練/檢視時隱藏掃描統計 bar
             VStack(alignment: .trailing, spacing: 3) {
                 Label("\(controller.keyframeCount) 幀", systemImage: "camera.viewfinder")
                 Label("\(controller.pointCount / 1000)k 點", systemImage: "circle.grid.3x3.fill")
@@ -230,7 +305,7 @@ struct HUDOverlay: View {
                 }
                 Label(storageEstimate, systemImage: "internaldrive")
                 if !controller.hasLiDAR {
-                    Label("無 LiDAR", systemImage: "exclamationmark.triangle")
+                    Label(controller.supportsLiDAR ? "LiDAR 已關閉" : "無 LiDAR", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.yellow)
                 }
             }
@@ -298,17 +373,21 @@ struct HUDOverlay: View {
     }
 
     private var statusHint: String? {
+        if controller.phase == .idle && !controller.trackingReady { return controller.sessionState.message }
         if let s = controller.statusText { return s }
         switch controller.phase {
         case .idle:
-            if !controller.trackingReady { return "初始化中：請緩慢平移手機讓 ARKit 建立追蹤" }
-            return "按下快門開始掃描（每移動 10cm 或轉動 6° 自動抓幀）"
+            return controller.refineCameraPoses && controller.hasLiDAR
+                ? "精細掃描已開啟・沿著空間緩慢移動"
+                : "沿著空間緩慢移動，影像會自動儲存"
         case .scanning:
-            return nil
+            return controller.trackingReady && !controller.assessment.captureBlocked
+                ? "自動擷取中・按下方按鈕結束掃描" : "擷取已暫停・恢復穩定後自動繼續"
         case .processing:
             return "點雲優化中：姿態修正 + 多視角加權融合…"
         case .review:
-            return nil    // 旋轉/縮放是直覺操作，不需要文字說明佔住畫面
+            if !controller.canUseScan { return "尚未取得可用影像，請繼續掃描並緩慢移動" }
+            return "單指旋轉・雙指縮放，檢查是否有遺漏的區域"
         case .training:
             return nil
         case .exporting:
@@ -321,6 +400,33 @@ struct HUDOverlay: View {
     private var bottomControls: some View {
         VStack(spacing: 14) {
             if controller.phase == .idle {
+                sessionRecoveryControls
+                if controller.supportsLiDAR {
+                    Toggle(isOn: Binding(get: { controller.useLiDAR }, set: { controller.setLiDAREnabled($0) })) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("LiDAR 深度掃描").font(.subheadline.weight(.medium))
+                            Text(controller.hasLiDAR ? "深度量測與彩色點雲" : "僅相機追蹤，保留影像與稀疏點雲")
+                                .font(.caption2)
+                        }
+                    }
+                    .tint(.cyan).padding(14)
+                    .hudGlass(RoundedRectangle(cornerRadius: 16))
+                    .foregroundStyle(.white)
+                }
+                if controller.trackingReady {
+                    Button {
+                        withAnimation { showAdvanced.toggle() }
+                    } label: {
+                        Label(showAdvanced ? "收合掃描設定" : "掃描設定",
+                              systemImage: "slider.horizontal.3")
+                            .font(.subheadline)
+                            .padding(.horizontal, 16).padding(.vertical, 12)
+                            .hudGlass(Capsule())
+                            .foregroundStyle(.white)
+                    }
+                }
+            }
+            if controller.phase == .idle && showAdvanced && controller.trackingReady {
                 // 延續上次座標系：跨 session 掃下一個房間時，兩份資料才拼得起來。
                 // 同一次 session 內的續掃 ARKit 會自動重定位，不需要這個。
                 if let info = WorldMapStore.latestInfo() {
@@ -340,6 +446,18 @@ struct HUDOverlay: View {
                     .foregroundStyle(.white)
                 }
 
+                if controller.hasLiDAR {
+                    Toggle(isOn: $controller.refineCameraPoses) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("精細掃描").font(.subheadline)
+                            Text("校正相機位置，完成後需較多處理時間").font(.caption2)
+                        }
+                    }
+                    .tint(.cyan).padding(14)
+                    .hudGlass(RoundedRectangle(cornerRadius: 16))
+                    .foregroundStyle(.white)
+                }
+
                 // 相機參數鎖定開關（預設開啟）：按快門當下鎖定曝光/白平衡。
                 // 對焦刻意不在此列 —— 鎖對焦＝凍結景深，離開起始距離就糊。
                 Toggle(isOn: $controller.lockCameraParams) {
@@ -350,14 +468,19 @@ struct HUDOverlay: View {
                 .tint(.green)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
-                .frame(width: 290)
+                .frame(maxWidth: 350)
                 .hudGlass(Capsule())
                 .foregroundStyle(.white)
             }
 
             switch controller.phase {
             case .idle, .scanning:
-                shutterButton
+                VStack(spacing: 8) {
+                    shutterButton
+                    Text(controller.phase == .scanning ? "結束掃描" : "開始掃描")
+                        .font(.subheadline.weight(.semibold))
+                        .hudText()
+                }
             case .processing:
                 VStack(spacing: 8) {
                     ProgressView(value: controller.exportProgress)
@@ -508,6 +631,8 @@ struct HUDOverlay: View {
                     .background(Color.accentColor, in: Capsule())
                     .foregroundStyle(.white)
             }
+            .disabled(!controller.canTrain)
+            .opacity(controller.canTrain ? 1 : 0.45)
             HStack(spacing: 12) {
                 Button {
                     controller.exportAndShare()
@@ -518,6 +643,8 @@ struct HUDOverlay: View {
                         .hudGlass(Capsule())
                         .foregroundStyle(.white)
                 }
+                .disabled(!controller.canUseScan)
+                .opacity(controller.canUseScan ? 1 : 0.45)
                 Button {
                     controller.resumeScan()
                 } label: {
@@ -527,15 +654,18 @@ struct HUDOverlay: View {
                         .hudGlass(Capsule())
                         .foregroundStyle(.white)
                 }
+                .disabled(!controller.canResumeScan)
+                .opacity(controller.canResumeScan ? 1 : 0.45)
                 Button(role: .destructive) {
                     showDiscardConfirm = true
                 } label: {
                     Image(systemName: "trash")
                         .font(.subheadline)
-                        .padding(11)
+                        .frame(width: 44, height: 44)
                         .hudGlass(Circle())
                         .foregroundStyle(.red)
                 }
+                .accessibilityLabel("捨棄本次掃描")
             }
         }
         .confirmationDialog("捨棄這次掃描？", isPresented: $showDiscardConfirm, titleVisibility: .visible) {
@@ -624,10 +754,12 @@ struct HUDOverlay: View {
         // 重定位未完成時姿態不可信，此時開拍等於把錯的外參寫進資料 —— 直接擋住
         .disabled(shutterBlocked)
         .opacity(shutterBlocked ? 0.4 : 1)
+        .accessibilityLabel(controller.phase == .scanning ? "結束掃描並檢視成果" : "開始掃描")
+        .accessibilityHint(controller.phase == .scanning ? "儲存影像並產生點雲" : controller.sessionState.message)
     }
 
     private var shutterBlocked: Bool {
-        controller.phase == .idle && (!controller.trackingReady || controller.relocalizing)
+        controller.phase == .idle && !controller.canStartScan
     }
 
     private var doneControls: some View {
