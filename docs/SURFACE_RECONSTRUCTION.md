@@ -1,0 +1,40 @@
+# Experimental local surface reconstruction
+
+**English** | [繁體中文](SURFACE_RECONSTRUCTION.zh-TW.md)
+
+The LiDAR capture settings include **Surface reconstruction (experimental)**, enabled initially. It includes camera refinement, even if the separate fine-scan toggle is off. Turn it off to compare with the existing voxel fusion; fine-scan feature refinement remains independently selectable. Camera-only capture is unchanged. History's Optimize Training Data action enables the new method and creates a separate result, preserving original images and depth.
+
+## Processing
+
+1. Existing image feature refinement and verified loop closure run first.
+2. A bounded local RGB-D pass refines intermediate camera poses against two fixed anchors per eight-frame interval. Only three depth/image frames are retained. Five point-to-plane iterations use robust residual weights; poorly constrained systems, including a single plane, are rejected. Corrections cannot exceed 3 cm or 1.5 degrees. At least 95% of the same held-out source pixels and reference pairs must remain observable. Missing pairs receive a depth-error penalty of at least 3 cm and an image-error penalty instead of being omitted. The full held-out score must improve depth RMS by at least 5%, and pass an image-intensity non-degradation gate. This is local rigid refinement, not full joint COLMAP bundle adjustment or a guarantee of global accuracy.
+3. Corrected poses drive both the original voxel fusion and a sparse TSDF surface model. The TSDF uses 8³ blocks, a three-voxel band of oriented signed distances and a default 32 MiB estimated block budget. Each cell receives at most one vote per saved frame. Only measured, consistency-filtered depth points participate; inferred ARKit mesh does not create TSDF observations.
+4. Surface points are extracted at signed-distance zero crossings supported by at least two frames. Unknown cells never create surfaces. Output sampling is bounded by the export point limit. This version exports a colored surface point cloud, **not a textured mesh or Gaussian splat**.
+
+## Fallbacks and resource limits
+
+The original fusion runs alongside the experimental volume to retain a complete fallback. The 32 MiB budget covers cell arrays plus estimated block overhead, not total process memory. Temporary source points, the legacy grid, ARKit and export arrays have their own costs. Below 512 MiB available headroom the TSDF is released; existing system-pressure and 192 MiB reserve guards still stop the whole fusion safely when necessary.
+
+Cold blocks are paged to a unique temporary directory with a 256 MiB estimated backing-data budget. LRU paging preserves the complete Float cell state; no lower resolution or quantization is used. The temporary files are removed when the volume is released normally. The support-mask index is restricted to known blocks, so both indices have bounded sizes derived from the block budget; transient I/O buffers and eviction references add overhead beyond the resident-cell estimate. Disk failures or exhausted backing budgets discard the experimental result and use complete original fusion.
+
+Zero crossings mark nearby supported cells. Original fused samples outside that neighborhood are retained unchanged, including holes or regions without two-view TSDF support. The combined result obeys the existing output cap and must reach at least 35% of the original export count; otherwise the original result is used. `completedWithFallback` explicitly identifies this hybrid result. Coverage and density checks do not prove real-world geometric accuracy.
+
+`pose-refinement.json` includes `localSurface` with acceptance/rejection counts, mean per-accepted-frame held-out RMS before/after, peak retained frames, maximum translation and time. `refusion-progress.json` v6 includes `surface` with status, block allocation estimate, coverage, crossing count, fallback sample count, disk reads/writes and processing time. Existing reports remain readable. The diagnostics distinguish reconstruction from capacity, memory, coverage and density fallbacks.
+
+## Validation and comparison
+
+Run `bash tools/test_surface_reconstruction.sh` for synthetic pose, degeneracy, depth-noise, block-boundary, output-limit and resource-interruption regressions. Also run the existing fusion-memory, training-quality, metric-loop and localization suites and sequential iPhone/Simulator builds.
+
+For a device comparison, use the same static, evenly lit space with surface reconstruction on and off, or compare the preserved original history entry with its optimized copy. Measure known distances independently and inspect wall thickness, edge doubling, missing surfaces, report status and processing time. Synthetic recovery and successful builds do not establish real-scene centimetre accuracy. Reflective/translucent surfaces, moving subjects, poorly constrained geometry and ARKit drift remain limitations. No phone Gaussian training is added.
+
+## Fusion speed without changing sampling precision
+
+The TSDF also reuses consecutive block lookups without changing observation order or arithmetic; its paged/cached result is tested bit-for-bit against the resident/reference path. Two optimizations are independent of the experimental surface method: an exact one-bit-per-quad validity mask reuses the existing depth/confidence/edge predicates, and a single pending JPEG decode overlaps image work with sequential geometry fusion. Images use the same decoder, size and interpolation. Frame insertion order, depth sampling, consistency thresholds, point cap and Float geometry/color math remain unchanged. The validity mask is included in the existing 2 MiB depth-cache budget. Prefetch requires at least 512 MiB startup headroom and checks per-frame workspace before scheduling; it never queues the whole scan.
+
+Report v6 records `preparedDepthSampling`, `rgbPrefetch`, `rgbWaitSeconds` and `wallSeconds`. JPEG worker time overlaps fusion and must not be added to total wall time. Run `bash tools/test_surface_reconstruction.sh --benchmark /path/to/scan` for repeated interleaved reference/optimized runs; it asserts bit-identical sorted coordinates, RGB and confidence and excludes the first warmup from the timing summary. Run `--replay /path/to/scan` for local-pose and hybrid-surface diagnostics. Desktop replay injects a fixed memory allowance to exercise the bounded mobile path; it does not measure iPhone memory or timing. Both commands read source files and write diagnostics only to temporary directories. Adding pose refinement/TSDF is extra quality work, so the new full pipeline is not necessarily faster than the older voxel-only pipeline. Measure speed changes with the same reconstruction method.
+
+### Local replay evidence (2026-09-22)
+
+On a 399-frame local scan, interleaved desktop runs with the surface mode disabled took a median 5.57 s for the reference fusion and 3.10 s for exact prefetch/prepared sampling (about 44% less wall time). The first warmup was excluded; there were two measured reference runs and three optimized runs. All six runs produced bit-identical sorted XYZ, RGB and confidence. This is a filesystem-warm macOS benchmark, not an iPhone FPS or total reconstruction claim. Commands above allow the comparison to be repeated on another dataset.
+
+The same scan's standalone local alignment pass accepted 28 of 348 intermediate-camera candidates. Mean held-out RMS over accepted frames changed from 11.52 mm to 10.42 mm; other poses were retained. The surface replay completed with 111,942 output points, including 11,822 original samples retained in unsupported regions, and 84.6% observed-block crossing coverage. Resident block allocation stayed near 32 MiB and temporary block storage near 51 MiB. These are algorithm diagnostics, not measured app peak memory or ground-truth wall thickness. Fewer points alone do not demonstrate higher accuracy. This replay isolates the new local pass rather than rerunning the full existing feature-BA/loop pipeline.

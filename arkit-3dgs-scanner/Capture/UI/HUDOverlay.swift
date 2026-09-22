@@ -457,6 +457,18 @@ struct HUDOverlay: View {
                     .foregroundStyle(.white)
                 }
 
+                if controller.hasLiDAR {
+                    Toggle(isOn: $controller.reconstructSurfaces) {
+                        VStack(alignment:.leading,spacing:3) {
+                            Text(L10n.text("表面重建（實驗）")).font(.subheadline)
+                            Text(L10n.text("包含姿態精修；容量或涵蓋不足時使用原融合")).font(.caption2)
+                        }
+                    }
+                    .tint(.cyan).padding(14)
+                    .hudGlass(RoundedRectangle(cornerRadius:16))
+                    .foregroundStyle(.white)
+                }
+
                 if !controller.hasLiDAR {
                     Toggle(isOn: $controller.reconstructFromImages) {
                         VStack(alignment: .leading, spacing: 3) {

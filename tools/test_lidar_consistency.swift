@@ -3,8 +3,16 @@ import simd
 import CoreGraphics
 import ImageIO
 
+private final class PressureFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    var value: Bool { lock.lock(); defer { lock.unlock() }; return flag }
+    func set() { lock.lock(); flag = true; lock.unlock() }
+}
+
 @main struct LiDARConsistencyTests {
     static func main() throws {
+        setbuf(stdout,nil)
         var checks = 0
         func check(_ condition: Bool, _ message: String) {
             precondition(condition, message); checks += 1; print("PASS: \(message)")
@@ -180,9 +188,10 @@ import ImageIO
         check(cleaned.allSatisfy { abs($0.z + 2) < 0.03 }, "full refusion removes both 10cm ghost layers and mesh refill")
         check(!cleaned.contains { abs($0.z + 1.94) < 0.005 }, "mesh cannot reintroduce a rejected surface under its old 10cm color tolerance")
         let mib: UInt64 = 1_024 * 1_024
-        var memorySamples = 0
+        let completedTwoFrames = PressureFlag()
         let interrupted = RefusionEngine.refuseWithReport(records: records, sessionDir: dir, config: enabled,
-            availableMemory: { memorySamples += 1; return memorySamples < 6 ? 512 * mib : 80 * mib }, progress: { _ in })
+            availableMemory: { completedTwoFrames.value ? 80*mib : 512*mib },
+            progress: { p in if p >= 0.35 { completedTwoFrames.set() } })
         check(interrupted.report.status == "memoryPressure" && interrupted.report.completedFrames == 2,
               "memory pressure arriving midway stops before decoding the next frame")
         check(interrupted.points.isEmpty && interrupted.report.peakCells > 0,
@@ -192,16 +201,18 @@ import ImageIO
               "on-disk report preserves the stopping frame and minimum headroom")
         check(records.allSatisfy { FileManager.default.fileExists(atPath: dir.appendingPathComponent("images/" + $0.imageFile).path) },
               "memory fallback preserves every source image")
-        memorySamples = 0
+        let completedFrames = PressureFlag()
         let exportStop = RefusionEngine.refuseWithReport(records: records, sessionDir: dir, config: enabled,
-            availableMemory: { memorySamples += 1; return memorySamples <= 11 ? 512 * mib : 80 * mib }, progress: { _ in })
+            availableMemory: { completedFrames.value ? 80*mib : 512*mib },
+            progress: { p in if p >= 0.9 { completedFrames.set() } })
         check(exportStop.report.status == "memoryPressure" && exportStop.report.stage == "exportFilter" && exportStop.report.boundedExport && exportStop.report.completedFrames == 5,
               "pressure before output allocation also takes the safe fallback")
-        memorySamples = 0
+        let reduceHeadroom = PressureFlag()
         let afterDecode = RefusionEngine.refuseWithReport(records: records, sessionDir: dir, config: enabled,
-            availableMemory: { memorySamples += 1; return memorySamples == 3 ? 128 * mib : 512 * mib }, progress: { _ in })
+            availableMemory: { reduceHeadroom.value ? 300*mib : 512*mib },
+            progress: { p in if p >= 0.18 { reduceHeadroom.set() } })
         check(afterDecode.report.status == "completed" && afterDecode.report.capacityReductions > 0,
-              "headroom consumed during decoding reduces capacity before insertion")
+              "declining headroom above the reserve reduces capacity before subsequent insertion")
         let device = RefusionEngine.refuseWithReport(records: records, sessionDir: dir, config: enabled, target: 150,
             availableMemory: { 512 * mib }, progress: { _ in })
         check(device.report.status == "completed" && device.report.boundedExport && device.points.count <= 150 && !device.points.isEmpty,

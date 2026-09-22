@@ -40,6 +40,29 @@ nonisolated private final class FusionMemoryWarning: @unchecked Sendable {
     }
 }
 
+/// Exactly one pending RGB decode. Only the worker owns decoder objects; the consumer takes
+/// an immutable, depth-resolution byte array. No full-frame queue or concurrent grid mutations.
+nonisolated private final class FusionRGBPrefetch: @unchecked Sendable {
+    struct Image: Sendable { let pixels: [UInt8]?; let seconds: Double }
+    private let condition = NSCondition()
+    private let queue = DispatchQueue(label:"scan.fusion.rgb",qos:.userInitiated)
+    private var ready = false
+    private var result: Image?
+    func start(_ load: @escaping @Sendable () -> Image) {
+        condition.lock(); ready = false; result = nil; condition.unlock()
+        queue.async { [self] in
+            let image = autoreleasepool(invoking:load)
+            condition.lock(); result = image; ready = true; condition.signal(); condition.unlock()
+        }
+    }
+    func take() -> Image {
+        condition.lock(); defer { condition.unlock() }
+        while !ready { condition.wait() }
+        let image = result!; result = nil
+        return image
+    }
+}
+
 // MARK: - 共用幾何工具
 
 nonisolated enum PointCloudMath {
@@ -489,7 +512,7 @@ nonisolated struct DepthViewCache {
         }
         loads += 1
         guard let view = load() else { return nil }
-        let bytes = view.depth.count * MemoryLayout<Float>.stride + (view.confidence?.count ?? 0)
+        let bytes = view.depth.count * MemoryLayout<Float>.stride + (view.confidence?.count ?? 0) + view.samplingMaskBytes
         guard bytes <= byteLimit, entryLimit > 0 else { return view }
         while retainedBytes + bytes > byteLimit || entries.count >= entryLimit {
             guard let key = entries.min(by: { $0.value.accessed < $1.value.accessed })?.key,
@@ -522,7 +545,7 @@ nonisolated enum RefusionEngine {
     }
 
     struct Report: Codable, Sendable {
-        var version = 5
+        var version = 6
         var status = "running"
         var stage = "frames"
         var totalFrames = 0
@@ -550,6 +573,11 @@ nonisolated enum RefusionEngine {
         var consistencySeconds = 0.0
         var diverseReferences: Bool?
         var rayConsensus: Bool?
+        var preparedDepthSampling: Bool?
+        var rgbPrefetch: Bool?
+        var rgbWaitSeconds: Double?
+        var wallSeconds: Double?
+        var surface: SurfaceTSDF.Report?
     }
     struct Result: Sendable { var points: [CloudPoint]; var report: Report }
 
@@ -561,10 +589,12 @@ nonisolated enum RefusionEngine {
                                  memoryPressure: () -> Bool = { false },
                                  isCancelled: () -> Bool = { false },
                                  progress: @Sendable (Double) -> Void) -> Result {
+        let jobStarted = Date()
         let warning = FusionMemoryWarning()
         var report = Report(totalFrames: records.count)
         report.diverseReferences = config.depthConsistencyEnabled && config.depthDiverseReferences
         report.rayConsensus = config.depthConsistencyEnabled && config.depthConsensusEnabled
+        report.preparedDepthSampling = config.preparedDepthSampling
         func persistReport() {
             do {
                 let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -595,6 +625,7 @@ nonisolated enum RefusionEngine {
         persistReport()
         func interrupted(status: String = "memoryPressure") -> Result {
             report.status = status
+            report.wallSeconds = Date().timeIntervalSince(jobStarted)
             persistReport()
             return Result(points: [], report: report)
         }
@@ -621,10 +652,32 @@ nonisolated enum RefusionEngine {
         // 完全收不到訊號 —— 沿法向偏 3cm 時 0/40000 點有對應。留著只是死碼。
         // 重投影誤差沒有這個盲點，那條路走 BundleAdjuster。
 
+        var surface: SurfaceTSDF? = config.surfaceReconstruction
+            ? SurfaceTSDF(voxel:config.refuseVoxelSizeM, budgetBytes:max(0,min(64,config.surfaceBudgetMB))*1_048_576) : nil
         var grid = FusedVoxelGrid(voxelSize: config.refuseVoxelSizeM,
                                   maxCells: initialLimit)
         let depthDir = sessionDir.appendingPathComponent("depth", isDirectory: true)
         let imagesDir = sessionDir.appendingPathComponent("images", isDirectory: true)
+        let prefetch = config.prefetchFusionRGB && (initialMemory == nil || initialMemory! >= 512*1_048_576)
+            ? FusionRGBPrefetch() : nil
+        report.rgbPrefetch = prefetch != nil
+        func startDecode(_ index: Int) {
+            guard records.indices.contains(index),let prefetch else { return }
+            let r = records[index]
+            let required = frameHeadroomBytes(width:r.depthWidth,height:r.depthHeight)
+            let allowed = !isCancelled() && warning.count == 0 && (availableMemory().map { $0 >= required } ?? true)
+            prefetch.start {
+                let started = Date()
+                let pixels: [UInt8]?
+                if allowed, r.blurVerdict != .drop, r.depthFile != nil, r.transform.count == 16,
+                   r.imageFile == (r.imageFile as NSString).lastPathComponent,
+                   let w = r.depthWidth,let h = r.depthHeight,w > 0,h > 0,w <= 4096,h <= 4096 {
+                    pixels = decodeRGBA(url:imagesDir.appendingPathComponent(r.imageFile),width:w,height:h)
+                } else { pixels = nil }
+                return FusionRGBPrefetch.Image(pixels:pixels,seconds:Date().timeIntervalSince(started))
+            }
+        }
+        startDecode(0)
         let total = max(1, records.count)
         // 分段計時：先前只能靠估算猜哪一段慢，實際數字才有依據。
         // tProduce 與 tInsert 一定要分開 —— 前者可以平行、後者不行（共享 grid），
@@ -639,9 +692,10 @@ nonisolated enum RefusionEngine {
             var mesh: [CloudPoint] = []
             var decodeSec: Double = 0
             var meshSec: Double = 0
+            var surfaceView: DepthConsistencyView?
         }
 
-        func produce(_ index: Int) -> FrameYield {
+        func produce(_ index: Int, decoded: FusionRGBPrefetch.Image?) -> FrameYield {
             let readStart = ProcessInfo.processInfo.systemUptime
             let r = records[index]
             var y = FrameYield()
@@ -670,12 +724,13 @@ nonisolated enum RefusionEngine {
             }
             report.depthReadSeconds += ProcessInfo.processInfo.systemUptime - readStart
             let tD = Date()
-            guard let rgba = decodeRGBA(url: imagesDir.appendingPathComponent(r.imageFile),
-                                        width: dw, height: dh) else { return y }
-            y.decodeSec = Date().timeIntervalSince(tD)
+            let pixels = decoded != nil ? decoded!.pixels : decodeRGBA(url:imagesDir.appendingPathComponent(r.imageFile),width:dw,height:dh)
+            guard let rgba = pixels else { return y }
+            y.decodeSec = decoded?.seconds ?? Date().timeIntervalSince(tD)
 
             let K = r.intrinsics.scaled(toWidth: dw, height: dh)
             let c2w = float4x4(rowMajor: r.transform)
+            if surface != nil { y.surfaceView = DepthConsistencyView(depth:depth,confidence:conf,intrinsics:K,c2w:c2w) }
             // 權重同時吃兩個來源：估計的幾何劣化（運動/捲簾）與實測的清晰度判定。
             // 原本只看 estimatedBlurPx，於是「相機拿得很穩但失焦」的幀拿到滿分權重，
             // 它糊掉的顏色會主導那格的加權平均 —— 這是實測清晰度才看得到的破口。
@@ -697,7 +752,9 @@ nonisolated enum RefusionEngine {
                           abs(records[other].timestamp - r.timestamp) >= 0.05,
                           records[other].blurVerdict != .drop,
                           let view = depthCache.view(index: other, load: {
-                              storedDepthView(records[other], directory: depthDir)
+                              var view = storedDepthView(records[other], directory: depthDir)
+                              if config.preparedDepthSampling { view?.prepareSampling(config:config) }
+                              return view
                           }) else { continue }
                     neighbors.append(view)
                     if neighbors.count == 4 { break }
@@ -736,6 +793,9 @@ nonisolated enum RefusionEngine {
         let lanes = 1
         var cellLimit = initialLimit
         func adaptCapacity(to bytes: UInt64) -> Bool {
+            if bytes < 512 * 1_024 * 1_024, let volume = surface {
+                report.surface = volume.report; report.surface?.status = "memoryFallback"; surface = nil
+            }
             if bytes < 384 * 1_024 * 1_024 { depthCache.clear() }
             let limit = pressureCellLimit(currentLimit: cellLimit, currentCells: grid.count, availableBytes: bytes)
             if limit < cellLimit {
@@ -756,7 +816,13 @@ nonisolated enum RefusionEngine {
                 guard adaptCapacity(to: bytes) else { return interrupted(status: interruptionStatus) }
             }
             let tP = Date()
-            let produced = autoreleasepool { produce(i) }
+            let decoded = prefetch?.take()
+            guard canContinue() else { return interrupted(status:interruptionStatus) }
+            if prefetch != nil {
+                report.rgbWaitSeconds = (report.rgbWaitSeconds ?? 0) + Date().timeIntervalSince(tP)
+                startDecode(i+1)
+            }
+            let produced = autoreleasepool { produce(i,decoded:decoded) }
             tProduce += Date().timeIntervalSince(tP)
             guard canContinue() else { return interrupted(status: interruptionStatus) }
             if let bytes = memorySnapshot() {
@@ -766,6 +832,16 @@ nonisolated enum RefusionEngine {
             guard grid.insert(produced.measured, boundedMemory: boundedMemory, shouldContinue: canContinue),
                   grid.insert(produced.mesh, measured: false, boundedMemory: boundedMemory, shouldContinue: canContinue) else {
                 return interrupted(status: interruptionStatus)
+            }
+            if let volume = surface {
+                let pose = records[i].transform
+                if pose.count == 16 {
+                    let camera = SIMD3(Float(pose[3]),Float(pose[7]),Float(pose[11]))
+                    let integrated = volume.integrate(produced.measured,camera:camera,frame:i,view:produced.surfaceView,shouldContinue:canContinue)
+                    report.surface = volume.report
+                    if !integrated { surface = nil }
+                    guard canContinue() else { return interrupted(status:interruptionStatus) }
+                }
             }
             tInsert += Date().timeIntervalSince(tI)
             tDecode += produced.decodeSec
@@ -797,10 +873,11 @@ nonisolated enum RefusionEngine {
         let rawCells = grid.count
         let inferredOnly = grid.inferredOnlyCount
         let gridVoxel = grid.voxelSize
+        var outputVoxel = gridVoxel
         let tE = Date()
         // On device, use a bounded pass rather than a full cloud + downsampling dictionary.
         report.boundedExport = boundedMemory
-        let out: [CloudPoint]
+        var out: [CloudPoint]
         if boundedMemory {
             var lastPersisted = -1
             guard let exported = grid.consumeExportPoints(target: outputLimit,
@@ -810,11 +887,24 @@ nonisolated enum RefusionEngine {
                     report.exportSeconds = Date().timeIntervalSince(tE)
                     let bucket = Int(fraction * 10)
                     if bucket != lastPersisted { persistReport(); lastPersisted = bucket }
-                    progress(0.9 + fraction * 0.1)
+                    progress(0.9 + fraction * (config.surfaceReconstruction ? 0.05 : 0.1))
                 }) else { return interrupted(status: interruptionStatus) }
             out = exported
         } else {
             out = grid.exportPoints(target: outputLimit, minNeighbors: config.refuseMinNeighbors)
+        }
+        if let volume = surface {
+            report.stage = "surfaceExport"; persistReport(); progress(0.95)
+            if let extracted = volume.extract(limit:outputLimit,shouldContinue:canContinue),
+               let reconstructed = volume.preservingUnsupported(extracted,fallback:out,limit:outputLimit,shouldContinue:canContinue),
+               reconstructed.count >= max(1,Int(Float(out.count)*0.35)) {
+                out = reconstructed; outputVoxel = volume.voxel
+            } else if volume.report.status.hasPrefix("completed") {
+                report.surface = volume.report; report.surface?.status = "densityFallback"
+            }
+            if report.surface?.status != "densityFallback" { report.surface = volume.report }
+            surface = nil
+            guard canContinue() else { return interrupted(status:interruptionStatus) }
         }
         report.exportSeconds = Date().timeIntervalSince(tE)
         print(String(format: "  匯出擇優 %.2fs（%d 格 → %d 點）",
@@ -841,22 +931,27 @@ nonisolated enum RefusionEngine {
         // Unified logging must never decide whether completed scan data is published.
         Logger(subsystem: "itri.fable", category: "Refusion").info("\(msg, privacy: .public)")
         report.status = "completed"
+        report.wallSeconds = Date().timeIntervalSince(jobStarted)
         report.stage = "finished"
         report.outputPoints = out.count
-        report.finalVoxelSizeM = gridVoxel
+        report.finalVoxelSizeM = outputVoxel
         persistReport()
         progress(1)
         return Result(points: out, report: report)
     }
 
-    private static func storedDepthView(_ r: FrameRecord, directory: URL) -> DepthConsistencyView? {
+    static func storedDepthView(_ r: FrameRecord, directory: URL) -> DepthConsistencyView? {
         guard r.transform.count == 16, r.transform.allSatisfy(\.isFinite),
               let name = r.depthFile, let w = r.depthWidth, let h = r.depthHeight,
               w > 1, h > 1, w <= 4096, h <= 4096,
+              name == (name as NSString).lastPathComponent,
+              (try? directory.appendingPathComponent(name).resourceValues(forKeys:[.fileSizeKey]).fileSize) == w*h*4,
               let data = try? Data(contentsOf: directory.appendingPathComponent(name)), data.count == w * h * 4 else { return nil }
         var confidence: [UInt8]?
         if let file = r.confidenceFile {
-            guard let bytes = try? Data(contentsOf: directory.appendingPathComponent(file)), bytes.count == w * h else { return nil }
+            guard file == (file as NSString).lastPathComponent,
+                  (try? directory.appendingPathComponent(file).resourceValues(forKeys:[.fileSizeKey]).fileSize) == w*h,
+                  let bytes = try? Data(contentsOf: directory.appendingPathComponent(file)), bytes.count == w * h else { return nil }
             confidence = [UInt8](bytes)
         }
         return DepthConsistencyView(depth: data, confidence: confidence,

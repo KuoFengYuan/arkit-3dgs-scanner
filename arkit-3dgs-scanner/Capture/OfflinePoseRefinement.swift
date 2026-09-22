@@ -5,7 +5,7 @@ import simd
 /// on the best-effort live worker. LiDAR supplies metric landmarks; no desktop SfM is required.
 nonisolated enum OfflinePoseRefinement {
     struct Report: Codable, Sendable {
-        var version = 3
+        var version = 4
         var status = "pending"
         var inputFrames = 0
         var processedFrames = 0
@@ -22,9 +22,16 @@ nonisolated enum OfflinePoseRefinement {
         var featureExtractionSeconds: Double? = nil
         var matchingSeconds: Double? = nil
         var bundleAdjustmentSeconds: Double? = nil
+        var localSurface: LocalSurfaceRefiner.Report?
         var loopClosure: LoopClosureRefiner.Report?
         var seconds = 0.0
         var notice: String {
+            let extra = localSurface.map { $0.accepted > 0
+                ? L10n.text("局部表面對齊已通過深度與影像驗證。")
+                : L10n.text("局部表面對齊未取得可靠改善，保留原姿態。") } ?? ""
+            return featureNotice + (extra.isEmpty ? "" : "\n" + extra)
+        }
+        private var featureNotice: String {
             guard let loopClosure, loopClosure.candidatePairs > 0 else { return localNotice }
             let counts = L10n.text("閉環：\(loopClosure.candidatePairs) 組候選，\(loopClosure.verifiedPairs) 組通過幾何驗證。")
             let outcome = loopClosure.status == "validated"
@@ -54,6 +61,35 @@ nonisolated enum OfflinePoseRefinement {
     }
 
     static func run(records: [FrameRecord], directory: URL, rounds: Int,
+                    surfaceRefinement: Bool = false,
+                    isCancelled: @escaping @Sendable () -> Bool = { false },
+                    progress: @escaping @Sendable (Double) -> Void = { _ in }) async -> Result {
+        let started = Date()
+        let features = await runFeatures(records:records,directory:directory,rounds:rounds,
+            isCancelled:isCancelled,progress:{progress($0 * (surfaceRefinement ? 0.85 : 1))})
+        guard surfaceRefinement, rounds > 0, !isCancelled(),
+              !["cancelled","memoryPressure","observationBudgetExceeded","insufficientDepthFrames"].contains(features.report.status) else { return features }
+        let local = LocalSurfaceRefiner.run(records:features.records,directory:directory,
+            shouldContinue:{ !isCancelled() && RefusionEngine.hasOptionalProcessingHeadroom },
+            progress:{progress(0.85+$0*0.15)})
+        var report = features.report, ba = features.ba
+        report.localSurface = local.report; report.seconds = Date().timeIntervalSince(started)
+        if local.report.status == "interrupted" {
+            report.localSurface?.accepted = 0
+            if isCancelled() { report.status = "cancelled" }
+            return Result(records:features.records,ba:ba,report:report)
+        }
+        if local.report.accepted > 0 {
+            report.status = "validated"
+            for r in local.records where r.transform.count == 16 { ba.poses[r.id] = RefusionEngine.float4x4(rowMajor:r.transform) }
+            let original = Dictionary(records.map { ($0.id,$0.transform) },uniquingKeysWith:{$1})
+            report.changedFrames = local.records.filter { original[$0.id] != $0.transform }.count
+        }
+        progress(1)
+        return Result(records:local.records,ba:ba,report:report)
+    }
+
+    private static func runFeatures(records: [FrameRecord], directory: URL, rounds: Int,
                     isCancelled: @escaping @Sendable () -> Bool = { false },
                     progress: @escaping @Sendable (Double) -> Void = { _ in }) async -> Result {
         let started = Date()
