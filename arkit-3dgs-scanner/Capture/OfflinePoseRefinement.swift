@@ -5,7 +5,7 @@ import simd
 /// on the best-effort live worker. LiDAR supplies metric landmarks; no desktop SfM is required.
 nonisolated enum OfflinePoseRefinement {
     struct Report: Codable, Sendable {
-        var version = 2
+        var version = 3
         var status = "pending"
         var inputFrames = 0
         var processedFrames = 0
@@ -22,8 +22,17 @@ nonisolated enum OfflinePoseRefinement {
         var featureExtractionSeconds: Double? = nil
         var matchingSeconds: Double? = nil
         var bundleAdjustmentSeconds: Double? = nil
+        var loopClosure: LoopClosureRefiner.Report?
         var seconds = 0.0
         var notice: String {
+            guard let loopClosure, loopClosure.candidatePairs > 0 else { return localNotice }
+            let counts = L10n.text("閉環：\(loopClosure.candidatePairs) 組候選，\(loopClosure.verifiedPairs) 組通過幾何驗證。")
+            let outcome = loopClosure.status == "validated"
+                ? L10n.text("閉環修正已套用；參考距離仍需獨立驗證。")
+                : L10n.text("未套用閉環修正，保留原本的姿態精修結果。")
+            return localNotice + "\n" + counts + " " + outcome
+        }
+        private var localNotice: String {
             switch status {
             case "validated": return L10n.text("已匹配 \(processedFrames) 張影像，\(changedFrames) 張位置通過驗證並修正。")
             case "insufficientDepthFrames": return L10n.text("深度影格不足，保留原本相機位置。")
@@ -47,6 +56,37 @@ nonisolated enum OfflinePoseRefinement {
     static func run(records: [FrameRecord], directory: URL, rounds: Int,
                     isCancelled: @escaping @Sendable () -> Bool = { false },
                     progress: @escaping @Sendable (Double) -> Void = { _ in }) async -> Result {
+        let started = Date()
+        let local = await runLocal(records: records, directory: directory, rounds: rounds,
+                                   isCancelled: isCancelled, progress: { progress($0 * 0.7) })
+        guard rounds > 0, !["cancelled", "memoryPressure", "observationBudgetExceeded", "insufficientDepthFrames"].contains(local.report.status) else { return local }
+        let loop = LoopClosureRefiner.run(records: local.records, directory: directory,
+                                         isCancelled: isCancelled, progress: { progress(0.7 + $0 * 0.3) })
+        var report = local.report
+        report.loopClosure = loop.report
+        report.seconds = Date().timeIntervalSince(started)
+        if loop.report.status == "cancelled" {
+            report.status = "cancelled"
+            return Result(records: records, ba: PoseRefineResult(), report: report)
+        }
+        guard loop.report.status == "validated" else {
+            progress(1)
+            return Result(records: local.records, ba: local.ba, report: report)
+        }
+        var ba = local.ba
+        for r in loop.records where r.transform.count == 16 {
+            ba.poses[r.id] = RefusionEngine.float4x4(rowMajor: r.transform)
+        }
+        report.status = "validated"
+        let original = Dictionary(records.map { ($0.id, $0.transform) }, uniquingKeysWith: { _, latest in latest })
+        report.changedFrames = loop.records.filter { original[$0.id] != $0.transform }.count
+        progress(1)
+        return Result(records: loop.records, ba: ba, report: report)
+    }
+
+    private static func runLocal(records: [FrameRecord], directory: URL, rounds: Int,
+                                 isCancelled: @escaping @Sendable () -> Bool,
+                                 progress: @escaping @Sendable (Double) -> Void) async -> Result {
         let start = Date()
         var report = Report()
         report.inputFrames = records.count

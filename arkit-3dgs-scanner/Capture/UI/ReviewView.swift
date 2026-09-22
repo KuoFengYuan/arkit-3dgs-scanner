@@ -19,7 +19,25 @@ struct ReviewPointCloudView: UIViewRepresentable {
     var isPlaying = false
     var followTransitionDuration: TimeInterval = 0.25
 
-    final class Coordinator {
+    var measurementPoints: [SIMD3<Float>] = []
+    var candidatePoint: SIMD3<Float>? = nil
+    var measurementZoom = false
+    var onPointPicked: ((SIMD3<Float>?) -> Void)? = nil
+
+    final class Coordinator: NSObject {
+        var points: [CloudPoint] = []
+        var measurementZoom = false
+        var onPointPicked: ((SIMD3<Float>?) -> Void)?
+        @objc func pick(_ gesture: UITapGestureRecognizer) {
+            guard let view = gesture.view as? SCNView, let onPointPicked else { return }
+            let tap = gesture.location(in: view)
+            let projected = points.map { p -> SIMD3<Float> in
+                let screen = view.projectPoint(SCNVector3(p.x,p.y,p.z))
+                return SIMD3(screen.x,screen.y,screen.z)
+            }
+            let index = SceneMetricScale.pickProjectedIndex(projected, at: SIMD2(Float(tap.x),Float(tap.y)))
+            onPointPicked(index.map { SIMD3(points[$0].x,points[$0].y,points[$0].z) })
+        }
         var resetCameraToken = 0
         var lastFollowedPose: simd_float4x4?
         var wasFollowing = false
@@ -37,12 +55,17 @@ struct ReviewPointCloudView: UIViewRepresentable {
         view.pointOfView = Self.fittedCamera(for: points, trajectory: trajectory)
         view.defaultCameraController.target = SCNVector3(Self.sceneCenter(points: points, trajectory: trajectory))
         context.coordinator.resetCameraToken = resetCameraToken
+        context.coordinator.points = points
+        context.coordinator.onPointPicked = onPointPicked
+        view.addGestureRecognizer(UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.pick(_:))))
+        updateMeasurements(in: view)
         updateHighlight(in: view)
         updateFollowCamera(in: view, coordinator: context.coordinator, animated: false)
         return view
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {
+        context.coordinator.onPointPicked = onPointPicked
         // 更新標記與跟隨視角，不重建點雲；一般 3D 驗收仍保留自由旋轉／縮放。
         updateHighlight(in: uiView)
         if context.coordinator.resetCameraToken != resetCameraToken {
@@ -52,7 +75,46 @@ struct ReviewPointCloudView: UIViewRepresentable {
             context.coordinator.resetCameraToken = resetCameraToken
             context.coordinator.lastFollowedPose = nil
         }
+        if onPointPicked != nil, context.coordinator.measurementZoom != measurementZoom {
+            uiView.defaultCameraController.stopInertia()
+            if measurementZoom, let candidatePoint, let camera = uiView.pointOfView {
+                let target = uiView.defaultCameraController.target
+                camera.simdPosition += candidatePoint - SIMD3(target.x,target.y,target.z)
+                uiView.defaultCameraController.target = SCNVector3(candidatePoint)
+            }
+            uiView.pointOfView?.camera?.fieldOfView = measurementZoom ? 24 : 60
+            context.coordinator.measurementZoom = measurementZoom
+        }
+        updateMeasurements(in: uiView)
         updateFollowCamera(in: uiView, coordinator: context.coordinator, animated: isPlaying)
+    }
+
+    private func updateMeasurements(in view: SCNView) {
+        guard let root = view.scene?.rootNode else { return }
+        root.childNode(withName: "measurement", recursively: false)?.removeFromParentNode()
+        guard !measurementPoints.isEmpty || candidatePoint != nil else { return }
+        let group = SCNNode(); group.name = "measurement"
+        for point in measurementPoints { group.addChildNode(measurementMarker(point, color: .systemCyan, in: view)) }
+        if measurementPoints.count == 2 {
+            group.addChildNode(SCNNode(geometry: PointCloudRendering.polyline(measurementPoints.map { SCNVector3($0) }, color: .systemCyan)))
+        }
+        if let candidatePoint { group.addChildNode(measurementMarker(candidatePoint, color: .systemOrange, in: view)) }
+        root.addChildNode(group)
+    }
+
+    private func measurementMarker(_ point: SIMD3<Float>, color: UIColor, in view: SCNView) -> SCNNode {
+        let node = Self.marker(at: SCNVector3(point), color: color)
+        if let camera = view.pointOfView {
+            let distance = simd_distance(point,camera.simdWorldPosition)
+            let fov = Float(camera.camera?.fieldOfView ?? 60) * .pi / 180
+            // Aim for a readable 14-screen-point diameter at the time of selection/zoom.
+            let radius = max(0.008, distance * tan(fov/2) * 14 / Float(max(300,view.bounds.height)))
+            node.simdScale = SIMD3(repeating: radius / 0.02)
+        }
+        node.renderingOrder = 100
+        node.geometry?.firstMaterial?.readsFromDepthBuffer = false
+        node.geometry?.firstMaterial?.writesToDepthBuffer = false
+        return node
     }
 
     private func updateFollowCamera(in view: SCNView, coordinator: Coordinator, animated: Bool) {

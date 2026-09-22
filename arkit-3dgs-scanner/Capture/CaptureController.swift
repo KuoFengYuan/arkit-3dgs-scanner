@@ -578,7 +578,7 @@ final class CaptureController: NSObject, ObservableObject {
                 Task { @MainActor [weak self] in
                     guard let self, self.phase == .processing, self.processingStage == .aligning, self.scanGeneration == generation else { return }
                     self.exportProgress = 0.10 + p * 0.24
-                    self.statusText = p < 0.85 ? L10n.text("逐張匹配拍攝影像… \(Int(p / 0.85 * 100))%") : L10n.text("驗證相機位置修正…")
+                    self.statusText = p >= 0.7 ? L10n.text("搜尋並驗證重訪視角…") : (p < 0.595 ? L10n.text("逐張匹配拍攝影像… \(Int(p / 0.595 * 100))%") : L10n.text("驗證相機位置修正…"))
                 }
             }
             let result = await Task.detached(priority: .userInitiated) {

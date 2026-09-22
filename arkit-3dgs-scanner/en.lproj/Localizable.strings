@@ -369,3 +369,97 @@
 "上次精細融合未完成，目前顯示備援預覽。照片與深度仍保留，可使用「優化訓練資料」重新處理。" = "The previous fusion did not finish. This is a fallback preview; photos and depth remain available. Use Refine training data to process them again.";
 
 "融合點雲… 176 / 399 幀" = "Fusing point cloud… 176 / 399 frames";
+
+"請選取相隔至少 10 公分的兩點，並輸入有效的已知公尺長度。" = "Choose points at least 10 cm apart and enter a valid known length in meters.";
+
+"請選另一處或不同方向的距離驗證，不可用校正的同一段距離驗證自己。" = "Validate a distance elsewhere or in a different direction. Do not validate with the same calibration segment.";
+
+"點雲已更新，請重新選點校正與驗證尺度。" = "The point cloud has changed. Select new points to calibrate and validate scale.";
+
+"尺度倍率超出 0.5–2 倍，請檢查選點與公尺單位。" = "The scale factor is outside 0.5–2. Check the selected points and meter units.";
+
+"目前沒有可量測的點雲。" = "No point cloud is available for measurement.";
+
+"參考距離驗證通過" = "Reference distance checks passed";
+
+"參考距離存在誤差" = "Reference distance checks failed";
+
+"已校正，尚未獨立驗證" = "Calibrated, not independently validated";
+
+"ARKit 公尺尺度，尚未驗證" = "ARKit meter scale, unverified";
+
+"旋轉點雲後，點選兩個表面位置量距。青色線段是目前選取的距離。" = "Rotate the cloud, then tap two surface points. The cyan segment shows the selected distance.";
+
+"尺度量測點雲，點選兩個可見表面位置" = "Measurement point cloud. Tap two visible surface points.";
+
+"距離 %.3f m" = "Distance %.3f m";
+
+"已選取 %@ / 2 點" = "Selected %@ / 2 points";
+
+"重新選點" = "Clear points";
+
+"尺度倍率 %.6f" = "Scale factor %.6f";
+
+"通過標準：各參考距離誤差不超過 2 公分或已知長度的 1%，取較大值。這不代表整個場景的絕對精度。" = "Checks allow 2 cm or 1% of each reference length, whichever is greater. Passing does not certify absolute accuracy across the scene.";
+
+"驗證 %d：誤差 %+.1f cm" = "Check %d: error %+.1f cm";
+
+"這段距離的實際長度（公尺）" = "Known length of this segment (meters)";
+
+"設為尺度校正" = "Calibrate scale";
+
+"作為獨立驗證" = "Validate distance";
+
+"先用捲尺或雷射測距取得已知長度。校正後請改選另一處距離驗證；重新校正會清除舊驗證。" = "Use a tape or laser measure for the known length. Validate elsewhere after calibration. Recalibrating clears previous checks.";
+
+"準備公尺尺度資料…" = "Preparing metric data…";
+
+"分享公尺尺度資料" = "Share metric data";
+
+"匯出公尺尺度 3DGS 資料" = "Export metric 3DGS data";
+
+"校正倍率會同時套用至匯出的相機位置與點雲。原始照片、深度與一般匯出不會改寫；公尺版不附原始深度，避免混用尺度。" = "The factor applies to both exported camera positions and points. Original photos, depth and standard exports stay unchanged. The metric copy omits raw depth to prevent mixing scales.";
+
+"重設尺度與驗證" = "Reset scale and checks";
+
+"空間尺度與驗證" = "Scene scale and validation";
+
+"閉環：%@ 組候選，%@ 組通過幾何驗證。" = "Loop closure: %@ candidate pairs, %@ geometrically verified pairs.";
+
+"閉環修正已套用；參考距離仍需獨立驗證。" = "Loop corrections applied; physical distances still need independent validation.";
+
+"未套用閉環修正，保留原本的姿態精修結果。" = "Loop correction was not applied; the local refinement result is retained.";
+
+"搜尋並驗證重訪視角…" = "Finding and validating revisited views…";
+
+"開啟全螢幕選點，可放大表面，分別確認起點與終點。" = "Open full-screen selection to zoom into surfaces and confirm each endpoint.";
+
+"全螢幕精準選點" = "Precise point selection";
+
+"點選表面預覽橘色候選點，再按確認。" = "Tap a surface to preview an orange candidate, then confirm.";
+
+"單指旋轉、雙指平移或縮放。輕點表面先預覽，不會立即更改端點。" = "Rotate with one finger; pan or zoom with two. Tap to preview a point before changing an endpoint.";
+
+"恢復倍率" = "Reset zoom";
+
+"放大候選位置" = "Zoom to candidate";
+
+"顯示完整點雲" = "Fit cloud";
+
+"選擇要調整的端點" = "Choose an endpoint to edit";
+
+"起點（未設定）" = "Start · unset";
+
+"起點（已設定）" = "Start · set";
+
+"終點（未設定）" = "End · unset";
+
+"終點（已設定）" = "End · set";
+
+"輕點想量測的表面；空白處不會選取。" = "Tap the surface to measure. Empty space selects nothing.";
+
+"橘色是候選位置，可放大確認後再設定端點。" = "Orange marks the candidate. Zoom in before confirming the endpoint.";
+
+"確認起點" = "Confirm start";
+
+"確認終點" = "Confirm end";
