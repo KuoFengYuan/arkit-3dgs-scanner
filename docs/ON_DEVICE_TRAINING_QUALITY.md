@@ -60,3 +60,5 @@ Camera-only scans can use photo selection; this pose-refinement pass requires sa
 `tools/test_training_quality.swift` covers equivalent-view selection, parallax/content preservation, weak/motion-only/unknown evidence, legacy reports, immutable source files, sensor orientation, corrupt depth, cancellation, 1,000-frame processing, and optimized-copy publication/deletion. The 1,000-frame fixture repeats small synthetic images; it tests scheduling and capacity, not large-scene image quality or iPhone peak memory. BA tests separately exercise known pose perturbations and noise-only inputs.
 
 Compare original and optimized exports with fixed trainer settings and held-out views, especially double edges and text. Improved reprojection residuals do not establish absolute centimeter accuracy; 3DGS quality requires retraining and visual evaluation.
+
+Local refinement is followed by bounded revisit matching and validation of sparse rigid corrections. This is not full joint COLMAP/Ceres BA; rejected loops preserve local results. See [loop closure and metric scale](LOOP_CLOSURE_AND_SCALE.md).

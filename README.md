@@ -32,7 +32,8 @@ See [fusion progress, first-person review, and export safeguards](docs/FUSION_RE
 | Automatic keyframes | Selects frames using camera movement, rotation, and capture quality; stores per-frame intrinsics and poses |
 | LiDAR fusion | Filters depth edges and inconsistent observations, then refines supported samples across viewpoints |
 | Camera-only capture | Saves RGB and verified sparse points; optionally reconstructs additional geometry from multiple images |
-| Pose refinement | Uses LiDAR-assisted image matching and local bundle adjustment; applies changes only after held-out validation |
+| Pose refinement | LiDAR-assisted local adjustment and bounded revisit correction; changes require held-out validation |
+| Metric scale | Pick point-cloud distances, calibrate against a known length, independently verify, and export scaled cameras/points |
 | Image selection | Prefers sharper, nonredundant views while retaining all original photos and reliable depth |
 | Synchronized playback | Photos follow their corresponding 3D camera position and direction; adjustable playback FPS |
 | Scan history | Preview, refine into a separate version, export, and delete individual, selected, or all scans |
@@ -73,7 +74,7 @@ On one 569-frame scan, the median local surface thickness decreased from **8.94 
 
 Processing streams frames instead of retaining all decoded images and depth maps. The reference-depth cache is capped at eight entries / 2 MiB; the fusion grid and exported point cloud have separate memory limits. The current mobile output cap is 250,000 points. These are processing safeguards, not a guarantee against every out-of-memory condition. See [large-scan memory handling](docs/LARGE_SCAN_MEMORY.md).
 
-Pose refinement is guided local optimization, not a complete global SfM pipeline. Failed validation keeps the existing poses. Image selection and depth fusion are separate, so a photo excluded from training can still contribute reliable depth.
+Pose refinement combines guided local optimization with bounded revisit matching and a sparse rigid-correction graph. It is not COLMAP/Ceres or a complete global SfM pipeline. Failed validation keeps the existing poses. Image selection and depth fusion are separate, so a photo excluded from training can still contribute reliable depth.
 
 Motion estimates alone no longer trigger a post-fusion recapture warning. Weak measured detail still receives a frame-specific review message; motion-only and unknown evidence remain in collapsed capture-quality information. This changes reporting, not the original photos or depth eligibility.
 
@@ -84,7 +85,8 @@ Stopped scans are saved automatically for later review, even before export.
 - Replay captured photos with a synchronized 3D camera marker and route. Playback supports 0.5, 1, 2, 5, 10, 15, and 30 fps. These are saved keyframes, not a real-time video recording.
 - Preview photos are oriented for viewing; original JPEG pixels and calibration remain unchanged.
 - **Optimize training data** refines a copy of the scan on the phone. It prepares training data; it does not train Gaussians.
-- Deletion removes the selected scan's photos, depth, poses, point clouds, models, and matching ZIP. Unselected scans and copies shared to other apps are unaffected.
+- **Scene scale and validation** measures point-cloud distances, accepts a known reference, and exports a separate metric COLMAP ZIP. Camera positions and points scale together; raw depth is omitted from that ZIP. Reference checks do not certify whole-scene accuracy. See [loop closure and metric scale](docs/LOOP_CLOSURE_AND_SCALE.md).
+- Deletion removes the selected scan's photos, depth, poses, point clouds, models, and matching standard/metric ZIPs. Unselected scans and copies shared to other apps are unaffected.
 
 An active scan can be resumed from its review screen. Opening a historical scan does not restore the original live AR session.
 
@@ -128,6 +130,7 @@ Follow [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md). Changes go
 python3 tools/check_project.py
 bash tools/test_localization.sh
 bash tools/test_training_quality.sh
+bash tools/test_metric_loop.sh
 ```
 
 ```sh
@@ -161,6 +164,7 @@ Swift regression tools cover capture writes, geometry, bounded depth caching, la
 ## Documentation
 
 - [Capture architecture](docs/CAPTURE_ARCHITECTURE.md)
+- [Loop closure and metric scale](docs/LOOP_CLOSURE_AND_SCALE.md)
 - [On-device dataset refinement](docs/ON_DEVICE_TRAINING_QUALITY.md)
 - [LiDAR surface consistency](docs/LIDAR_SURFACE_CONSENSUS.md)
 - [Camera-only reconstruction](docs/CAMERA_ONLY_ACCURACY.md)

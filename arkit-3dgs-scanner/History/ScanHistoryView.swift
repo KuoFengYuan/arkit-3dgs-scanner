@@ -175,6 +175,7 @@ struct ScanHistoryView: View {
 private struct ScanHistoryDetail: View {
     let entry: ScanEntry
     @State private var optimizedEntry: ScanEntry?
+    @State private var showMeasurements = false
     private var currentEntry: ScanEntry { optimizedEntry ?? entry }
     @State private var selection: TrainingFrameSelector.Report?
     @State private var poseNotice: String?
@@ -222,6 +223,9 @@ private struct ScanHistoryDetail: View {
             if optimizationTask != nil {
                 ProgressView(optimizationText, value: optimizationProgress).padding()
             }
+            Button { showMeasurements = true } label: {
+                Label(L10n.text("空間尺度與驗證"), systemImage: "ruler")
+            }.disabled(busy || preview?.points.isEmpty != false).padding(.top, 8)
             Picker(L10n.text("預覽內容"), selection: $selectedTab) {
                 Text(L10n.text("3D 點雲")).tag(0)
                 Text(L10n.text("拍攝影像")).tag(1)
@@ -267,6 +271,9 @@ private struct ScanHistoryDetail: View {
                     }.disabled(busy || preview == nil)
                 }
             }
+        }
+        .sheet(isPresented: $showMeasurements) {
+            if let preview { SceneMeasurementView(entry: currentEntry, preview: preview) }
         }
         .onDisappear { optimizationTask?.cancel() }
         .navigationTitle(currentEntry.date.formatted(.dateTime.locale(L10n.locale).year().month().day().hour().minute()))

@@ -244,7 +244,7 @@ actor ScanLibrary {
         let zip = root.appendingPathComponent(entry.directory.lastPathComponent + ".zip")
         var moved: [(URL, URL)] = []
         do {
-            for source in [entry.directory, zip] where fm.fileExists(atPath: source.path) {
+            for source in [entry.directory, zip, root.appendingPathComponent(entry.directory.lastPathComponent + "-metric.zip")] where fm.fileExists(atPath: source.path) {
                 let destination = staging.appendingPathComponent(source.lastPathComponent)
                 try fm.moveItem(at: source, to: destination)
                 moved.append((source, destination))
