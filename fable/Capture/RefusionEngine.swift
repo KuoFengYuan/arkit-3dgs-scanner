@@ -55,7 +55,7 @@ nonisolated enum PointCloudMath {
     /// 實機出現過：332,251 格、上限 250,000，只需要砍 25%，結果一步跳到
     /// 4.2cm 只剩 74,836 點（砍掉 77%）。
     ///
-    /// 這不只是少了點：msplat 的初始高斯尺寸就等於 3-NN 點距，
+    /// 這不只是少了點：外部訓練器可能依鄰近點距設定初始高斯尺寸，
     /// 匯出端把點距放大 2 倍，初始高斯就跟著大 2 倍，密集化未必追得回來 ——
     /// 與先前修過的「重融合靜默粗化」是同一種失效，只是發生在匯出端。
     ///
@@ -120,7 +120,7 @@ nonisolated struct FusedVoxelGrid {
     private var shards: [[Int64: Cell]]
     private let shardMask: Int64
     private(set) var voxelSize: Float
-    private let maxCells: Int
+    private var maxCells: Int
     private let weightCap: Float = 8
 
     /// 分片數取 2 的冪且明顯多於核心數 —— 分堆才平均，lane 之間也不必等最慢的一片
@@ -151,8 +151,40 @@ nonisolated struct FusedVoxelGrid {
     }
 
     /// - measured: true ＝ LiDAR 直接反投影（量測）；false ＝ ARKit 場景網格（推論）
-    mutating func insert(_ candidates: [CloudPoint], measured: Bool = true) {
+    mutating func insert(_ candidates: [CloudPoint], measured: Bool = true, boundedMemory: Bool = false) {
         guard !candidates.isEmpty else { return }
+        if boundedMemory {
+            // Mobile path: no duplicate candidate buckets or concurrent dictionary expansion.
+            // Check capacity every 1,024 points instead of overshooting by a whole mesh frame.
+            for (index, pt) in candidates.enumerated() {
+                if let key = PointCloudMath.voxelKey(SIMD3(pt.x, pt.y, pt.z), size: voxelSize) {
+                    let s = shardIndex(key)
+                    let pos = SIMD3<Float>(pt.x, pt.y, pt.z)
+                    let rgb = SIMD3<Float>(Float(pt.r), Float(pt.g), Float(pt.b))
+                    let w = max(0.01, pt.score)
+                    if var cell = shards[s][key] {
+                        if !cell.measured || measured {
+                            if !cell.measured && measured {
+                                cell = Cell(mean: pos, color: rgb, weight: w, bestScore: pt.score)
+                            } else {
+                                let total = cell.weight + w
+                                cell.mean += (pos - cell.mean) * (w / total)
+                                cell.color += (rgb - cell.color) * (w / total)
+                                cell.weight = min(total, weightCap)
+                                cell.bestScore = max(cell.bestScore, pt.score)
+                            }
+                            shards[s][key] = cell
+                        }
+                    } else {
+                        shards[s][key] = Cell(mean: pos, color: rgb, weight: w,
+                                             bestScore: pt.score, measured: measured)
+                    }
+                }
+                if (index + 1) % 1024 == 0, count > maxCells { reduceCapacity(to: maxCells) }
+            }
+            if count > maxCells { reduceCapacity(to: maxCells) }
+            return
+        }
         // 先分堆（保序），再各片平行寫入
         let n = shards.count
         var byShard = [[(key: Int64, pt: CloudPoint)]](repeating: [], count: n)
@@ -196,7 +228,37 @@ nonisolated struct FusedVoxelGrid {
         // 觸頂檢查移到批次之後：原本每插入一個新格就查一次全域數量，
         // 分片之後那會變成每點一次跨片加總。代價是可能短暫超出上限一個批次的量，
         // 而一個批次只有一幀的點（~49k），相對 2M 的上限可以忽略。
-        if count >= maxCells { coarsen() }
+        if count >= maxCells, count > 1 {
+            coarsen()
+            reduceCapacity(to: maxCells)
+        }
+    }
+
+    /// Only lower the budget; never grow again during a memory-constrained run.
+    mutating func reduceCapacity(to limit: Int) {
+        maxCells = min(maxCells, max(1, limit))
+        var rounds = 0
+        var stalled = 0
+        while count > maxCells, rounds < 32, stalled < 4 {
+            let before = count
+            coarsen(); rounds += 1
+            stalled = count == before ? stalled + 1 : 0
+        }
+        // Cells on opposite sides of the origin cannot merge by doubling the voxel size.
+        // Keep a bounded spatial sample if floating-point scale can no longer help.
+        if count > maxCells {
+            var kept = 0
+            let total = count
+            for index in shards.indices {
+                var compact: [Int64: Cell] = [:]
+                for (key, value) in shards[index] {
+                    let before = kept * maxCells / total
+                    kept += 1
+                    if kept * maxCells / total > before { compact[key] = value }
+                }
+                shards[index] = compact
+            }
+        }
     }
 
     /// 觸頂自動粗化：voxel ×2、加權合併 —— 長掃描記憶體有界且不停止收點。
@@ -204,10 +266,11 @@ nonisolated struct FusedVoxelGrid {
     /// **逐片搬移並即時釋放，不要先建好整份新表再換掉。**
     /// 那樣峰值是兩份完整的表（4M 格 × ~75B ≈ 300MB，兩份就 600MB），
     /// 而觸頂粗化正好發生在記憶體已經最吃緊的時候 —— 大場景、關鍵幀與點雲都還在。
-    /// 實機大場景「融合點雲時閃退」就是在這裡被系統砍掉的。
+    /// 這是大場景融合時可能發生記憶體尖峰的位置，實際閃退原因仍需裝置紀錄確認。
     /// 逐片釋放之後峰值降到「舊表剩下的部分 ＋ 新表」，
     /// 而粗化本來就會把格數砍成約 1/4，所以實際峰值接近 1.25 份而不是 2 份。
     private mutating func coarsen() {
+        guard voxelSize.isFinite, voxelSize < Float.greatestFiniteMagnitude / 2 else { return }
         voxelSize *= 2
         var merged = [[Int64: Cell]](repeating: [:], count: shards.count)
         for si in shards.indices {
@@ -244,13 +307,24 @@ nonisolated struct FusedVoxelGrid {
 
     /// 匯出：孤立點移除（飄浮雜點）+ 單次觀測降權，再分層擇優到 target。
     /// minNeighbors>0 時，26 鄰域占據數不足的 voxel 視為雜訊剔除。
-    func exportPoints(target: Int, minNeighbors: Int) -> [CloudPoint] {
+    func exportPoints(target: Int, minNeighbors: Int, boundedMemory: Bool = false) -> [CloudPoint] {
+        guard target > 0 else { return [] }
         func c8(_ f: Float) -> UInt8 { UInt8(min(255, max(0, f))) }
         let vs = voxelSize
         var points: [CloudPoint] = []
-        points.reserveCapacity(count)
+        let total = count
+        let limit = min(total, target)
+        points.reserveCapacity(boundedMemory ? limit : total)
+        var visited = 0
         for shard in shards {
             for cell in shard.values {
+                // Bounded fallback: spread selections over the whole grid, without first
+                // allocating all points plus another spatial downsampling dictionary.
+                if boundedMemory, total > target {
+                    let before = visited * limit / total
+                    visited += 1
+                    if visited * limit / total == before { continue }
+                }
                 if minNeighbors > 0 {
                     var n = 0
                     for o in Self.neighborOffsets {
@@ -272,11 +346,55 @@ nonisolated struct FusedVoxelGrid {
         }
         // 起始格距用原生 voxelSize：加粗多少交給解析步長決定。
         // 先前預設 ×2 等於還沒開始就先砍掉 4 倍的點。
-        return PointCloudMath.stratifiedBest(points, startCell: voxelSize, target: target)
+        return boundedMemory ? points : PointCloudMath.stratifiedBest(points, startCell: voxelSize, target: target)
     }
 }
 
 // MARK: - 重融合引擎
+
+/// Neighbor reuse has both a byte cap and an entry cap, independent of total scan length.
+/// Keys are record indices within one fusion run, so resumed/corrected scans cannot reuse poses.
+nonisolated struct DepthViewCache {
+    private struct Entry { let view: DepthConsistencyView; let bytes: Int; var accessed: Int }
+    private var entries: [Int: Entry] = [:]
+    private var tick = 0
+    let byteLimit: Int
+    let entryLimit: Int
+    private(set) var retainedBytes = 0
+    private(set) var peakBytes = 0
+    private(set) var peakEntries = 0
+    private(set) var hits = 0
+    private(set) var loads = 0
+
+    init(byteLimit: Int = 2 * 1_024 * 1_024, entryLimit: Int = 8) {
+        self.byteLimit = max(0, byteLimit)
+        self.entryLimit = max(0, entryLimit)
+    }
+
+    mutating func view(index: Int, load: () -> DepthConsistencyView?) -> DepthConsistencyView? {
+        tick += 1
+        if var entry = entries[index] {
+            hits += 1; entry.accessed = tick; entries[index] = entry
+            return entry.view
+        }
+        loads += 1
+        guard let view = load() else { return nil }
+        let bytes = view.depth.count * MemoryLayout<Float>.stride + (view.confidence?.count ?? 0)
+        guard bytes <= byteLimit, entryLimit > 0 else { return view }
+        while retainedBytes + bytes > byteLimit || entries.count >= entryLimit {
+            guard let key = entries.min(by: { $0.value.accessed < $1.value.accessed })?.key,
+                  let old = entries.removeValue(forKey: key) else { break }
+            retainedBytes -= old.bytes
+        }
+        entries[index] = Entry(view: view, bytes: bytes, accessed: tick)
+        retainedBytes += bytes
+        peakBytes = max(peakBytes, retainedBytes)
+        peakEntries = max(peakEntries, entries.count)
+        return view
+    }
+
+    mutating func clear() { entries = [:]; retainedBytes = 0 }
+}
 
 nonisolated enum RefusionEngine {
 
@@ -284,12 +402,78 @@ nonisolated enum RefusionEngine {
     /// 在背景執行緒同步執行；progress ∈ 0...1。
     /// - meshVertices: ARKit 場景重建網格的世界座標頂點（可空）。用來補上關鍵幀沒拍到的表面
     ///   —— ARKit 的 mesh 融合每一幀（60fps）的深度，而本函式只吃 ~120 個關鍵幀。
-    /// - target: 匯出點數上限的覆寫。nil ＝ 用 config.exportMaxPoints。
-    ///   平面圖要的密度遠高於訓練種子點能承受的量（見 CaptureConfig.floorPlanMaxPoints），
-    ///   兩者共用一個上限的話，平面圖會被訓練的記憶體預算綁住。
+    /// - target: 桌機可覆寫匯出上限；手機仍受 config.exportMaxPoints 限制，
+    ///   避免平面圖要求造成第二份大型點雲與下採樣字典同時存在。
     static func refuse(records: [FrameRecord], sessionDir: URL, config: CaptureConfig,
                        meshVertices: [SIMD3<Float>] = [], target: Int? = nil,
                        progress: @Sendable (Double) -> Void) -> [CloudPoint] {
+        refuseWithReport(records: records, sessionDir: sessionDir, config: config,
+                         meshVertices: meshVertices, target: target, progress: progress).points
+    }
+
+    struct Report: Codable, Sendable {
+        var version = 3
+        var status = "running"
+        var stage = "frames"
+        var totalFrames = 0
+        var completedFrames = 0
+        var peakCells = 0
+        var initialCellLimit = 0
+        var capacityReductions = 0
+        var minimumAvailableBytes: UInt64?
+        var outputPoints = 0
+        var boundedExport = false
+        var finalVoxelSizeM: Float = 0
+        var effectiveOutputLimit = 0
+        var depthCacheHits = 0
+        var depthCacheLoads = 0
+        var depthCachePeakBytes = 0
+        var depthCachePeakEntries = 0
+        var depthReadSeconds = 0.0
+        var unprojectSeconds = 0.0
+        var consistencySeconds = 0.0
+        var diverseReferences: Bool?
+        var rayConsensus: Bool?
+    }
+    struct Result: Sendable { var points: [CloudPoint]; var report: Report }
+
+    /// availableMemory is injectable to reproduce pressure appearing midway through a scan.
+    static func refuseWithReport(records: [FrameRecord], sessionDir: URL, config: CaptureConfig,
+                                 meshVertices: [SIMD3<Float>] = [], target: Int? = nil,
+                                 availableMemory: () -> UInt64? = { availableMemoryBytes },
+                                 isCancelled: () -> Bool = { false },
+                                 progress: @Sendable (Double) -> Void) -> Result {
+        var report = Report(totalFrames: records.count)
+        report.diverseReferences = config.depthConsistencyEnabled && config.depthDiverseReferences
+        report.rayConsensus = config.depthConsistencyEnabled && config.depthConsensusEnabled
+        func persistReport() {
+            do {
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                try encoder.encode(report).write(to: sessionDir.appendingPathComponent("refusion-progress.json"), options: .atomic)
+            } catch { print("融合診斷儲存失敗：\(error.localizedDescription)") }
+        }
+        func memorySnapshot() -> UInt64? {
+            let bytes = availableMemory()
+            if let bytes { report.minimumAvailableBytes = min(report.minimumAvailableBytes ?? bytes, bytes) }
+            return bytes
+        }
+        let initialMemory = memorySnapshot()
+        let boundedMemory = initialMemory != nil
+        let outputLimit = boundedMemory
+            ? max(0, min(target ?? config.exportMaxPoints, config.exportMaxPoints))
+            : max(0, target ?? config.exportMaxPoints)
+        report.effectiveOutputLimit = outputLimit
+        let initialLimit = initialMemory.map {
+            min(cellBudget(configured: config.refuseMaxCells, availableBytes: $0),
+                workingSetCellLimit(megabytes: config.refuseMemoryBudgetMB))
+        } ?? max(1, config.refuseMaxCells)
+        report.initialCellLimit = initialLimit
+        persistReport()
+        func interrupted(status: String = "memoryPressure") -> Result {
+            report.status = status
+            persistReport()
+            return Result(points: [], report: report)
+        }
         // 位姿在進來之前就已經定案（ARKit ＋ 錨點修正，必要時再加 BA ——
         // 見 CaptureController.processScan）。這裡只負責融合。
         //
@@ -299,7 +483,7 @@ nonisolated enum RefusionEngine {
         // 重投影誤差沒有這個盲點，那條路走 BundleAdjuster。
 
         var grid = FusedVoxelGrid(voxelSize: config.refuseVoxelSizeM,
-                                  maxCells: safeMaxCells(config.refuseMaxCells))
+                                  maxCells: initialLimit)
         let depthDir = sessionDir.appendingPathComponent("depth", isDirectory: true)
         let imagesDir = sessionDir.appendingPathComponent("images", isDirectory: true)
         let total = max(1, records.count)
@@ -307,6 +491,8 @@ nonisolated enum RefusionEngine {
         // tProduce 與 tInsert 一定要分開 —— 前者可以平行、後者不行（共享 grid），
         // 先前兩者混在同一個 tUnproject 裡，等於看不出並行化的上限在哪。
         var tProduce: Double = 0, tInsert: Double = 0, tMesh: Double = 0, tDecode: Double = 0
+        var depthCache = DepthViewCache()
+        let referenceSelection = DepthReferenceSelection(records: records)
 
         /// 一幀的產出。純函式、不碰共享狀態 —— 所以可以平行跑。
         struct FrameYield {
@@ -316,7 +502,9 @@ nonisolated enum RefusionEngine {
             var meshSec: Double = 0
         }
 
-        func produce(_ r: FrameRecord) -> FrameYield {
+        func produce(_ index: Int) -> FrameYield {
+            let readStart = ProcessInfo.processInfo.systemUptime
+            let r = records[index]
             var y = FrameYield()
             // 幾何不可信的幀直接跳過：它的深度會被反投影到錯的世界座標，疊出殘影／雙層殼。
             // 殘影比破洞更糟 —— 破洞看得出來，殘影會被當成真的幾何。
@@ -324,9 +512,12 @@ nonisolated enum RefusionEngine {
             // 丟了只會白白開洞。它們改以降權併入（見下）。
             //
             // 這個檢查先前排在 JPEG 解碼**之後** —— 被排除的幀白白付了一次解碼。
-            if r.blurVerdict == .drop { return y }
+            if r.blurVerdict == .drop || r.transform.count != 16 || !r.transform.allSatisfy(\.isFinite) { return y }
             guard let depthFile = r.depthFile,
-                  let dw = r.depthWidth, let dh = r.depthHeight, dw > 0, dh > 0,
+                  let dw = r.depthWidth, let dh = r.depthHeight, dw > 0, dh > 0, dw <= 4096, dh <= 4096,
+                  r.intrinsics.width > 0, r.intrinsics.height > 0,
+                  r.intrinsics.fx.isFinite, r.intrinsics.fy.isFinite, r.intrinsics.fx > 0, r.intrinsics.fy > 0,
+                  r.intrinsics.cx.isFinite, r.intrinsics.cy.isFinite,
                   let depth = try? Data(contentsOf: depthDir.appendingPathComponent(depthFile)),
                   depth.count == dw * dh * 4 else { return y }
 
@@ -336,6 +527,7 @@ nonisolated enum RefusionEngine {
                confData.count == dw * dh {
                 conf = [UInt8](confData)
             }
+            report.depthReadSeconds += ProcessInfo.processInfo.systemUptime - readStart
             let tD = Date()
             guard let rgba = decodeRGBA(url: imagesDir.appendingPathComponent(r.imageFile),
                                         width: dw, height: dh) else { return y }
@@ -347,70 +539,124 @@ nonisolated enum RefusionEngine {
             // 原本只看 estimatedBlurPx，於是「相機拿得很穩但失焦」的幀拿到滿分權重，
             // 它糊掉的顏色會主導那格的加權平均 —— 這是實測清晰度才看得到的破口。
             let sharpness = blurWeight(Float(r.estimatedBlurPx), config)
+            let unprojectStart = ProcessInfo.processInfo.systemUptime
             y.measured = unprojectStored(depth: depth, conf: conf, rgba: rgba,
                                          dw: dw, dh: dh, K: K, c2w: c2w,
                                          config: config, sharpness: sharpness)
+            report.unprojectSeconds += ProcessInfo.processInfo.systemUptime - unprojectStart
+            let consistencyStart = ProcessInfo.processInfo.systemUptime
+            // Bounded neighbor window: at most four depth maps per worker, never the full scan.
+            // Compare corrected poses and raw depth before voxels hide the source observations.
+            var neighbors: [DepthConsistencyView] = []
+            if config.depthConsistencyEnabled {
+                let referenceIndices = config.depthDiverseReferences ? referenceSelection.indices(for: index)
+                    : [1, -1, 2, -2, 3, -3, 4, -4].map { index + $0 }
+                for other in referenceIndices {
+                    guard records.indices.contains(other), records[other].id != r.id,
+                          abs(records[other].timestamp - r.timestamp) >= 0.05,
+                          records[other].blurVerdict != .drop,
+                          let view = depthCache.view(index: other, load: {
+                              storedDepthView(records[other], directory: depthDir)
+                          }) else { continue }
+                    neighbors.append(view)
+                    if neighbors.count == 4 { break }
+                }
+                if config.depthConsensusEnabled {
+                    y.measured = DepthConsistencyView.consensus(y.measured,
+                        camera: SIMD3(c2w.columns.3.x, c2w.columns.3.y, c2w.columns.3.z),
+                        against: neighbors, config: config)
+                } else {
+                    y.measured = DepthConsistencyView.filter(y.measured, against: neighbors, config: config)
+                }
+            }
+            report.consistencySeconds += ProcessInfo.processInfo.systemUptime - consistencyStart
             // mesh 頂點：投影進本幀取色。同一頂點會被多幀命中 → 由 voxel 加權平均做多視角混色。
             if !meshVertices.isEmpty {
                 let tM = Date()
                 y.mesh = projectMesh(meshVertices, depth: depth, rgba: rgba, dw: dw, dh: dh,
                                      K: K, c2w: c2w, config: config, sharpness: sharpness)
+                if config.depthConsistencyEnabled {
+                    // Mesh must agree with this frame AND another measured view; the old 10cm
+                    // color tolerance alone could refill rejected geometry with a second shell.
+                    if let own = DepthConsistencyView(depth: depth, confidence: conf, intrinsics: K, c2w: c2w) {
+                        y.mesh = DepthConsistencyView.filter(y.mesh, against: [own], config: config)
+                        // Mesh may fill holes, but must not bypass the measured-point support gate.
+                        y.mesh = DepthConsistencyView.filter(y.mesh, against: neighbors, config: config,
+                            minimumSupports: config.depthConsensusEnabled ? max(1, min(2, neighbors.count)) : 1)
+                    } else { y.mesh = [] }
+                }
                 y.meshSec = Date().timeIntervalSince(tM)
             }
             return y
         }
 
-        // 分批：批內平行產出、批間序列插入。
-        //
-        // **為什麼分批而不是一次全平行。** 一次全平行要同時持有所有幀的點：
-        // 54 幀 × 49152 點 × 20B ≈ 53MB，而整屋掃描的 200 幀會到 220MB ——
-        // 這個 App 已經對記憶體敏感（點雲＋訓練都在同一台手機上）。
-        // 分批把峰值壓在「批大小 × 每幀點數」，同時仍然吃滿核心。
-        let lanes = max(1, min(8, ProcessInfo.processInfo.activeProcessorCount - 1))
-        var done = 0
-        var i = 0
-        while i < records.count {
-            let n = min(lanes, records.count - i)
-            var batch = [FrameYield](repeating: FrameYield(), count: n)
-            let tP = Date()
-            if n == 1 {
-                batch[0] = produce(records[i])
-            } else {
-                // 每條 lane 只寫自己那一格 → 沒有交疊，不需要鎖
-                batch.withUnsafeMutableBufferPointer { buf in
-                    DispatchQueue.concurrentPerform(iterations: n) { k in
-                        buf[k] = produce(records[i + k])
-                    }
-                }
+        // One owned frame at a time: no retained batch of projected mesh and depth points.
+        // Re-check headroom before decoding, inserting, and exporting, not only at startup.
+        let lanes = 1
+        var cellLimit = initialLimit
+        func adaptCapacity(to bytes: UInt64) {
+            if bytes < 256 * 1_024 * 1_024 { depthCache.clear() }
+            let limit = pressureCellLimit(currentLimit: cellLimit, currentCells: grid.count, availableBytes: bytes)
+            if limit < cellLimit {
+                grid.reduceCapacity(to: limit)
+                cellLimit = limit
+                report.capacityReductions += 1
             }
-            tProduce += Date().timeIntervalSince(tP)
-
-            let tI = Date()
-            for y in batch {
-                grid.insert(y.measured)
-                if !y.mesh.isEmpty { grid.insert(y.mesh, measured: false) }
-                tDecode += y.decodeSec
-                tMesh += y.meshSec
-                done += 1
-                progress(Double(done) / Double(total))
-            }
-            tInsert += Date().timeIntervalSince(tI)
-            i += n
         }
+        for i in records.indices {
+            if isCancelled() { return interrupted(status: "cancelled") }
+            if let bytes = memorySnapshot() {
+                if shouldStopForMemory(availableBytes: bytes) { return interrupted() }
+                adaptCapacity(to: bytes)
+            }
+            let tP = Date()
+            let produced = autoreleasepool { produce(i) }
+            tProduce += Date().timeIntervalSince(tP)
+            if isCancelled() { return interrupted(status: "cancelled") }
+            if let bytes = memorySnapshot() {
+                if shouldStopForMemory(availableBytes: bytes) { return interrupted() }
+                // Decode/mesh projection may consume the headroom observed before this frame.
+                adaptCapacity(to: bytes)
+            }
+            let tI = Date()
+            grid.insert(produced.measured, boundedMemory: boundedMemory)
+            if !produced.mesh.isEmpty { grid.insert(produced.mesh, measured: false, boundedMemory: boundedMemory) }
+            tInsert += Date().timeIntervalSince(tI)
+            tDecode += produced.decodeSec
+            tMesh += produced.meshSec
+            report.completedFrames = i + 1
+            report.peakCells = max(report.peakCells, grid.count)
+            report.depthCacheHits = depthCache.hits
+            report.depthCacheLoads = depthCache.loads
+            report.depthCachePeakBytes = depthCache.peakBytes
+            report.depthCachePeakEntries = depthCache.peakEntries
+            if i % 8 == 0 || i == records.count - 1 { persistReport() }
+            progress(Double(i + 1) / Double(total) * 0.9)
+        }
+        report.stage = "export"
+        depthCache.clear()
+        persistReport()
+        if isCancelled() { return interrupted(status: "cancelled") }
+        if let bytes = memorySnapshot(), shouldStopForMemory(availableBytes: bytes) { return interrupted() }
         // 診斷：這條鏈上有三處會悄悄粗化解析度（融合格觸頂、匯出擇優下採樣、訓練高斯預算），
-        // 而初始點距直接決定初始高斯大小（msplat 的初始 scale = 3-NN 距離）。
+        // 而初始點距直接決定初始高斯大小（依外部訓練器的初始化方式而定）。
         // 過去完全沒有數字，訓練端看到 15cm 的初始高斯卻無從得知是哪一段造成的。
-        // 產出（可平行，牆鐘時間已除以 lanes）與插入（不可平行，共享 grid）分開報。
-        // 解碼/mesh 是各 lane 的 CPU 時間總和，會大於牆鐘 —— 那正是被並行吃掉的部分。
-        print(String(format: "  重融合分段: 產出 %.2fs（%d 路平行；其中 CPU 時間 "
+        // 串流產出與插入分開計時；JPEG／mesh 是產出內的子階段。
+        print(String(format: "  重融合分段: 產出 %.2fs（%d 路串流；其中牆鐘時間 "
                      + "JPEG 解碼 %.2fs、mesh 投影 %.2fs）、插入 grid %.2fs（序列）、%d 幀",
                      tProduce, lanes, tDecode, tMesh, tInsert, records.count))
+        print(String(format: "  深度分段: 讀取 %.2fs、反投影 %.2fs、一致性驗證（含鄰幀）%.2fs；快取峰值 %.2f MiB / %d 幀",
+                     report.depthReadSeconds, report.unprojectSeconds, report.consistencySeconds,
+                     Double(report.depthCachePeakBytes) / 1_048_576, report.depthCachePeakEntries))
         let rawCells = grid.count
         let inferredOnly = grid.inferredOnlyCount
         let gridVoxel = grid.voxelSize
         let tE = Date()
-        let out = grid.exportPoints(target: target ?? config.exportMaxPoints,
-                                    minNeighbors: config.refuseMinNeighbors)
+        // On device, use a bounded pass rather than a full cloud + downsampling dictionary.
+        report.boundedExport = boundedMemory
+        let out = grid.exportPoints(target: outputLimit,
+                                    minNeighbors: config.refuseMinNeighbors,
+                                    boundedMemory: report.boundedExport)
         print(String(format: "  匯出擇優 %.2fs（%d 格 → %d 點）",
                      Date().timeIntervalSince(tE), rawCells, out.count))
         var msg = "Refusion: \(records.count) frames"
@@ -421,18 +667,38 @@ nonisolated enum RefusionEngine {
             let steps = Int((log2(Double(gridVoxel / config.refuseVoxelSizeM))).rounded())
             msg += String(format: " (觸頂粗化 %d 次，設定值 %.3fm)", steps, config.refuseVoxelSizeM)
         }
-        msg += " -> 匯出 \(out.count) 點（上限 \(config.exportMaxPoints)）"
+        msg += " -> 匯出 \(out.count) 點（本次上限 \(outputLimit)）"
         if inferredOnly > 0 {
             let pct = Double(inferredOnly) * 100 / Double(max(1, rawCells))
             msg += String(format: "；其中 %d 格(%.1f%%) 是 LiDAR 沒覆蓋、只靠 ARKit mesh 撐著",
                           inferredOnly, pct)
         }
         if out.count < rawCells {
-            msg += String(format: "，匯出端又粗化 %.1fx",
-                          (Double(rawCells) / Double(max(1, out.count))).squareRoot())
+            msg += "，過濾／取樣移除 \(rawCells - out.count) 格"
         }
         FileHandle.standardError.write(Data((msg + "\n").utf8))
-        return out
+        report.status = "completed"
+        report.stage = "finished"
+        report.outputPoints = out.count
+        report.finalVoxelSizeM = grid.voxelSize
+        persistReport()
+        progress(1)
+        return Result(points: out, report: report)
+    }
+
+    private static func storedDepthView(_ r: FrameRecord, directory: URL) -> DepthConsistencyView? {
+        guard r.transform.count == 16, r.transform.allSatisfy(\.isFinite),
+              let name = r.depthFile, let w = r.depthWidth, let h = r.depthHeight,
+              w > 1, h > 1, w <= 4096, h <= 4096,
+              let data = try? Data(contentsOf: directory.appendingPathComponent(name)), data.count == w * h * 4 else { return nil }
+        var confidence: [UInt8]?
+        if let file = r.confidenceFile {
+            guard let bytes = try? Data(contentsOf: directory.appendingPathComponent(file)), bytes.count == w * h else { return nil }
+            confidence = [UInt8](bytes)
+        }
+        return DepthConsistencyView(depth: data, confidence: confidence,
+                                    intrinsics: r.intrinsics.scaled(toWidth: w, height: h),
+                                    c2w: float4x4(rowMajor: r.transform))
     }
 
     /// simd_float4x4 → row-major 16（FrameRecord.transform 的格式）
@@ -493,6 +759,7 @@ nonisolated enum RefusionEngine {
                 if !(z > minD && z < maxD) { continue }
                 let u = fx * (cam.x / z) + cx
                 let v = fy * (-cam.y / z) + cy
+                guard u.isFinite, v.isFinite, u >= 0, v >= 0, u < Float(dw), v < Float(dh) else { continue }
                 let iu = Int(u), iv = Int(v)
                 if iu < 0 || iv < 0 || iu >= dw || iv >= dh { continue }
                 // 可見性：與該幀量到的深度一致才算「這一幀真的看到它」，否則是被遮擋的背面
@@ -562,38 +829,68 @@ nonisolated enum RefusionEngine {
     }
 
     /// 每格的實際記憶體成本（位元組）。
-    /// Cell ≈ 48B，字典 entry = key 8 + value 48 = 56B，載入因子 0.75 → 約 75B。
-    /// 取 80 留一點餘裕。
-    private static let kBytesPerCell = 80
+    /// 包含 SIMD 對齊、字典空位與擴容餘裕；這是預算估計，並非實測 RSS。
+    private static let kBytesPerCell = 128
 
     /// 依「現在**還能**用多少記憶體」夾住格數上限。
     ///
-    /// **固定常數猜不準。** 同一個 4M 在剛開 App 時很安全，
-    /// 而在掃完大場景、記憶體已經被關鍵幀與點雲吃掉之後，它就是被系統砍掉的原因 ——
-    /// 實機回報的「融合點雲時閃退」。
-    /// os_proc_available_memory() 回報的正是「距離 jetsam 還剩多少位元組」，
-    /// 那才是該拿來決定上限的東西。
-    ///
-    /// 只用其中一半：另一半要留給匯出階段（點陣列 ＋ 分層下採樣的字典），
-    /// 那兩個的尖峰跟融合格是**重疊**的。
-    /// 觸頂粗化仍然保底 —— 真的到上限就加粗格距，是降級不是失敗。
-    ///
-    /// macOS 直接照用設定值：那裡沒有 jetsam，而 os_proc_available_memory() 本身
-    /// 也只存在於 iOS。本檔的用意之一是能在桌機重跑同一份融合做離線驗證
-    /// （見檔頭、tools/refuse_ply.swift），少了這個 #if 就編不過。
+    /// Reserve room for ARKit, output arrays, dictionary growth and coarsening. In particular,
+    /// never impose a 200k-cell minimum when the available memory cannot afford it.
+    static func cellBudget(configured: Int, availableBytes: UInt64) -> Int {
+        let reserve: UInt64 = 64 * 1_024 * 1_024
+        let usable = availableBytes > reserve ? availableBytes - reserve : 0
+        let cells = usable / 4 / UInt64(kBytesPerCell)
+        return max(1, min(max(1, configured), Int(min(cells, UInt64(Int.max)))))
+    }
+
+    static var availableMemoryBytes: UInt64? {
+        #if os(iOS)
+        return UInt64(os_proc_available_memory())
+        #else
+        return nil
+        #endif
+    }
+
+    static func workingSetCellLimit(megabytes: Int) -> Int {
+        max(1, min(max(1, megabytes), 512) * 1_024 * 1_024 / kBytesPerCell)
+    }
+
+    static func shouldStopForMemory(availableBytes: UInt64) -> Bool {
+        availableBytes < 96 * 1_024 * 1_024
+    }
+
+    static func pressureCellLimit(currentLimit: Int, currentCells: Int, availableBytes: UInt64) -> Int {
+        guard availableBytes < 256 * 1_024 * 1_024 else { return currentLimit }
+        // Include the existing grid when recalculating; otherwise every sample would shrink
+        // the budget simply because this same grid has consumed memory since the last sample.
+        let existing = UInt64(max(0, currentCells)) * UInt64(kBytesPerCell)
+        let (sum, overflow) = availableBytes.addingReportingOverflow(existing)
+        return cellBudget(configured: currentLimit, availableBytes: overflow ? UInt64.max : sum)
+    }
+
+    static func meshSampleStride(vertexCount: Int, limit: Int) -> Int {
+        guard vertexCount > 0 else { return 1 }
+        let limit = max(1, limit)
+        return max(1, vertexCount / limit + (vertexCount % limit == 0 ? 0 : 1))
+    }
+
+    static var hasOptionalProcessingHeadroom: Bool {
+        #if os(iOS)
+        let available = os_proc_available_memory()
+        return available >= 128 * 1_024 * 1_024
+        #else
+        return true
+        #endif
+    }
+
     static func safeMaxCells(_ configured: Int) -> Int {
         #if !os(iOS)
-        return configured
+        return max(1, configured)
         #else
-        let avail = os_proc_available_memory()
-        guard avail > 0 else { return configured }
-        let budget = Int(Double(avail) * 0.5) / kBytesPerCell
-        let capped = max(200_000, min(configured, budget))
-        if capped < configured {
-            print(String(format: "重融合: 可用記憶體 %.0f MB → 格數上限由 %d 收到 %d"
-                         + "（避免融合中被系統回收）",
-                         Double(avail) / 1e6, configured, capped))
-        }
+        let available = os_proc_available_memory()
+        let capped = available > 0 ? cellBudget(configured: configured, availableBytes: UInt64(available))
+                                   : min(max(1, configured), 250_000)
+        if capped < configured { print("重融合記憶體保護：格數上限 \(configured) → \(capped)") }
         return capped
         #endif
     }

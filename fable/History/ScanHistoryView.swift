@@ -1,4 +1,5 @@
 import SwiftUI
+import ImageIO
 
 struct ScanHistoryView: View {
     @Environment(\.dismiss) private var dismiss
@@ -52,7 +53,7 @@ struct ScanHistoryView: View {
                                 } else {
                                     NavigationLink {
                                         ScanHistoryDetail(entry: entry) {
-                                            entries.removeAll { $0.id == entry.id }
+                                            Task { await reload() }
                                         }
                                     } label: { row(entry) }
                                     .swipeActions {
@@ -173,7 +174,14 @@ struct ScanHistoryView: View {
 
 private struct ScanHistoryDetail: View {
     let entry: ScanEntry
-    let onDelete: () -> Void
+    @State private var optimizedEntry: ScanEntry?
+    private var currentEntry: ScanEntry { optimizedEntry ?? entry }
+    @State private var selection: TrainingFrameSelector.Report?
+    @State private var poseNotice: String?
+    @State private var optimizationTask: Task<Void, Never>?
+    @State private var optimizationText = ""
+    @State private var optimizationProgress = 0.0
+    let onLibraryChange: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var preview: ScanPreview?
     @State private var selectedTab = 0
@@ -186,9 +194,26 @@ private struct ScanHistoryDetail: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if let lidar = entry.usedLiDAR {
+            if let lidar = currentEntry.usedLiDAR {
                 Text(lidar ? "LiDAR 深度掃描" : "相機模式・未使用 LiDAR 深度")
                     .font(.caption).foregroundStyle(.secondary).padding(.top, 8)
+            }
+            if optimizedEntry != nil {
+                Text("已另存優化版本，原始掃描仍保留").font(.caption).foregroundStyle(.secondary)
+            }
+            if let poseNotice {
+                Text(poseNotice).font(.caption2).foregroundStyle(.secondary).padding(.horizontal)
+            }
+            if let selection {
+                Text("訓練選用 \(selection.selectedIDs.count) / \(selection.inputFrames) 張影像")
+                    .font(.caption).foregroundStyle(.secondary).padding(.top, 4)
+                if let notice = selection.notice {
+                    Text(notice).font(.caption2).foregroundStyle(.orange)
+                        .lineLimit(3).padding(.horizontal)
+                }
+            }
+            if optimizationTask != nil {
+                ProgressView(optimizationText, value: optimizationProgress).padding()
             }
             Picker("預覽內容", selection: $selectedTab) {
                 Text("3D 點雲").tag(0)
@@ -225,7 +250,19 @@ private struct ScanHistoryDetail: View {
                 Spacer()
             }
         }
-        .navigationTitle(entry.date.formatted(date: .abbreviated, time: .shortened))
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                if optimizationTask != nil {
+                    Button("取消") { optimizationTask?.cancel() }
+                } else {
+                    Button("優化訓練資料") {
+                        optimizationTask = Task { await optimize() }
+                    }.disabled(busy || preview == nil)
+                }
+            }
+        }
+        .onDisappear { optimizationTask?.cancel() }
+        .navigationTitle(currentEntry.date.formatted(date: .abbreviated, time: .shortened))
         .navigationBarTitleDisplayMode(.inline)
         .safeAreaInset(edge: .bottom) {
             HStack {
@@ -234,7 +271,7 @@ private struct ScanHistoryDetail: View {
                     ShareLink(item: archive) { Label("分享掃描", systemImage: "square.and.arrow.up") }
                 } else {
                     Button { Task { await makeArchive() } } label: {
-                        Label("打包分享", systemImage: "square.and.arrow.up")
+                        Label("匯出 3DGS 訓練資料", systemImage: "square.and.arrow.up")
                     }
                 }
                 Spacer()
@@ -246,9 +283,12 @@ private struct ScanHistoryDetail: View {
             .padding().background(.bar)
         }
         .task {
-            archive = entry.archive
+            // Existing ZIPs may predate COLMAP preparation; regenerate once per detail visit.
+            archive = nil
+            selection = await ScanLibrary.shared.trainingSelection(currentEntry)
+            poseNotice = await ScanLibrary.shared.poseRefinementNotice(currentEntry)
             do {
-                let result = try await ScanLibrary.shared.preview(entry)
+                let result = try await ScanLibrary.shared.preview(currentEntry)
                 guard !Task.isCancelled else { return }
                 preview = result
             } catch {
@@ -262,7 +302,7 @@ private struct ScanHistoryDetail: View {
                 Task {
                     busy = true
                     defer { busy = false }
-                    do { try await ScanLibrary.shared.delete(entry); onDelete(); dismiss() }
+                    do { try await ScanLibrary.shared.delete(currentEntry); onLibraryChange(); dismiss() }
                     catch { self.error = error.localizedDescription }
                 }
             }
@@ -275,15 +315,50 @@ private struct ScanHistoryDetail: View {
     private func makeArchive() async {
         busy = true
         defer { busy = false }
-        do { archive = try await ScanLibrary.shared.archive(entry) }
+        do {
+            archive = try await ScanLibrary.shared.archive(currentEntry)
+            selection = await ScanLibrary.shared.trainingSelection(currentEntry)
+            poseNotice = await ScanLibrary.shared.poseRefinementNotice(currentEntry)
+        }
         catch { self.error = error.localizedDescription }
     }
+    private func optimize() async {
+        busy = true
+        optimizationText = "準備優化…"
+        optimizationProgress = 0
+        UIApplication.shared.isIdleTimerDisabled = true
+        defer {
+            busy = false; optimizationTask = nil
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
+        // Release large SceneKit inputs while the offline solver/refusion needs memory.
+        preview = nil
+        do {
+            let result = try await ScanLibrary.shared.optimizeTraining(currentEntry) { text, fraction in
+                Task { @MainActor in
+                    optimizationText = text; optimizationProgress = fraction
+                }
+            }
+            optimizedEntry = result; archive = nil
+            onLibraryChange()
+            selection = await ScanLibrary.shared.trainingSelection(result)
+            poseNotice = await ScanLibrary.shared.poseRefinementNotice(result)
+            preview = try await ScanLibrary.shared.preview(result)
+        } catch is CancellationError {
+            preview = try? await ScanLibrary.shared.preview(currentEntry)
+        } catch {
+            self.error = error.localizedDescription
+            preview = try? await ScanLibrary.shared.preview(currentEntry)
+        }
+    }
+
 }
 
 struct ScanPhoto: View {
     let url: URL?
     let maxDimension: Int
     var fit = false
+    var orientation: CGImagePropertyOrientation? = nil
     var onImageLoaded: ((URL, Bool) -> Void)? = nil
     @State private var image: UIImage?
     @State private var loaded = false
@@ -291,6 +366,7 @@ struct ScanPhoto: View {
     private struct ImageRequest: Hashable {
         let url: URL?
         let maxDimension: Int
+        let orientation: UInt32?
     }
 
     var body: some View {
@@ -309,7 +385,7 @@ struct ScanPhoto: View {
                 }
             }
         }
-        .task(id: ImageRequest(url: url, maxDimension: maxDimension)) {
+        .task(id: ImageRequest(url: url, maxDimension: maxDimension, orientation: orientation?.rawValue)) {
             // 換圖／切換預覽解析度時保留上一張；首張載入才顯示 ProgressView。
             guard let url else {
                 image = nil
@@ -318,7 +394,7 @@ struct ScanPhoto: View {
             }
             if image == nil { loaded = false }
             let data = await Task.detached(priority: .utility) {
-                ScanLibrary.imageData(url, maxDimension: maxDimension)
+                ScanLibrary.imageData(url, maxDimension: maxDimension, orientation: orientation)
             }.value
             guard !Task.isCancelled else { return }
             let replacement = data.flatMap(UIImage.init(data:))

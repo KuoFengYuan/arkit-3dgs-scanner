@@ -22,22 +22,41 @@ nonisolated struct SmartShutter {
 
     /// 平移超過 keyframeTranslationM「或」旋轉超過 keyframeRotationDeg 即觸發，
     /// 並以 minKeyframeInterval 防止手震高頻連拍。品質 gate 由呼叫端把關
-    /// （品質不合格時不呼叫本函式，內部狀態不前進，條件保持成立直到拍下為止）。
-    mutating func shouldCapture(pose: simd_float4x4, time: TimeInterval, config: CaptureConfig) -> Bool {
+    /// 此查詢不改變狀態；影像成功複製並排入寫入後才呼叫 markCaptured。
+    func isDue(pose: simd_float4x4, time: TimeInterval, config: CaptureConfig,
+                                cameraOnly: Bool = false, estimatedDepth: Float? = nil) -> Bool {
         guard let last = lastPose else {
-            lastPose = pose
-            lastTime = time
             return true    // 第一幀無條件抓
         }
         guard time - lastTime >= config.minKeyframeInterval else { return false }
 
         let translation = simd_distance(MatrixUtil.position(pose), MatrixUtil.position(last))
         let rotationDeg = MatrixUtil.rotationAngleDeg(last, pose)
-        guard translation >= config.keyframeTranslationM || rotationDeg >= config.keyframeRotationDeg else {
+        // 近距離自動加密重疊；RGB 仍需至少 4 cm 基線，LiDAR 最小 2 cm。
+        let threshold: Float
+        if let depth = estimatedDepth, depth.isFinite, depth > 0 {
+            let minimum = cameraOnly ? config.cameraOnlyMinBaselineM : Float(0.02)
+            threshold = min(config.keyframeTranslationM, max(minimum, depth * 0.05))
+        } else { threshold = config.keyframeTranslationM }
+        guard !cameraOnly || translation >= config.cameraOnlyMinBaselineM else { return false }
+        guard translation >= threshold || rotationDeg >= config.keyframeRotationDeg else {
             return false
         }
+        return true
+    }
+
+    mutating func markCaptured(pose: simd_float4x4, time: TimeInterval) {
         lastPose = pose
         lastTime = time
+    }
+
+    /// Compatibility for callers that accept immediately; the live pipeline commits only after
+    /// it has successfully copied the image and obtained its writer.
+    mutating func shouldCapture(pose: simd_float4x4, time: TimeInterval, config: CaptureConfig,
+                               cameraOnly: Bool = false, estimatedDepth: Float? = nil) -> Bool {
+        guard isDue(pose: pose, time: time, config: config, cameraOnly: cameraOnly,
+                    estimatedDepth: estimatedDepth) else { return false }
+        markCaptured(pose: pose, time: time)
         return true
     }
 }

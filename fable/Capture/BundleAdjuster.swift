@@ -114,9 +114,12 @@ nonisolated enum BundleAdjuster {
     /// - records: 關鍵幀（transform 為初值，來自 ARKit＋錨點修正）
     /// - observations: 掃描時同步建立的跨幀對應（見 FeatureTracker）
     static func refine(records: [FrameRecord], observations: [FeatureObservation],
-                       rounds: Int) -> PoseRefineResult {
+                       rounds: Int, isCancelled: () -> Bool = { false }) -> PoseRefineResult {
         var result = PoseRefineResult()
-        guard rounds > 0, !observations.isEmpty else { return result }
+        guard rounds > 0, !observations.isEmpty, !isCancelled() else {
+            result.rejectionReason = isCancelled() ? "cancelled" : "noObservations"
+            return result
+        }
 
         // 逐幀索引：id → (內參, 當前 c2w, 該幀的觀測)
         var order: [Int] = []
@@ -143,6 +146,7 @@ nonisolated enum BundleAdjuster {
         let framesBefore = order.count
         order = order.filter { (obsByFrame[$0]?.count ?? 0) >= kMinObsPerFrame }
         guard order.count >= 3 else {
+            result.rejectionReason = "insufficientTrackSupport"
             // 不要靜默返回 —— 「完全沒有輸出」看起來像功能沒做，而不是條件不足
             print("BA: 略過 —— \(framesBefore) 幀中只有 \(order.count) 幀的觀測數達 "
                   + "\(kMinObsPerFrame)（共 \(observations.count) 個觀測）。"
@@ -170,6 +174,7 @@ nonisolated enum BundleAdjuster {
             var res: [Float] = []
             var applied = 0
             for _ in 0..<rounds {
+                if isCancelled() { break }
                 let pts = trackPointsFor(poses, order: order, intr: intr, obsByFrame: fit)
                 let rBefore = residuals(order: order, poses: poses, intr: intr,
                                         obsByFrame: fit, points: pts)
@@ -178,6 +183,7 @@ nonisolated enum BundleAdjuster {
                 // 逐幀獨立求解（結構固定 ⇒ 相機之間解耦）
                 var deltas: [Int: simd_float4x4] = [:]
                 for id in order {
+                    if isCancelled() { break }
                     guard let c2w = poses[id], let K = intr[id], let obs = fit[id] else { continue }
                     if let d = solveFrame(c2w: c2w, K: K, obs: obs, points: pts) {
                         deltas[id] = d
@@ -214,7 +220,7 @@ nonisolated enum BundleAdjuster {
         let gate = runRounds(fit: obsByFrame, from: poses)
         result.roundsApplied = gate.rounds
         result.residualsPx = gate.residuals
-        guard gate.rounds > 0 else { return result }
+        guard gate.rounds > 0 else { result.rejectionReason = "noImprovement"; return result }
         if let hb = heldBefore, let ha = heldOutReproj(gate.poses) {
             result.holdoutMedianPx = (hb.median, ha.median)
         }
@@ -229,14 +235,13 @@ nonisolated enum BundleAdjuster {
         // 這是幾何決定的，不是可以調的參數；而保留集每次掃描都算得出來，
         // 就讓它自己決定。我猜一個預設值只會在另一半的情況下猜錯。
         let pass = (result.holdoutDelta ?? 0) < kHoldoutGate
-        if pass {
-            // 閘門過了 → 用**全部**觀測重解一次才是上線的解。
-            // 同一個 runRounds、同一組初值，只是資料多 20%（保留集只為判定而存在，
-            // 判定完就不該再扣著五分之一的約束不用）。
-            let full = runRounds(fit: observations.reduce(into: [Int: [FeatureObservation]]()) {
-                if poses[$1.frameID] != nil { $0[$1.frameID, default: []].append($1) }
-            }, from: poses)
-            result.poses = full.rounds > 0 ? full.poses : gate.poses
+        if pass && !isCancelled() {
+            // Apply the exact solution evaluated on untouched tracks. Re-fitting on the held-out
+            // tracks would produce a different, unvalidated solution and invalidate this gate.
+            result.poses = gate.poses
+        } else {
+            result.rejectionReason = isCancelled() ? "cancelled" :
+                (result.holdoutMedianPx == nil ? "insufficientHoldoutTracks" : "holdoutDidNotImprove")
         }
 
         if let a = result.residualsPx.first, let b = result.residualsPx.last {
@@ -262,7 +267,7 @@ nonisolated enum BundleAdjuster {
             // 中位數才是「典型」誤差：RMS 只擋 40px 硬上限，少數 30px 的誤匹配就能主導它。
             // 位姿解讀要看中位數；RMS 與中位數的差距則代表誤匹配的比重。
             print(String(format: "  重投影 RMS %.2f px / 中位數 %.2f px"
-                         + "（⇒ 典型位姿誤差 %.2f cm；RMS 高於中位數的部分是誤匹配）",
+                         + "（以中位深度換算 %.2f cm；僅為投影殘差尺度，非絕對精度）",
                          rEnd.reproj, rEnd.medianReproj, toCm(rEnd.medianReproj)))
             print(String(format: "  深度殘差 %.2f px（≈ %.2f cm，屬 LiDAR 量測雜訊，非位姿誤差）"
                          + "，佔目標函數平方成本 %.0f%%",
@@ -276,7 +281,7 @@ nonisolated enum BundleAdjuster {
                 print(String(format: "  保留集（%d 條 track 未參與求解）重投影中位數 "
                              + "%.2f → %.2f px（%+.0f%%）：%@",
                              heldTracks.count, h.before, h.after, d * 100,
-                             pass ? "位姿真的變好 → 用全部觀測重解後套用"
+                             pass ? "保留集改善 → 套用已驗證的解"
                                   : "未達 \(Int(-kHoldoutGate * 100))% 門檻 ⇒ "
                                     + "在擬合觀測雜訊，本次不套用 BA 位姿"))
             } else {

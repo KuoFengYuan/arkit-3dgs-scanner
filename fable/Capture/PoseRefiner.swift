@@ -33,6 +33,7 @@ nonisolated struct PoseRefineResult: Sendable {
     /// 它才是決定 3DGS 解析度天花板的量（1cm 位姿誤差 @2m ≈ 7px）
     var residualsPx: [Float] = []
     var roundsApplied = 0
+    var rejectionReason: String? = nil
     /// 交叉驗證：保留集（未參與求解的 track）的重投影中位數，修正前 → 修正後（像素）。
     /// **這是唯一一個不在目標函數裡的數字** —— 其餘都是 BA 自己在最小化的量，
     /// 下降是必然的。只有這一對能分辨「位姿真的變好」與「把觀測雜訊吸進位姿」。

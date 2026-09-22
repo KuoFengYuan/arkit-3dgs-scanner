@@ -68,7 +68,7 @@ struct ScanRoutePlaybackView: View {
     private var photoPane: some View {
         ScanPhoto(url: frame?.image,
                   maxDimension: playing && playbackFPS >= 10 ? 960 : (allowsFullscreen ? 1600 : 2400),
-                  fit: true) { url, succeeded in
+                  fit: true, orientation: frame?.imageOrientation) { url, succeeded in
             settledImageURL = url
             displayedFrame = succeeded ? frames.first(where: { $0.image == url }) : nil
         }

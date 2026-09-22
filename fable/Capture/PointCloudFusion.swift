@@ -27,6 +27,25 @@ nonisolated struct TileRenderData: Sendable {
     let indices: Data     // int32
 }
 
+/// Coalesce updates while preserving arrival order: frequently touched tiles cannot starve others.
+nonisolated struct DirtyTileQueue {
+    private var queue: [Int64] = []
+    private var head = 0
+    private var members: Set<Int64> = []
+    var count: Int { members.count }
+    var first: Int64? { head < queue.count ? queue[head] : nil }
+    mutating func insert(_ key: Int64) {
+        if members.insert(key).inserted { queue.append(key) }
+    }
+    mutating func popFirst() -> Int64? {
+        guard head < queue.count else { return nil }
+        let key = queue[head]; head += 1; members.remove(key)
+        if head == queue.count { queue.removeAll(keepingCapacity: true); head = 0 }
+        else if head >= 1024 && head * 2 >= queue.count { queue.removeFirst(head); head = 0 }
+        return key
+    }
+}
+
 // MARK: - 錨點相對的空間磚化加權融合格
 //
 // 每個空間磚綁定一個 ARAnchor。cell 的位置存在「該磚錨點的局部座標系」，
@@ -44,7 +63,7 @@ nonisolated struct TiledFusedGrid {
     }
 
     private(set) var tiles: [Int64: Tile] = [:]
-    private var dirtyTiles: Set<Int64> = []
+    private var dirtyTiles = DirtyTileQueue()
     private var pendingAnchors: [Int64] = []            // 尚未建立 ARAnchor 的新磚
     private(set) var voxelSize: Float
     let tileSize: Float
@@ -60,6 +79,32 @@ nonisolated struct TiledFusedGrid {
     }
 
     var count: Int { totalCells }
+
+    /// Release the large live grid before offline fusion. Keep anchor-local samples for
+    /// fallback/resume; visit one tile at a time so the old dictionaries are released promptly.
+    mutating func trimForProcessing(limit: Int) {
+        let limit = max(0, limit)
+        guard totalCells > limit else { return }
+        let total = totalCells
+        var visited = 0, retained = 0
+        for key in Array(tiles.keys) {
+            guard var tile = tiles.removeValue(forKey: key) else { continue }
+            var compact: [Int64: FusedVoxelGrid.Cell] = [:]
+            for (cellKey, cell) in tile.cells {
+                let before = visited * limit / total
+                visited += 1
+                if visited * limit / total > before { compact[cellKey] = cell }
+            }
+            retained += compact.count
+            tile.cells = compact
+            tiles[key] = tile
+            dirtyTiles.insert(key)
+        }
+        totalCells = retained
+        wellObserved = tiles.values.reduce(0) { sum, tile in
+            sum + tile.cells.values.reduce(0) { $1.dirMask.nonzeroBitCount >= Self.kFullDirs ? $0 + 1 : $0 }
+        }
+    }
 
     /// anchorTransforms：主執行緒傳入的各磚錨點「當下」變換（漂移修正後）。
     /// 缺席（新磚尚未建錨）時退回 translate(磚中心)，與稍後建立的錨點初始值一致。
@@ -195,10 +240,26 @@ nonisolated struct TiledFusedGrid {
         print("[PointCloud] 自動粗化 → voxel \(voxelSize * 100)cm，剩 \(totalCells) 點")
     }
 
-    mutating func popDirtyTiles(limit: Int) -> [Int64] {
-        var out: [Int64] = []
-        while out.count < limit, let key = dirtyTiles.popFirst() { out.append(key) }
+    var pendingRenderTileCount: Int { dirtyTiles.count }
+
+    mutating func popDirtyTiles(limit: Int, pointBudget: Int = .max) -> [Int64] {
+        var out: [Int64] = [], points = 0
+        while out.count < max(0, limit), let key = dirtyTiles.first {
+            let count = tiles[key]?.cells.count ?? 0
+            // A single oversized tile is atomic and must still make progress.
+            if !out.isEmpty && count > max(0, pointBudget - points) { break }
+            _ = dirtyTiles.popFirst(); out.append(key); points += count
+        }
         return out
+    }
+
+    func pendingAnchorSnapshot() -> [(Int64, SIMD3<Float>)] {
+        pendingAnchors.map { ($0, tileCenter($0)) }
+    }
+
+    mutating func acknowledgeAnchors(_ keys: [Int64]) {
+        let acknowledged = Set(keys)
+        pendingAnchors.removeAll { acknowledged.contains($0) }
     }
 
     /// 取走待建錨磚（key + 世界中心），主執行緒建 ARAnchor
@@ -264,11 +325,32 @@ nonisolated struct TiledFusedGrid {
 
     /// 全部磚標記為待重畫 —— 切換上色模式時必須重送幾何，否則只有之後變動的磚會換色
     mutating func markAllDirty() {
-        for key in tiles.keys { dirtyTiles.insert(key) }
+        for key in tiles.keys.sorted() { dirtyTiles.insert(key) }
     }
 
     func tileCenter(_ tileKey: Int64) -> SIMD3<Float> {
         tiles[tileKey]?.center ?? PointCloudMath.cellCenter(tileKey, size: tileSize)
+    }
+
+    /// Stop-time safety checkpoint: bounded output, no full-cloud array or downsampling dictionary.
+    func checkpointPoints(limit: Int) -> [CloudPoint] {
+        guard limit > 0 else { return [] }
+        let step = max(1, totalCells / limit + (totalCells % limit == 0 ? 0 : 1))
+        var output: [CloudPoint] = []
+        output.reserveCapacity(min(totalCells, limit))
+        var index = 0
+        for tile in tiles.values {
+            for cell in tile.cells.values {
+                defer { index += 1 }
+                guard index % step == 0 else { continue }
+                let w = tile.originLatest * SIMD4(cell.mean, 1)
+                output.append(CloudPoint(x: w.x, y: w.y, z: w.z,
+                    r: UInt8(min(255, max(0, cell.color.x))),
+                    g: UInt8(min(255, max(0, cell.color.y))),
+                    b: UInt8(min(255, max(0, cell.color.z))), score: cell.bestScore))
+            }
+        }
+        return output
     }
 
     /// 匯出（無 LiDAR 備援用）：局部 → 世界（乘最近錨點變換）後分層擇優下採樣
@@ -293,4 +375,28 @@ nonisolated struct TiledFusedGrid {
         m.columns.3 = SIMD4<Float>(t.x, t.y, t.z, 1)
         return m
     }
+}
+
+/// Runtime evidence for device testing; durations measure work, not a promised display FPS.
+nonisolated struct PreviewPerformanceReport: Codable, Sendable {
+    var version = 2
+    var extractionTotalMS = 0.0
+    var consistencyTotalMS = 0.0
+    var gridInsertTotalMS = 0.0
+    var maximumSampleStride = 0
+    var overBudgetFrames = 0
+    var integratedFrames = 0
+    var candidatePoints = 0
+    var acceptedPoints = 0
+    var integrationTotalMS = 0.0
+    var integrationMaxMS = 0.0
+    var renderBatches = 0
+    var renderedTiles = 0
+    var peakPendingTiles = 0
+    var packingTotalMS = 0.0
+    var packingMaxMS = 0.0
+    var mainApplyTotalMS = 0.0
+    var mainApplyMaxMS = 0.0
+    var qualityBlockedFrames = 0
+    var assessedFrames = 0
 }

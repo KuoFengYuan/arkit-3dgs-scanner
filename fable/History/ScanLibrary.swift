@@ -18,6 +18,19 @@ nonisolated struct ScanPlaybackFrame: Sendable {
     let image: URL
     let pose: simd_float4x4?
     let timestamp: Double?
+    var imageOrientation: CGImagePropertyOrientation { ScanImageOrientation.upright(pose: pose) }
+}
+
+/// JPEGs use sensor coordinates for training. Infer display rotation from gravity (+Y world)
+/// without rotating stored pixels or changing the intrinsics/pose used by reconstruction.
+nonisolated enum ScanImageOrientation {
+    static func upright(pose: simd_float4x4?) -> CGImagePropertyOrientation {
+        guard let pose else { return .right } // legacy portrait capture without a matching pose
+        let x = pose.columns.0.y, y = pose.columns.1.y
+        guard x.isFinite, y.isFinite, x * x + y * y >= 0.04 else { return .right }
+        if abs(x) > abs(y) { return x > 0 ? .left : .right }
+        return y >= 0 ? .up : .down
+    }
 }
 
 nonisolated struct ScanPreview: Sendable {
@@ -96,16 +109,7 @@ actor ScanLibrary {
         let fm = FileManager.default
         let directory = entry.directory
         let images = imageURLs(in: directory)
-        let rawRecords = Self.readRecords(directory.appendingPathComponent("poses.jsonl"))
-        let poseNames = ["review-poses.jsonl", "poses_refined.jsonl"]
-        let corrected = poseNames.lazy.map { Self.readRecords(directory.appendingPathComponent($0)) }
-            .first(where: { !$0.isEmpty }) ?? []
-        var byID: [Int: FrameRecord] = [:]
-        for record in rawRecords { byID[record.id] = record }
-        for record in corrected { byID[record.id] = record }
-        let records = byID.values.sorted { $0.id < $1.id }
-        let correctedIDs = Set(corrected.map(\.id))
-        let hasNewFrames = !corrected.isEmpty && rawRecords.contains { !correctedIDs.contains($0.id) }
+        let (records, hasNewFrames) = Self.savedRecords(in: directory)
         let trajectory = records.filter { $0.transform.count == 16 && $0.transform.allSatisfy(\.isFinite) }
             .map { RefusionEngine.float4x4(rowMajor: $0.transform) }
         let frames = Self.playbackFrames(images: images, records: records)
@@ -161,9 +165,39 @@ actor ScanLibrary {
         }
     }
 
+    /// Sharing a saved scan must prepare COLMAP too, even if the user never exported live.
     func archive(_ entry: ScanEntry) throws -> URL {
         try validate(entry.directory)
-        return try ExportManager.makeArchive(of: entry.directory)
+        let directory = entry.directory
+        let (records, hasNewFrames) = Self.savedRecords(in: directory)
+        guard records.contains(where: { $0.blurVerdict == .keep }) else {
+            throw ExportManager.TrainingExportError.noUsableFrames
+        }
+        var points: [CloudPoint]?
+        if !hasNewFrames {
+            for name in ["review.ply", "points.ply"] {
+                if let saved = try? Self.readPLY(directory.appendingPathComponent(name), limit: 250_000), !saved.isEmpty {
+                    points = saved; break
+                }
+            }
+        }
+        // Old scans without a saved cloud reuse the existing bounded preview reconstruction.
+        if points == nil { points = try preview(entry).points }
+        try ExportManager.writeTrainingDataset(records: records, points: points ?? [], to: directory)
+        return try ExportManager.makeArchive(of: directory)
+    }
+
+    /// Prefer the latest review poses, merging raw frames appended by a resumed scan.
+    nonisolated static func savedRecords(in directory: URL) -> ([FrameRecord], Bool) {
+        let raw = readRecords(directory.appendingPathComponent("poses.jsonl"))
+        let corrected = ["review-poses.jsonl", "poses_refined.jsonl"].lazy
+            .map { readRecords(directory.appendingPathComponent($0)) }.first { !$0.isEmpty } ?? []
+        var byID: [Int: FrameRecord] = [:]
+        for record in raw { byID[record.id] = record }
+        for record in corrected { byID[record.id] = record }
+        let correctedIDs = Set(corrected.map(\.id))
+        let hasNewFrames = !corrected.isEmpty && raw.contains { !correctedIDs.contains($0.id) }
+        return (byID.values.sorted { $0.id < $1.id }, hasNewFrames)
     }
 
     nonisolated struct BatchDeletionError: LocalizedError {
@@ -223,7 +257,7 @@ actor ScanLibrary {
         }
     }
 
-    private func validate(_ directory: URL) throws {
+    func validate(_ directory: URL) throws {
         let expectedRoot = root.standardizedFileURL.resolvingSymlinksInPath()
         let resolved = directory.standardizedFileURL.resolvingSymlinksInPath()
         guard directory.lastPathComponent.hasPrefix("scan_"),
@@ -282,7 +316,8 @@ actor ScanLibrary {
     }
 
     /// 傳回縮圖 JPEG；全尺寸相片不常駐 UI 記憶體。
-    nonisolated static func imageData(_ url: URL, maxDimension: Int) -> Data? {
+    nonisolated static func imageData(_ url: URL, maxDimension: Int,
+                                     orientation: CGImagePropertyOrientation? = nil) -> Data? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -291,7 +326,23 @@ actor ScanLibrary {
               ] as CFDictionary) else { return nil }
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(destination, image, nil)
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let embedded = (properties?[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value ?? 1
+        let displayOrientation: CGImagePropertyOrientation
+        if embedded != 1 {
+            // ImageIO has already applied an explicit EXIF transform above.
+            displayOrientation = .up
+        } else if let orientation {
+            displayOrientation = orientation
+        } else {
+            // History covers do not already have a playback frame. Read only metadata to
+            // resolve that photo's pose; playback passes its orientation and skips this read.
+            let directory = url.deletingLastPathComponent().deletingLastPathComponent()
+            let records = savedRecords(in: directory).0
+            displayOrientation = playbackFrames(images: [url], records: records).first?.imageOrientation ?? .right
+        }
+        CGImageDestinationAddImage(destination, image,
+            [kCGImagePropertyOrientation: displayOrientation.rawValue] as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { return nil }
         return data as Data
     }

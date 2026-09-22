@@ -2,8 +2,8 @@
 //  FrameWriter.swift
 //  fable — 非同步關鍵幀寫入（actor：JPEG 編碼 / 深度 raw / poses.jsonl）
 //
-//  actor 自帶序列化執行緒，主執行緒只做 buffer memcpy（~1-2ms @ 2Hz），
-//  JPEG 編碼（~15-30ms）與磁碟 I/O 全部在此背景進行，UI 不掉幀。
+//  actor 序列化 JPEG 編碼與磁碟 I/O，主執行緒只複製相機 buffer。
+//  實際排隊、編碼與寫檔耗時分別量測；不假設固定照片 FPS 或真機耗時。
 //  背壓由 CaptureController.pendingWrites 控制，佇列滿時直接跳過該幀。
 //
 
@@ -61,7 +61,21 @@ actor FrameWriter {
         }
     }
 
-    func write(_ kf: Keyframe) throws {
+    struct WriteTiming: Sendable {
+        var queueMS: Double
+        var jpegMS: Double
+        var fileWriteMS: Double
+    }
+
+    @discardableResult
+    func write(_ kf: Keyframe, enqueuedAt: TimeInterval? = nil) throws -> WriteTiming {
+        let started = ProcessInfo.processInfo.systemUptime
+        return try autoreleasepool {
+            try writeOwned(kf, started: started, enqueuedAt: enqueuedAt)
+        }
+    }
+
+    private func writeOwned(_ kf: Keyframe, started: TimeInterval, enqueuedAt: TimeInterval?) throws -> WriteTiming {
         guard let posesHandle else { throw WriteError.closed }
         var record = kf.record
         // JPEG 編碼（sensor 原始方向，與 intrinsics / transform 自洽）
@@ -80,6 +94,7 @@ actor FrameWriter {
                                                       options: [qualityKey: jpegQuality]) else {
             throw WriteError.jpegEncoding
         }
+        let encodedAt = ProcessInfo.processInfo.systemUptime
         try jpeg.write(to: imagesDir.appendingPathComponent(record.imageFile), options: [.atomic])
 
         // 深度 / 信心圖（raw little-endian，Python 端 np.fromfile 直接讀）
@@ -98,6 +113,9 @@ actor FrameWriter {
         line.append(0x0A)
         try posesHandle.write(contentsOf: line)
         records.append(record)
+        return WriteTiming(queueMS: max(0, started - (enqueuedAt ?? started)) * 1000,
+                           jpegMS: (encodedAt - started) * 1000,
+                           fileWriteMS: (ProcessInfo.processInfo.systemUptime - encodedAt) * 1000)
     }
 
     /// ISO → 降噪強度。門檻以下回 nil（完全不套濾鏡，連 GPU pass 都省）。

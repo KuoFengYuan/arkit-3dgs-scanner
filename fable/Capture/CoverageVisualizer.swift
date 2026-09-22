@@ -152,6 +152,13 @@ final class CoverageVisualizer {
 
     // MARK: - 即時點雲疊加（空間磚 + ARAnchor 錨定，防漂移殘影）
 
+    /// Processing uses a separate review cloud. Release GPU geometry before allocating it;
+    /// the accumulator retains geometry and redraws all tiles when scanning resumes.
+    func releasePointCloudGeometry() {
+        for node in tileNodes.values { node.geometry = nil; node.removeFromParentNode() }
+        tileNodes.removeAll()
+    }
+
     func setPointCloudHidden(_ hidden: Bool) {
         pointsRoot.isHidden = hidden
     }

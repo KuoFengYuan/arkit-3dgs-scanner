@@ -13,6 +13,7 @@ import simd
 /// 一般警告只提醒、不擋拍。
 nonisolated enum QualityIssue: Int, CaseIterable, Identifiable, Sendable, Comparable {
     case trackingLost
+    case insufficientFeatures
     case tooFast
     case notSharp
     case deviceHot
@@ -28,6 +29,7 @@ nonisolated enum QualityIssue: Int, CaseIterable, Identifiable, Sendable, Compar
     var message: String {
         switch self {
         case .trackingLost: "追蹤不穩，請放慢並對準紋理豐富的區域"
+        case .insufficientFeatures: "可追蹤紋理不足，請對準有細節的區域並緩慢側向移動"
         case .tooFast:      "移動太快會產生動態模糊，請放慢"
         case .notSharp:     "畫面不夠清晰，請稍停讓對焦穩定"
         case .deviceHot:    "裝置過熱，建議暫停散熱"
@@ -41,6 +43,7 @@ nonisolated enum QualityIssue: Int, CaseIterable, Identifiable, Sendable, Compar
     var symbol: String {
         switch self {
         case .trackingLost: "wifi.exclamationmark"
+        case .insufficientFeatures: "viewfinder"
         case .tooFast:      "hare.fill"
         case .notSharp:     "camera.metering.none"
         case .deviceHot:    "thermometer.high"
@@ -55,7 +58,11 @@ nonisolated enum QualityIssue: Int, CaseIterable, Identifiable, Sendable, Compar
 nonisolated struct QualityAssessment: Sendable {
     var issues: [QualityIssue] = []
     var blurPixels: Float = 0
+    var exposureBlurPixels: Float = 0
     var centerDepthM: Float = -1
+    var depthIsEstimated = false
+    var visibleFeatureCount = 0
+    var featureCoverageCells = 0
     var angularSpeedRadS: Float = 0
     var linearSpeedMS: Float = 0
     /// 影像清晰度的**直接量測**（歸一化二階差分能量）。負值 = 量不到。
@@ -65,44 +72,39 @@ nonisolated struct QualityAssessment: Sendable {
     /// 清晰度相對於「近 0.5 秒內同一場景達到過的最佳值」的比例（0...1）。
     /// 絕對清晰度與場景紋理量綁死（白牆再清晰也是低值），只有相對值可以設門檻。
     var sharpnessRatio: Float = 1
-    /// true = 追蹤丟失或模糊超過遮斷門檻 → 暫停抓幀（紅色警告）
+    /// 追蹤丟失、RGB 紋理不足或嚴重模糊時暫停抓幀。
     var captureBlocked = false
+    var blockReason: CaptureBlockReason?
 
     var allowCapture: Bool { !captureBlocked }
-    var worst: QualityIssue? { issues.min() }
+    var worst: QualityIssue? {
+        switch blockReason {
+        case .tracking: return .trackingLost
+        case .features: return .insufficientFeatures
+        case .motion: return .tooFast
+        case .focus: return .notSharp
+        case nil: return issues.min()
+        }
+    }
+    /// Short autofocus transitions stop accepting data but do not flash a red warning.
+    var showsBlockingWarning: Bool {
+        captureBlocked && (blockReason != .focus || issues.contains(.notSharp))
+    }
 }
 
-/// 每個 ARFrame 呼叫一次 assess()。角速度優先讀陀螺儀（CoreMotion），
-/// 無法取得時退回姿態差分。所有計算皆為 O(1)，可安心跑在 session delegate 熱路徑上。
+/// 每個 ARFrame 呼叫一次 assess()。角速度用該影格姿態差分，僅以時間相符的陀螺儀補強。
+/// RGB 幾何檢查最多取樣 512 點，避免在 session delegate 熱路徑無界計算。
 final class QualityMonitor {
 
-    /// 清晰度基準線的每幀衰減率。0.97 → 半衰期約 23 幀（0.4s）、~0.5s 衰到 1/e。
-    /// 刻意讓它比「模糊事件」（手震一下、AF 拉焦，約 0.1~0.3s）長、比「掃到另一片紋理量不同的
-    /// 表面」（連續移動下以秒計）短 —— 這樣模糊會被抓到，而把鏡頭轉向白牆不會被誤判成模糊。
-    private static let kSharpPeakDecay: Float = 0.97
-    /// 連續幾幀不清晰才在 HUD 上示警（60fps → 15 幀 ≈ 0.25s）。
-    /// 抓幀閘門是**立即**生效的（該幀不清晰就不存），但示警要遲滯：
-    /// 短暫的不清晰（AF 拉一下焦、鏡頭掃過紋理量差很多的兩片表面）由閘門靜靜擋掉就好，
-    /// 跳一個紅字出來只會讓使用者以為壞了。持續不清晰（鏡頭有指紋、AF 卡住、太暗）才值得說。
     private static let kNotSharpFrames = 15
-    /// 角速度超過此值就凍結清晰度基準線（見 assess 內說明）。
-    /// 0.2 rad/s ≈ 11°/s：比「手持自然晃動」高、比任何刻意的轉動低。
-    private static let kPeakFreezeRadS: Float = 0.2
-
     private let motion = CMMotionManager()
-    private var lastPose: simd_float4x4?
-    private var lastTime: TimeInterval = -1
-    private var smoothedAngular: Float = 0
-    private var smoothedLinear: Float = 0
-    private var sharpPeak: Float = 0
+    private var motionEstimator = CaptureMotionEstimator()
+    private var sharpnessReference = SharpnessReference()
     private var notSharpStreak = 0
 
     func start() {
-        lastPose = nil
-        lastTime = -1
-        smoothedAngular = 0
-        smoothedLinear = 0
-        sharpPeak = 0
+        motionEstimator.reset()
+        sharpnessReference.reset()
         notSharpStreak = 0
         guard motion.isDeviceMotionAvailable else { return }
         motion.deviceMotionUpdateInterval = 1.0 / 60.0
@@ -113,7 +115,13 @@ final class QualityMonitor {
         motion.stopDeviceMotionUpdates()
     }
 
-    func assess(frame: ARFrame, config: CaptureConfig) -> QualityAssessment {
+    /// 中斷／座標修正後不以跨跳躍差分當作真實速度。
+    func resetTrackingHistory() {
+        motionEstimator.reset()
+        sharpnessReference.reset()
+    }
+
+    func assess(frame: ARFrame, config: CaptureConfig, useLiDAR: Bool = true) -> QualityAssessment {
         var a = QualityAssessment()
         let camera = frame.camera
 
@@ -123,52 +131,36 @@ final class QualityMonitor {
         default: a.issues.append(.trackingLost)
         }
 
-        // 2. 角速度 / 線速度（EMA 平滑，避免單幀抖動觸發警告）
-        let dt = lastTime > 0 ? Float(frame.timestamp - lastTime) : 0
-        // 角速度優先取 ARKit 姿態差分，陀螺儀只當補強 —— 順序與直覺相反，理由是**時間對齊**：
-        //
-        //   陀螺儀輪詢拿到的是「現在」的角速度，但手上這一幀是 30~50ms 前曝光的
-        //   （ARKit 帶 sceneDepth 的管線延遲）。轉彎「結束」時最致命：手已經停了、
-        //   陀螺儀讀到接近 0，可是正在送進來的那一幀是轉彎峰值時曝的，而 SmartShutter
-        //   的「轉角 ≥ 6°」條件剛好在此刻滿足 → 精準地把整段最糊的那一幀存成關鍵幀。
-        //   這就是「視角轉彎時最容易出現模糊照片」的成因。
-        //
-        //   姿態差分量的是 frame k-1 → k 之間的平均角速度，而 frame.camera.transform
-        //   本來就屬於該幀的時刻，天然對齊，量到的正是那個曝光窗實際抹過的角度。
-        //   2 rad/s 的轉動在 16.7ms 內是 1.9°，遠高於 ARKit 的旋轉雜訊（~0.05°），SNR 沒問題。
-        //   再取 max(姿態差分, 陀螺儀) 補上「正在加速進轉彎」——那時陀螺儀跑在前面。
-        var angular: Float = 0
-        if let lp = lastPose, dt > 0 {
-            angular = MatrixUtil.rotationAngleDeg(lp, camera.transform) * .pi / 180 / dt
+        // Time-aligned angular rate and net displacement over ~80ms suppress pose jitter.
+        let gyro = motion.deviceMotion
+        let rate = gyro.map { value -> Float in
+            let r = value.rotationRate
+            return Float(sqrt(r.x * r.x + r.y * r.y + r.z * r.z))
         }
-        if let rate = motion.deviceMotion?.rotationRate {
-            angular = max(angular,
-                          Float((rate.x * rate.x + rate.y * rate.y + rate.z * rate.z).squareRoot()))
-        }
-        var linear: Float = 0
-        if let lp = lastPose, dt > 0 {
-            linear = simd_distance(MatrixUtil.position(lp), MatrixUtil.position(camera.transform)) / dt
-        }
-        smoothedAngular = smoothedAngular * 0.7 + angular * 0.3
-        smoothedLinear = smoothedLinear * 0.7 + linear * 0.3
-        // 角速度回報 max(瞬時, 平滑)：純 EMA 會把單幀尖峰壓到 30%，
-        // 甩一下 2.0 rad/s 只讀到 0.6、剛好從 1.0 的閘門底下溜過去 —— 而那一幀確實是糊的。
-        // 這對角速度成立是因為它來自陀螺儀：硬體訊號，雜訊約 0.01 rad/s，遠低於門檻。
-        a.angularSpeedRadS = max(angular, smoothedAngular)
+        let velocity = motionEstimator.update(pose: camera.transform, timestamp: frame.timestamp,
+                                              gyroRate: rate, gyroTimestamp: gyro?.timestamp)
+        a.angularSpeedRadS = velocity.angular
+        a.linearSpeedMS = velocity.linear
 
-        // 線速度**只能**用 EMA，不可取 max(瞬時, 平滑)。
-        //
-        // 它是由 ARKit 姿態差分算出來的：60fps 下 dt 只有 16.7ms，位置抖動 2mm
-        // 就等於 0.12 m/s 的純雜訊。單看速度門檻（0.5~0.8 m/s）這個量可以忽略，
-        // 我原本就是這樣判斷的 —— 但那是錯的，因為它還要**除以景深**才進模糊估計：
-        // 近距離掃桌面（景深 0.4m）時 0.12/0.4 = 0.3 rad/s 等效角速度，
-        // 憑空多出 8px 模糊，再加上偶發尖峰就足以持續觸發紅色遮斷警告。
-        // 而且平移不像旋轉，物理上做不出單幀尖峰（手臂有慣性），本來就不需要抓尖峰。
-        a.linearSpeedMS = smoothedLinear
-
-        // 3. 目標距離（LiDAR 中心區域中位數）
-        if let depthMap = frame.sceneDepth?.depthMap {
+        // 3. LiDAR 距離，或 RGB 可見特徵的保守近側距離估計。
+        if useLiDAR, let depthMap = frame.sceneDepth?.depthMap {
             a.centerDepthM = Self.centerMedianDepth(depthMap)
+        } else if !useLiDAR {
+            let k = camera.intrinsics
+            let size = camera.imageResolution
+            let geometry = CameraOnlyGeometry.assess(points: frame.rawFeaturePoints?.points ?? [],
+                c2w: camera.transform,
+                intrinsics: CameraIntrinsics(fx: Double(k[0][0]), fy: Double(k[1][1]),
+                                             cx: Double(k[2][0]), cy: Double(k[2][1]),
+                                             width: Int(size.width), height: Int(size.height)), config: config)
+            a.centerDepthM = geometry.estimatedDepth ?? -1
+            a.depthIsEstimated = true
+            a.visibleFeatureCount = geometry.visibleCount
+            a.featureCoverageCells = geometry.occupiedCells
+            if geometry.visibleCount < config.cameraOnlyMinVisibleFeatures
+                || geometry.occupiedCells < config.cameraOnlyMinFeatureCells {
+                a.issues.append(.insufficientFeatures)
+            }
         }
 
         // 4. 幾何劣化估計：像素位移 ≈ (ω + v/z) × fx × (曝光時間 + 捲簾讀出時間)
@@ -183,9 +175,11 @@ final class QualityMonitor {
         //    兩者是不同的成因（一個是曝光內抹動、一個是幀內姿態不一致），
         //    但對「這一幀能不能當訓練影像」的影響同向，故合成單一保守指標。
         let fx = Float(camera.intrinsics[0][0])
-        var flow = a.angularSpeedRadS
-        if a.centerDepthM > 0 { flow += a.linearSpeedMS / a.centerDepthM }
-        a.blurPixels = flow * fx * Float(camera.exposureDuration + config.rollingShutterReadoutS)
+        a.blurPixels = CameraOnlyGeometry.blurPixels(angularSpeed: a.angularSpeedRadS,
+            linearSpeed: a.linearSpeedMS, depth: a.centerDepthM > 0 ? a.centerDepthM : nil,
+            focalLength: fx, exposure: camera.exposureDuration, config: config)
+        a.exposureBlurPixels = CaptureQualityPolicy.exposureBlur(totalRisk: a.blurPixels,
+            exposure: camera.exposureDuration, readout: config.rollingShutterReadoutS)
         if a.blurPixels > config.maxBlurPixels {
             a.issues.append(.tooFast)
         }
@@ -194,22 +188,12 @@ final class QualityMonitor {
         //     絕對值與場景紋理量綁死，故拿它跟「近 0.5s 內同場景的最佳值」比。
         let sharp = Self.sharpness(frame.capturedImage)
         if sharp >= 0 {
-            // 相機轉得快時**凍結**基準線，不讓它衰減。
-            //
-            // 這是這道閘門原本的致命缺口：sharpPeak 只有 ~0.5s 的記憶，
-            // 而轉彎掃描是「持續」糊 1~2 秒 —— 峰值會一路降到糊的水準，比值回到 1.0，
-            // 於是整段轉彎都被放行。離線模擬（tools/test_sharpness.py）量到的是：
-            // 持續 20px 模糊的 90 幀裡，轉彎開始 267ms 後比值就爬回門檻以上，82% 放行。
-            // 對照組（手震 0.1s）則 100% 擋掉 —— 它只抓得到「短暫」模糊。
-            //
-            // 凍結後，基準線保留的是「上次拿穩時這個場景有多清晰」，
-            // 整段轉彎都會被拿去跟那個值比，持續模糊再也騙不過去。
-            // 代價：轉彎後停在低紋理表面時基準線偏高（誤擋），但只持續到動作停下後 ~0.5s
-            // 衰減恢復為止，而且那時本來就該補拍一張清晰的。
-            let moving = a.angularSpeedRadS > Self.kPeakFreezeRadS
-            sharpPeak = max(sharp, sharpPeak * (moving ? 1.0 : Self.kSharpPeakDecay))
+            let severeMotion = a.exposureBlurPixels > config.blockBlurPixels
+                || a.angularSpeedRadS > config.keyframeMaxAngularSpeedRadS
+                || a.linearSpeedMS > config.keyframeMaxLinearSpeedMS
             a.sharpness = sharp
-            a.sharpnessRatio = sharpPeak > 1e-6 ? sharp / sharpPeak : 1
+            a.sharpnessRatio = sharpnessReference.ratio(value: sharp, timestamp: frame.timestamp,
+                                                       severeMotion: severeMotion)
             if a.sharpnessRatio < config.minSharpnessRatio {
                 notSharpStreak += 1
             } else {
@@ -225,7 +209,7 @@ final class QualityMonitor {
         }
 
         // 6. 距離
-        if a.centerDepthM > 0 {
+        if !a.depthIsEstimated, a.centerDepthM > 0 {
             if a.centerDepthM < config.minTargetDistanceM { a.issues.append(.tooClose) }
             else if a.centerDepthM > config.maxTargetDistanceM { a.issues.append(.tooFar) }
         }
@@ -236,12 +220,14 @@ final class QualityMonitor {
             a.issues.append(.deviceHot)
         }
 
-        // 遮斷判定（兩級制）：只有追蹤丟失或嚴重模糊才暫停抓幀
-        a.captureBlocked = a.issues.contains(.trackingLost)
-            || a.blurPixels > config.blockBlurPixels
+        a.blockReason = CaptureQualityPolicy.blockReason(
+            tracking: !a.issues.contains(.trackingLost),
+            sufficientFeatures: !a.issues.contains(.insufficientFeatures),
+            blur: a.exposureBlurPixels, angular: a.angularSpeedRadS, linear: a.linearSpeedMS,
+            sharpnessRatio: a.sharpnessRatio, config: config)
+        a.captureBlocked = a.blockReason != nil
+        if a.blockReason == .motion, !a.issues.contains(.tooFast) { a.issues.append(.tooFast) }
 
-        lastPose = camera.transform
-        lastTime = frame.timestamp
         return a
     }
 

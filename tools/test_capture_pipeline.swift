@@ -33,7 +33,12 @@ struct CapturePipelineTests {
                             depthWidth: 0, depthHeight: 0, c2w: matrix_identity_float4x4, record: record)
         }
         let writer = try FrameWriter(sessionDir: scan, saveDepth: false, jpegQuality: 0.9)
-        try await writer.write(keyframe(1, imageFile: "frame_00001.jpg"))
+        let enqueuedAt = ProcessInfo.processInfo.systemUptime - 0.025
+        let timing = try await writer.write(keyframe(1, imageFile: "frame_00001.jpg"), enqueuedAt: enqueuedAt)
+        precondition(timing.queueMS.isFinite && timing.queueMS >= 25)
+        precondition(timing.jpegMS.isFinite && timing.jpegMS >= 0)
+        precondition(timing.fileWriteMS.isFinite && timing.fileWriteMS >= 0)
+        print("PASS: writer reports queue delay separately from finite JPEG and I/O timings")
         var records = await writer.snapshotRecords()
         precondition(records.count == 1)
         precondition(fm.fileExists(atPath: scan.appendingPathComponent("images/frame_00001.jpg").path))
