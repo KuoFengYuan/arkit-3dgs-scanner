@@ -12,9 +12,7 @@ enum CaptureSessionConfiguration {
         if useLiDAR, ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             result.frameSemantics.insert(.sceneDepth)
         }
-        if useLiDAR, ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
-            result.frameSemantics.insert(.smoothedSceneDepth)
-        }
+        // All capture/fusion paths use sceneDepth; do not allocate an unused smoothed-depth stream.
         if useLiDAR, config.useSceneMesh, ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
             result.sceneReconstruction = .mesh
         }

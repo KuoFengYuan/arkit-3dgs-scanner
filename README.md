@@ -78,6 +78,8 @@ Pose refinement combines guided local optimization with bounded revisit matching
 
 Motion estimates alone no longer trigger a post-fusion recapture warning. Weak measured detail still receives a frame-specific review message; motion-only and unknown evidence remain in collapsed capture-quality information. This changes reporting, not the original photos or depth eligibility.
 
+Two iPhone 17 Pro completion crashes were traced to a failed stderr log write after fusion reached 100%; this now uses system logging. Processing also clears capture caches, stops the covered camera renderer, checks memory pressure within insertion/coarsening, and reserves 192 MiB plus per-frame workspace. Raw captures remain available on fallback. See [device evidence and memory controls](docs/LARGE_SCAN_MEMORY.md).
+
 ## History and playback
 
 Stopped scans are saved automatically for later review, even before export.
@@ -131,6 +133,7 @@ python3 tools/check_project.py
 bash tools/test_localization.sh
 bash tools/test_training_quality.sh
 bash tools/test_metric_loop.sh
+bash tools/test_fusion_memory.sh
 ```
 
 ```sh

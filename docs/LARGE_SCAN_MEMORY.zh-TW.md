@@ -2,6 +2,12 @@
 
 [English](LARGE_SCAN_MEMORY.md) | **繁體中文**
 
+## 已確認的 iPhone 17 Pro 完成階段閃退（2026-09-22）
+
+13:13、14:41 兩份裝置紀錄都是 `EXC_CRASH / SIGABRT`，由 `RefusionEngine` 呼叫 `NSConcreteFileHandle.writeData` 拋出 Objective-C 例外。14:41 的掃描已處理完 **422 張影格**、達到 `exportFraction: 1`，記錄的最低可用記憶體為 **5,931,808,088 bytes**。這些證據指出兩次失敗發生在寫入最後的診斷訊息，不是 jetsam 記憶體終止。
+
+原本最後一行使用舊 `FileHandle.standardError.write`；當除錯輸出 handle 無法寫入時，它會拋出 Swift `do/catch` 無法捕捉的 Objective-C 例外。現在改用系統 `Logger`，不再讓 stderr 通道影響完成報告／結果的發布。子行程回歸測試以唯讀 stderr 驗證融合完成及報告存檔。紀錄本身沒有交代輸出 handle 為何失效。
+
 ## 回報與確認的配置重疊
 
 使用者提供的兩次成功紀錄分別為 403 幀／519,789 格／74.41 秒及 257 幀／425,007 格／47.44 秒，並回報更大場景容易在融合中閃退。尚未取得失敗那次的 crash 或 jetsam 紀錄，因此無法認定唯一原因。
@@ -12,12 +18,15 @@
 
 | 資料 | 控制方式 |
 | --- | --- |
+| 停止時採集資源 | 等待寫檔與特徵完成，離線處理前清除 Core Image 編碼快取及即時特徵；保留 writer 開檔供續掃 |
+| 被遮住的 AR 畫面 | 處理／驗收期間停止渲染，保留 session 供續掃 |
+| 深度請求 | 僅請求實際使用的 `sceneDepth`，不再配置未使用的 `smoothedSceneDepth` |
 | 原始 RGB、深度、信心圖 | 持續寫入磁碟，融合一次解碼一張；沒有新增照片總張數限制 |
 | 停止後保留的即時格 | 完成 GPU 幾何釋放及預覽存檔後，將 CPU 格按比例縮至最多 100,000 格 |
 | 磚錨點與剩餘格 | 保留局部位置、顏色、權重與方向位元，續掃可重新補充細節 |
 | 離線融合格 | 沿用 96 MiB 估計預算及可用記憶體降額；128 B／格是預估，不是實測 RSS |
-| 插入暫存 | 手機直接序列插入，不建立分片候選副本；每 1,024 點檢查容量，因此格數可短暫超出上限一小批 |
-| 相鄰深度快取 | 同時限制 8 個項目及 2 MiB 深度／信心陣列資料；LRU 淘汰，低於 256 MiB 可用空間時清空 |
+| 插入暫存 | 手機直接序列插入，不建立分片候選副本；每 1,024 點檢查容量及中斷，包括粗化內部；中止的可變格網直接丟棄，不匯出半成品 |
+| 相鄰深度快取 | 同時限制 8 個項目及 2 MiB 深度／信心陣列資料；LRU 淘汰，低於 384 MiB 可用空間時清空 |
 | 最終點雲與平面圖來源 | 手機要求的輸出目標被 `exportMaxPoints` 夾住，預設 250,000；不再建立額外的大型下採樣字典 |
 | 特徵與姿態 metadata | 既有特徵上限維持：4 幀描述子及 200,000 筆歷史觀測；影格姿態／檔名 metadata 仍隨張數增加 |
 
@@ -31,13 +40,15 @@
 
 離開頁面或重設掃描會設定獨立取消旗標。融合在每幀開始、候選產出後及匯出前檢查，回報 `cancelled`，不把半成品交給驗收；舊進度、位姿及平面圖回呼也檢查掃描 generation。取消不是立即中斷 ImageIO 或 ARKit 系統呼叫。
 
-現有低於 96 MiB 可用記憶體時的 `memoryPressure` 回退保留，會使用有限的即時預覽，而不是把半成品當作完整融合。原始檔案仍保留。照片數增加主要增加串流處理時間，不會讓融合保留全部照片像素；掃描範圍增大仍可能觸發格網粗化。
+低於 192 MiB 可用記憶體，或收到系統記憶體壓力事件時，採用 `memoryPressure` 回退，會使用有限的即時預覽，而不是把半成品當作完整融合。原始檔案仍保留。照片數增加主要增加串流處理時間，不會讓融合保留全部照片像素；掃描範圍增大仍可能觸發格網粗化。
 
-平面圖現在共用有限的最終點雲，超大空間可能少掉細牆、短牆或需要較粗的製圖格距。這是為穩定性做的明確取捨；原始資料可交給桌機重建較高密度結果。這輪未改模糊判定或放寬深度一致性門檻。
+平面圖現在共用有限的最終點雲，超大空間可能少掉細牆、短牆或需要較粗的製圖格距。這是為穩定性做的明確取捨；原始資料可交給桌機重建較高密度結果。未改模糊判定或放寬深度一致性門檻。每次融合都監聽 iOS warning／critical 壓力，事件會保持到安全停止，不會因可用記憶體估計仍偏高而繼續。原生 LiDAR 解碼前至少需 224 MiB（192 MiB 保留空間加 32 MiB 工作區）；宣告更大深度尺寸時預留更多，讀檔前先核對檔案大小。插入與粗化在單幀內也檢查壓力，不必等下一張。較保守策略可能提早回退，保留原始檔及預覽，不強制產出完整精細結果。系統仍不保證每次 jetsam 前都會送出警告。
 
 ## 診斷
 
-`refusion-progress.json` 第 2 版新增：
+`refusion-progress.json` 第 5 版新增 `peakProcessFootprintBytes`（iOS 取樣的行程實體記憶體）、`memoryWarningCount`、`memoryStopReason` 及 `requiredFrameHeadroomBytes`。峰值是取樣值，不保證捕捉每個瞬間；兩次取樣間的系統／GPU 配置仍可能造成失敗。停止原因區分系統壓力、保留空間及單幀工作區不足。第 4 版的階段／匯出進度欄位繼續保留，供定位中斷位置。
+
+第 2 版新增：
 
 - `effectiveOutputLimit`：本次真正使用的輸出上限。
 - `depthCacheHits`、`depthCacheLoads`、`depthCachePeakBytes`、`depthCachePeakEntries`：快取使用及陣列儲存峰值。
@@ -49,14 +60,11 @@
 ## 驗證
 
 ```sh
-swiftc -O -module-cache-path /tmp/fable-swift-cache \
-  arkit-3dgs-scanner/Capture/{Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,PointCloudFusion}.swift \
-  tools/test_large_scan_memory.swift -o /tmp/fable-large-scan-test
-/usr/bin/time -l /tmp/fable-large-scan-test
+bash tools/test_fusion_memory.sh
 ```
 
-測試包含 1,000 幀真實磁碟讀取／JPEG 解碼／256×192 深度融合，檢查快取與格數上限、手機 target 夾制、已知平面位置及取消後原始檔案保留。影格共用合成平面圖片與深度檔，套用不同相機位置，不代表 1,000 張複雜室內照片或 iPhone 上的 ARKit／RoomPlan 記憶體負載。
+測試另涵蓋無法寫入 stderr、插入／粗化途中壓力、解碼前工作區保留，以及可用記憶體充足時的系統警告。測試包含 1,000 幀真實磁碟讀取／JPEG 解碼／256×192 深度融合，檢查快取與格數上限、手機 target 夾制、已知平面位置及取消後原始檔案保留。影格共用合成平面圖片與深度檔，套用不同相機位置，不代表 1,000 張複雜室內照片或 iPhone 上的 ARKit／RoomPlan 記憶體負載。
 
 另以小批插入建立 520,000 格、跨 20 m 的合成表面，檢查輸出不超過 250,000 點且維持空間範圍。預覽縮減測試檢查實際格數減少、修正後座標不變、錨點保留與續掃可補點。整體記憶體峰值仍須在目標 iPhone 的大場景掃描量測；通過這些界限測試不代表能保證所有情境不閃退。
 
-本輪 24 項大場景／千幀檢查、39 項 LiDAR 一致性回歸與 26 項停止容量檢查均通過（共 89 項），iPhone／Simulator 未簽章 Debug 建置成功。大場景測試指令在本機 macOS 的最大 RSS 為 107,839,488 bytes（約 103 MiB），此數字包含 52 萬格 fixture，但不含 ARKit、RoomPlan、SceneKit 或真機 GPU；千幀部分刻意設定小格數預算以測試粗化，不能當作 iPhone App 的記憶體上限。既有桌機平行插入的 Sendable 編譯警告仍存在，手機使用本輪新增的序列插入路徑。
+先前一輪 24 項大場景／千幀檢查、39 項 LiDAR 一致性回歸與 26 項停止容量檢查均通過（共 89 項），iPhone／Simulator 未簽章 Debug 建置成功。大場景測試指令在本機 macOS 的最大 RSS 為 107,839,488 bytes（約 103 MiB），此數字包含 52 萬格 fixture，但不含 ARKit、RoomPlan、SceneKit 或真機 GPU；千幀部分刻意設定小格數預算以測試粗化，不能當作 iPhone App 的記憶體上限。既有桌機平行插入的 Sendable 編譯警告仍存在，手機使用序列插入路徑。

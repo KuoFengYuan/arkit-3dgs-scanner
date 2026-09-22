@@ -128,6 +128,10 @@ actor FrameWriter {
         return level > 1e-4 ? level : nil
     }
 
+    /// Encoding has drained before offline work starts; release Core Image/Metal caches while
+    /// keeping the writer open so resume does not lose the append-only capture records.
+    func releaseEncodingCaches() { ciContext.clearCaches() }
+
     /// 讀取目前累積的紀錄（不關檔 —— review 後仍可「繼續掃描」續寫）
     func snapshotRecords() -> [FrameRecord] {
         records

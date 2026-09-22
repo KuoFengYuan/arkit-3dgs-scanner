@@ -67,6 +67,8 @@ Simulator 可驗證一般介面與資料流程，不能代替真機 ARKit／LiDA
 
 已有 1,000 幀合成深度串流測試，並保留取消與低記憶體回退。這不是實機長時間掃描不閃退的保證。詳見 [大場景記憶體](docs/LARGE_SCAN_MEMORY.zh-TW.md) 與 [採集吞吐量](docs/CAPTURE_THROUGHPUT.zh-TW.md)。
 
+兩次 iPhone 17 Pro 閃退已定位為融合達 100% 後的 stderr 日誌寫入例外，已改用系統日誌。處理前清除採集快取、停止被遮住的相機渲染，插入／粗化內部檢查壓力，並預留 192 MiB 加單幀工作區；回退仍保留原始資料。詳見[裝置證據與記憶體控制](docs/LARGE_SCAN_MEMORY.zh-TW.md)。
+
 ## 歷史、回放與刪除
 
 停止後自動保存預覽與摘要，不必先匯出。首頁「掃描紀錄」可開啟既有掃描：
@@ -170,6 +172,7 @@ python3 tools/check_project.py
 bash tools/test_localization.sh
 bash tools/test_training_quality.sh
 bash tools/test_metric_loop.sh
+bash tools/test_fusion_memory.sh
 ```
 
 ## 文件索引
