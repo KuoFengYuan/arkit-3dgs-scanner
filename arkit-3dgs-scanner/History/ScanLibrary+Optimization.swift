@@ -21,8 +21,8 @@ extension ScanLibrary {
             let source = entry.directory
             let annotated = BlurFilter.annotate(records)
             progress(L10n.text("逐張匹配拍攝影像…"), 0)
-            let refined = await OfflinePoseRefinement.run(records: annotated, directory: source, rounds: 6,
-                isCancelled: { Task.isCancelled }, progress: { progress($0 >= 0.7 ? L10n.text("搜尋並驗證重訪視角…") : L10n.text("逐張匹配與驗證相機位置…"), $0 * 0.45) })
+            let refined = await OfflinePoseRefinement.run(records: annotated, directory: source, rounds: 6, surfaceRefinement:true,
+                isCancelled: { Task.isCancelled }, progress: { progress($0 >= 0.85 ? L10n.text("驗證局部表面對齊…") : $0 >= 0.595 ? L10n.text("搜尋並驗證重訪視角…") : L10n.text("逐張匹配與驗證相機位置…"), $0 * 0.45) })
             try Task.checkCancellation()
             if ["memoryPressure", "observationBudgetExceeded"].contains(refined.report.status) {
                 throw OptimizationError(message: L10n.text("目前資源不足以完成相機精修，原始掃描未變更。請關閉其他工作後重試。"))
@@ -31,7 +31,8 @@ extension ScanLibrary {
             var points: [CloudPoint] = []
             if outputRecords.contains(where: { $0.depthFile != nil }) {
                 progress(L10n.text("用修正後位置重融合深度…"), 0.45)
-                let cfg = CaptureConfig()
+                var cfg = CaptureConfig()
+                cfg.surfaceReconstruction = true
                 let fusion = RefusionEngine.refuseWithReport(records: outputRecords, sessionDir: source, config: cfg,
                     meshVertices: [], target: cfg.exportMaxPoints, diagnosticsDirectory: staging, isCancelled: { Task.isCancelled },
                     progress: { progress(L10n.text("用修正後位置重融合深度…"), 0.45 + $0 * 0.4) })

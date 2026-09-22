@@ -69,6 +69,34 @@ nonisolated struct DepthConsistencyView: Sendable {
     let confidence: [UInt8]?
     let intrinsics: CameraIntrinsics
     let worldToCamera: simd_float4x4
+    private struct SamplingLimits: Equatable, Sendable {
+        let near: Float, far: Float, edge: Float
+        let confidence: UInt8
+        init(_ c: CaptureConfig) { near=c.pointMinDepthM; far=c.pointMaxDepthM; edge=c.depthEdgeRejectRatio; confidence=c.minDepthConfidence }
+    }
+    private var preparedLimits: SamplingLimits?
+    private var validQuads: [UInt64] = []
+    var samplingMaskBytes: Int { validQuads.count * 8 }
+    /// One bit per bilinear quad. Same predicates and floating-point order as the reference path.
+    mutating func prepareSampling(config: CaptureConfig) {
+        let w = intrinsics.width, h = intrinsics.height
+        validQuads = [UInt64](repeating:0,count:(w*h+63)/64)
+        for y in 0..<(h-1) { for x in 0..<(w-1) {
+            let i = y*w+x
+            if validQuad(i,config:config) { validQuads[i >> 6] |= UInt64(1) << (i & 63) }
+        } }
+        preparedLimits = SamplingLimits(config)
+    }
+    private func validQuad(_ i: Int, config: CaptureConfig) -> Bool {
+        let w = intrinsics.width, d0 = depth[i]
+        for corner in 0..<4 {
+            let index = i + (corner & 1) + (corner >> 1) * w, d = depth[index]
+            guard d.isFinite, d > config.pointMinDepthM, d < config.pointMaxDepthM,
+                  abs(d-d0) <= d0*config.depthEdgeRejectRatio,
+                  confidence == nil || confidence![index] >= config.minDepthConfidence else { return false }
+        }
+        return true
+    }
 
     init?(depth: Data, confidence: [UInt8]?, intrinsics: CameraIntrinsics, c2w: simd_float4x4) {
         let w = intrinsics.width, h = intrinsics.height
@@ -103,13 +131,9 @@ nonisolated struct DepthConsistencyView: Sendable {
         guard u.isFinite, v.isFinite, u >= 0, v >= 0, u < Float(w - 1), v < Float(h - 1) else { return nil }
         let x = Int(u), y = Int(v), i = y * w + x
         let d0 = depth[i], d1 = depth[i + 1], d2 = depth[i + w], d3 = depth[i + w + 1]
-        for corner in 0..<4 {
-            let index = i + (corner & 1) + (corner >> 1) * w
-            let d = depth[index]
-            guard d.isFinite, d > config.pointMinDepthM, d < config.pointMaxDepthM,
-                  abs(d - d0) <= d0 * config.depthEdgeRejectRatio,
-                  confidence == nil || confidence![index] >= config.minDepthConfidence else { return nil }
-        }
+        if preparedLimits == SamplingLimits(config) {
+            guard validQuads[i >> 6] & (UInt64(1) << (i & 63)) != 0 else { return nil }
+        } else if !validQuad(i,config:config) { return nil }
         let a = u - Float(x), b = v - Float(y)
         let measured = (d0 * (1 - a) + d1 * a) * (1 - b) + (d2 * (1 - a) + d3 * a) * b
         let tolerance = config.depthAgreementAbsoluteM + config.depthAgreementRelative * measured

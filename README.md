@@ -14,6 +14,8 @@ Capture photos, camera poses, and point clouds with ARKit. Refine the data on yo
 
 The app handles capture and dataset preparation. **On-device Gaussian Splatting training has been removed.** Training runs in an external tool; scanning, refinement, and preview stay on the phone.
 
+- **Experimental surface reconstruction:** bounded local RGB-D pose refinement and sparse TSDF surface points, with complete voxel-fusion fallback. Fusion also overlaps a single JPEG prefetch and reuses exact depth-validity checks without changing sampling or thresholds. See [behavior, benchmarks and limits](docs/SURFACE_RECONSTRUCTION.md).
+
 ## Workflow
 
 ```text

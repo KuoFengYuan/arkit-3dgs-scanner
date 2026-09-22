@@ -143,6 +143,9 @@ nonisolated struct CaptureConfig: Sendable {
     /// 若你的 viewer 反而變顛倒，設為 false 即輸出 ARKit 原生 +Y up。
     var flipWorldUpForExport = true
     /// 掃描後重融合的深度取樣步長（1 = 全像素，多視角加權平均品質最佳）
+    /// Experimental bounded surface reconstruction; explicitly enabled by capture/history UI.
+    var surfaceReconstruction = false
+    var surfaceBudgetMB = 32
     var refuseSampleStride = 1
     /// 重融合 voxel 尺寸：比即時預覽（1cm）略粗，把遠距深度雜訊造成的「厚牆」塌成薄面。
     /// 想要最高細節設 0.01；房間尺度 3DGS 初始化 2cm 已足夠且更乾淨。
@@ -189,6 +192,9 @@ nonisolated struct CaptureConfig: Sendable {
     var depthAgreementAbsoluteM: Float = 0.015
     var depthAgreementRelative: Float = 0.005
     var depthConsistencyEnabled = true
+    /// Exact-result optimization; false retains the reference sampler for regression/benchmarking.
+    var preparedDepthSampling = true
+    var prefetchFusionRGB = true
     /// Offline fusion uses separated viewpoints and a bounded ray-depth consensus.
     /// Live preview retains its cheap single-frame temporal check.
     var depthDiverseReferences = true

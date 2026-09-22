@@ -21,12 +21,12 @@ Two avoidable overlaps were found: live CPU preview cells remained fully allocat
 | Capture resources at stop | Drain writes and features, clear Core Image encoding caches and live feature state before offline work; preserve the open writer for resume |
 | Covered AR view | Stop its rendering during processing/review; retain the session for resumed scanning |
 | Requested depth | Request the consumed `sceneDepth` stream; omit unused `smoothedSceneDepth` |
-| RGB, depth, confidence | Written to disk continuously; decoded one frame at a time, without a new photo-count limit |
+| RGB, depth, confidence | Written continuously; one geometry frame plus at most one prefetched depth-resolution RGB image, without a new photo-count limit |
 | Retained live cells | Reduced proportionally to at most 100,000 after GPU release and preview persistence |
 | Anchors and remaining cells | Preserve local positions, colors, weights, and direction bits for resumed scanning |
 | Offline grid | Estimated 96 MiB budget plus available-memory reductions; 128 bytes/cell is an estimate, not RSS |
 | Insertion scratch | Serial mobile insertion without shard candidate copies; capacity and interruption checked every 1,024 points, including during coarsening; a stopped mutable grid is discarded |
-| Reference-depth cache | LRU capped at eight entries and 2 MiB of depth/confidence arrays; cleared below 384 MiB available memory |
+| Reference-depth cache | LRU capped at eight entries and 2 MiB of depth/confidence arrays and exact quad-validity masks; cleared below 384 MiB available memory |
 | Final cloud / floor-plan input | Mobile target clamped to `exportMaxPoints`, currently 250,000; no extra large downsampling dictionary |
 | Features / pose metadata | Live tracker keeps four descriptor frames and at most 200,000 historical observations; pose/filename metadata still grows with frame count |
 
@@ -41,6 +41,8 @@ Serial insertion preserves weighted ordering and LiDAR priority. Without capacit
 Leaving or resetting sets a separate cancellation flag. Fusion checks it before each frame, after candidate generation, and before export, returning `cancelled` rather than a partial result. Generation checks reject stale progress, pose, and floor-plan callbacks. Cancellation does not instantly interrupt ImageIO or ARKit calls.
 
 Below 192 MiB available memory, or upon a system memory-pressure event, fusion returns `memoryPressure` and review uses a bounded live preview. Raw media remain intact. More photos primarily increase streaming time, but a larger spatial extent can still force grid coarsening. The limited final cloud may omit thin/short walls or need coarser floor-plan cells. These safeguards do not relax depth-consistency thresholds. A per-job iOS memory-pressure listener latches warning/critical events even if the available-memory estimate remains optimistic. Native LiDAR frames require at least 224 MiB available before decoding (192 MiB reserve plus 32 MiB workspace); larger declared depth dimensions require more. Check depth-file size before loading it. Insertion and coarsening check pressure within a frame instead of waiting for the next one. More conservative fallback may occur earlier, preserving raw media and a preview rather than forcing a full-resolution result. System warnings are not guaranteed to arrive before every jetsam event.
+
+See [experimental surface reconstruction](SURFACE_RECONSTRUCTION.md) for the additional 32 MiB resident TSDF block budget, 256 MiB temporary backing-data budget, exact-result prefetch and hybrid fallback.
 
 ## Diagnostics
 

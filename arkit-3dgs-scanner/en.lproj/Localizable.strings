@@ -463,3 +463,15 @@
 "確認起點" = "Confirm start";
 
 "確認終點" = "Confirm end";
+
+"表面重建（實驗）" = "Surface reconstruction (experimental)";
+
+"包含姿態精修；容量或涵蓋不足時使用原融合" = "Includes pose refinement; uses original fusion if capacity or coverage is insufficient";
+
+"局部表面對齊已通過深度與影像驗證。" = "Local surface alignment passed depth and image validation.";
+
+"局部表面對齊未取得可靠改善，保留原姿態。" = "Local surface alignment found no reliable improvement; previous poses were retained.";
+
+"驗證局部表面對齊…" = "Validating local surface alignment…";
+
+"表面重建未達容量或涵蓋要求，已使用完整原融合結果。" = "Surface reconstruction did not meet resource or coverage requirements; the complete original fusion was used.";

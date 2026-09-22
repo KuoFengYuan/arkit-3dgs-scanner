@@ -118,6 +118,7 @@ final class CaptureController: NSObject, ObservableObject {
     /// 畫面與匯出共用這個旗標 —— 看到的就是匯出的。
     @Published var showPlanFurniture = false
     @Published var refineCameraPoses = true
+    @Published var reconstructSurfaces = true
     @Published var reconstructFromImages = true
     @Published private(set) var imageReconstructionReport: RGBReconstructionEngine.Report?
     private(set) var config = CaptureConfig()
@@ -347,7 +348,8 @@ final class CaptureController: NSObject, ObservableObject {
 
     func startScan() {
         guard canStartScan else { return }
-        config.baRounds = refineCameraPoses && hasLiDAR ? 6 : 0
+        config.baRounds = (refineCameraPoses || reconstructSurfaces) && hasLiDAR ? 6 : 0
+        config.surfaceReconstruction = reconstructSurfaces && hasLiDAR
         config.reconstructFromImages = reconstructFromImages
         do {
             try beginSessionStorage()
@@ -575,6 +577,7 @@ final class CaptureController: NSObject, ObservableObject {
             stage(L10n.text("逐張匹配拍攝影像…"), 0.10, .aligning)
             let records = BlurFilter.annotate(refinedRecords)
             let rounds = config.baRounds
+            let surfaceRefinement = config.surfaceReconstruction
             // The live worker is best-effort; release it and rebuild tracks from ALL saved
             // usable depth frames. Disk reads and descriptor storage have fixed limits.
             await featureTracker.reset()
@@ -582,11 +585,12 @@ final class CaptureController: NSObject, ObservableObject {
                 Task { @MainActor [weak self] in
                     guard let self, self.phase == .processing, self.processingStage == .aligning, self.scanGeneration == generation else { return }
                     self.exportProgress = 0.10 + p * 0.24
-                    self.statusText = p >= 0.7 ? L10n.text("搜尋並驗證重訪視角…") : (p < 0.595 ? L10n.text("逐張匹配拍攝影像… \(Int(p / 0.595 * 100))%") : L10n.text("驗證相機位置修正…"))
+                    let featureProgress = surfaceRefinement ? p/0.85 : p
+                    self.statusText = surfaceRefinement && p >= 0.85 ? L10n.text("驗證局部表面對齊…") : featureProgress >= 0.7 ? L10n.text("搜尋並驗證重訪視角…") : (featureProgress < 0.595 ? L10n.text("逐張匹配拍攝影像… \(Int(featureProgress / 0.595 * 100))%") : L10n.text("驗證相機位置修正…"))
                 }
             }
             let result = await Task.detached(priority: .userInitiated) {
-                await OfflinePoseRefinement.run(records: records, directory: dir, rounds: rounds,
+                await OfflinePoseRefinement.run(records: records, directory: dir, rounds: rounds, surfaceRefinement:surfaceRefinement,
                                                  isCancelled: { cancel.isCancelled }, progress: onProgress)
             }.value
             guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
@@ -670,6 +674,10 @@ final class CaptureController: NSObject, ObservableObject {
                 points = await accumulator.checkpointPoints(limit: min(cfg.exportMaxPoints, 100_000),
                                                             anchorTransforms: latestTileTransforms)
             } else {
+                if let surface = result.report.surface, !surface.status.hasPrefix("completed") {
+                    let fallback = L10n.text("表面重建未達容量或涵蓋要求，已使用完整原融合結果。")
+                    scanNotice = [scanNotice,fallback].compactMap { $0 }.joined(separator:"\n")
+                }
                 let dense = result.points
                 if needsDensePlan, RefusionEngine.hasOptionalProcessingHeadroom {
                     stage(L10n.text("建立平面圖…"), 0.96, .finalizing)
