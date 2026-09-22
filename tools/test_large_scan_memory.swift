@@ -133,8 +133,8 @@ import ImageIO
         var polls = 0
         let cancelled = RefusionEngine.refuseWithReport(records: records, sessionDir: dir, config: config,
             availableMemory: { 512 * 1_024 * 1_024 }, isCancelled: { polls += 1; return polls >= 3 }, progress: { _ in })
-        check(cancelled.report.status == "cancelled" && cancelled.report.completedFrames == 1 && cancelled.points.isEmpty,
-              "leaving a scan cancels between frames without publishing a partial cloud")
+        check(cancelled.report.status == "cancelled" && cancelled.report.completedFrames < records.count && cancelled.points.isEmpty,
+              "leaving a scan cancels without publishing a partial cloud")
         check(fm.fileExists(atPath: dir.appendingPathComponent("images/wall.jpg").path)
               && fm.fileExists(atPath: dir.appendingPathComponent("depth/wall.bin").path),
               "cancellation preserves source image and depth files")

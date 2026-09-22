@@ -13,7 +13,7 @@ struct CaptureView: View {
 
     var body: some View {
         ZStack {
-            ARViewContainer(controller: controller)
+            ARViewContainer(controller: controller, isActive: controller.phase == .idle || controller.phase == .scanning)
                 .ignoresSafeArea()
             // review / exporting / done 期間以 3D 檢視器覆蓋 AR 畫面（AR view 保持存活以便續掃）
             if showReview {
@@ -61,6 +61,7 @@ struct CaptureView: View {
 
 private struct ARViewContainer: UIViewRepresentable {
     let controller: CaptureController
+    let isActive: Bool
 
     func makeUIView(context: Context) -> ARSCNView {
         let view = ARSCNView(frame: .zero)
@@ -70,7 +71,13 @@ private struct ARViewContainer: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ uiView: ARSCNView, context: Context) {}
+    func updateUIView(_ uiView: ARSCNView, context: Context) {
+        // The view/session stays available for resume, but the covered camera must not keep
+        // rendering beside fusion or a second review SCNView.
+        uiView.isHidden = !isActive
+        uiView.isPlaying = isActive
+        uiView.rendersContinuously = isActive
+    }
 
     static func dismantleUIView(_ uiView: ARSCNView, coordinator: Coordinator) {
         // 開啟平面圖不應結束 session；只有 AR view 真正移除時釋放資源。

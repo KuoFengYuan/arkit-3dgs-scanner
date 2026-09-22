@@ -16,6 +16,30 @@ import ImageIO
 import os
 import simd
 
+/// Scoped to one fusion job; a warning latches until that job has safely stopped.
+nonisolated private final class FusionMemoryWarning: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events = 0
+    #if os(iOS)
+    private var source: DispatchSourceMemoryPressure?
+    #endif
+    init() {
+        #if os(iOS)
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .global(qos: .utility))
+        source.setEventHandler { [weak self] in self?.record() }
+        self.source = source
+        source.resume()
+        #endif
+    }
+    private func record() { lock.lock(); events += 1; lock.unlock() }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return events }
+    deinit {
+        #if os(iOS)
+        source?.cancel()
+        #endif
+    }
+}
+
 // MARK: - 共用幾何工具
 
 nonisolated enum PointCloudMath {
@@ -151,12 +175,16 @@ nonisolated struct FusedVoxelGrid {
     }
 
     /// - measured: true ＝ LiDAR 直接反投影（量測）；false ＝ ARKit 場景網格（推論）
-    mutating func insert(_ candidates: [CloudPoint], measured: Bool = true, boundedMemory: Bool = false) {
-        guard !candidates.isEmpty else { return }
+    @discardableResult
+    mutating func insert(_ candidates: [CloudPoint], measured: Bool = true, boundedMemory: Bool = false,
+                         shouldContinue: () -> Bool = { true }) -> Bool {
+        guard shouldContinue() else { return false }
+        guard !candidates.isEmpty else { return true }
         if boundedMemory {
             // Mobile path: no duplicate candidate buckets or concurrent dictionary expansion.
             // Check capacity every 1,024 points instead of overshooting by a whole mesh frame.
             for (index, pt) in candidates.enumerated() {
+                if index % 1024 == 0, !shouldContinue() { return false }
                 guard pt.score.isFinite else { continue }
                 if let key = PointCloudMath.voxelKey(SIMD3(pt.x, pt.y, pt.z), size: voxelSize) {
                     let s = shardIndex(key)
@@ -181,10 +209,10 @@ nonisolated struct FusedVoxelGrid {
                                              bestScore: pt.score, measured: measured)
                     }
                 }
-                if (index + 1) % 1024 == 0, count > maxCells { reduceCapacity(to: maxCells) }
+                if (index + 1) % 1024 == 0, count > maxCells, !reduceCapacity(to: maxCells, shouldContinue: shouldContinue) { return false }
             }
-            if count > maxCells { reduceCapacity(to: maxCells) }
-            return
+            if count > maxCells, !reduceCapacity(to: maxCells, shouldContinue: shouldContinue) { return false }
+            return true
         }
         // 先分堆（保序），再各片平行寫入
         let n = shards.count
@@ -231,19 +259,21 @@ nonisolated struct FusedVoxelGrid {
         // 分片之後那會變成每點一次跨片加總。代價是可能短暫超出上限一個批次的量，
         // 而一個批次只有一幀的點（~49k），相對 2M 的上限可以忽略。
         if count >= maxCells, count > 1 {
-            coarsen()
-            reduceCapacity(to: maxCells)
+            guard coarsen(shouldContinue: shouldContinue), reduceCapacity(to: maxCells, shouldContinue: shouldContinue) else { return false }
         }
+        return true
     }
 
     /// Only lower the budget; never grow again during a memory-constrained run.
-    mutating func reduceCapacity(to limit: Int) {
+    @discardableResult
+    mutating func reduceCapacity(to limit: Int, shouldContinue: () -> Bool = { true }) -> Bool {
+        guard shouldContinue() else { return false }
         maxCells = min(maxCells, max(1, limit))
         var rounds = 0
         var stalled = 0
         while count > maxCells, rounds < 32, stalled < 4 {
             let before = count
-            coarsen(); rounds += 1
+            guard coarsen(shouldContinue: shouldContinue) else { return false }; rounds += 1
             stalled = count == before ? stalled + 1 : 0
         }
         // Cells on opposite sides of the origin cannot merge by doubling the voxel size.
@@ -252,8 +282,10 @@ nonisolated struct FusedVoxelGrid {
             var kept = 0
             let total = count
             for index in shards.indices {
+                guard shouldContinue() else { return false }
                 var compact: [Int64: Cell] = [:]
                 for (key, value) in shards[index] {
+                    if kept % 1024 == 0, !shouldContinue() { return false }
                     let before = kept * maxCells / total
                     kept += 1
                     if kept * maxCells / total > before { compact[key] = value }
@@ -261,6 +293,7 @@ nonisolated struct FusedVoxelGrid {
                 shards[index] = compact
             }
         }
+        return true
     }
 
     /// 觸頂自動粗化：voxel ×2、加權合併 —— 長掃描記憶體有界且不停止收點。
@@ -271,12 +304,16 @@ nonisolated struct FusedVoxelGrid {
     /// 這是大場景融合時可能發生記憶體尖峰的位置，實際閃退原因仍需裝置紀錄確認。
     /// 逐片釋放之後峰值降到「舊表剩下的部分 ＋ 新表」，
     /// 而粗化本來就會把格數砍成約 1/4，所以實際峰值接近 1.25 份而不是 2 份。
-    private mutating func coarsen() {
-        guard voxelSize.isFinite, voxelSize < Float.greatestFiniteMagnitude / 2 else { return }
+    private mutating func coarsen(shouldContinue: () -> Bool) -> Bool {
+        guard shouldContinue() else { return false }
+        guard voxelSize.isFinite, voxelSize < Float.greatestFiniteMagnitude / 2 else { return true }
         voxelSize *= 2
         var merged = [[Int64: Cell]](repeating: [:], count: shards.count)
+        var visited = 0
         for si in shards.indices {
             for cell in shards[si].values {
+                if visited % 1024 == 0, !shouldContinue() { return false }
+                visited += 1
                 guard let key = PointCloudMath.voxelKey(cell.mean, size: voxelSize) else { continue }
                 let s = shardIndex(key)
                 if var m = merged[s][key] {
@@ -296,6 +333,7 @@ nonisolated struct FusedVoxelGrid {
             shards[si] = [:]        // 這一片搬完就放掉，不要等到全部搬完
         }
         shards = merged
+        return true
     }
 
     /// 26 鄰域方向（單位格offset）
@@ -484,7 +522,7 @@ nonisolated enum RefusionEngine {
     }
 
     struct Report: Codable, Sendable {
-        var version = 4
+        var version = 5
         var status = "running"
         var stage = "frames"
         var totalFrames = 0
@@ -493,6 +531,10 @@ nonisolated enum RefusionEngine {
         var initialCellLimit = 0
         var capacityReductions = 0
         var minimumAvailableBytes: UInt64?
+        var peakProcessFootprintBytes: UInt64?
+        var memoryWarningCount: Int? = 0
+        var memoryStopReason: String?
+        var requiredFrameHeadroomBytes: UInt64?
         var outputPoints = 0
         var boundedExport = false
         var finalVoxelSizeM: Float = 0
@@ -516,8 +558,10 @@ nonisolated enum RefusionEngine {
                                  meshVertices: [SIMD3<Float>] = [], target: Int? = nil,
                                  diagnosticsDirectory: URL? = nil,
                                  availableMemory: () -> UInt64? = { availableMemoryBytes },
+                                 memoryPressure: () -> Bool = { false },
                                  isCancelled: () -> Bool = { false },
                                  progress: @Sendable (Double) -> Void) -> Result {
+        let warning = FusionMemoryWarning()
         var report = Report(totalFrames: records.count)
         report.diverseReferences = config.depthConsistencyEnabled && config.depthDiverseReferences
         report.rayConsensus = config.depthConsistencyEnabled && config.depthConsensusEnabled
@@ -530,6 +574,10 @@ nonisolated enum RefusionEngine {
         func memorySnapshot() -> UInt64? {
             let bytes = availableMemory()
             if let bytes { report.minimumAvailableBytes = min(report.minimumAvailableBytes ?? bytes, bytes) }
+            if let footprint = processFootprintBytes {
+                report.peakProcessFootprintBytes = max(report.peakProcessFootprintBytes ?? 0, footprint)
+            }
+            report.memoryWarningCount = warning.count
             return bytes
         }
         let initialMemory = memorySnapshot()
@@ -550,6 +598,21 @@ nonisolated enum RefusionEngine {
             persistReport()
             return Result(points: [], report: report)
         }
+        var interruptionStatus = "memoryPressure"
+        func canContinue() -> Bool {
+            if isCancelled() { interruptionStatus = "cancelled"; return false }
+            if warning.count > 0 || memoryPressure() {
+                report.memoryWarningCount = max(1,warning.count)
+                report.memoryStopReason = "systemMemoryPressure"
+                return false
+            }
+            if let bytes = memorySnapshot(), shouldStopForMemory(availableBytes: bytes) {
+                report.memoryStopReason = "reservedHeadroom"
+                return false
+            }
+            return true
+        }
+        guard canContinue() else { return interrupted(status: interruptionStatus) }
         // 位姿在進來之前就已經定案（ARKit ＋ 錨點修正，必要時再加 BA ——
         // 見 CaptureController.processScan）。這裡只負責融合。
         //
@@ -594,6 +657,8 @@ nonisolated enum RefusionEngine {
                   r.intrinsics.width > 0, r.intrinsics.height > 0,
                   r.intrinsics.fx.isFinite, r.intrinsics.fy.isFinite, r.intrinsics.fx > 0, r.intrinsics.fy > 0,
                   r.intrinsics.cx.isFinite, r.intrinsics.cy.isFinite,
+                  depthFile == (depthFile as NSString).lastPathComponent,
+                  (try? depthDir.appendingPathComponent(depthFile).resourceValues(forKeys: [.fileSizeKey]).fileSize) == dw * dh * 4,
                   let depth = try? Data(contentsOf: depthDir.appendingPathComponent(depthFile)),
                   depth.count == dw * dh * 4 else { return y }
 
@@ -670,33 +735,38 @@ nonisolated enum RefusionEngine {
         // Re-check headroom before decoding, inserting, and exporting, not only at startup.
         let lanes = 1
         var cellLimit = initialLimit
-        func adaptCapacity(to bytes: UInt64) {
-            if bytes < 256 * 1_024 * 1_024 { depthCache.clear() }
+        func adaptCapacity(to bytes: UInt64) -> Bool {
+            if bytes < 384 * 1_024 * 1_024 { depthCache.clear() }
             let limit = pressureCellLimit(currentLimit: cellLimit, currentCells: grid.count, availableBytes: bytes)
             if limit < cellLimit {
-                grid.reduceCapacity(to: limit)
+                guard grid.reduceCapacity(to: limit, shouldContinue: canContinue) else { return false }
                 cellLimit = limit
                 report.capacityReductions += 1
             }
+            return true
         }
         for i in records.indices {
-            if isCancelled() { return interrupted(status: "cancelled") }
+            guard canContinue() else { return interrupted(status: interruptionStatus) }
             if let bytes = memorySnapshot() {
-                if shouldStopForMemory(availableBytes: bytes) { return interrupted() }
-                adaptCapacity(to: bytes)
+                let required = frameHeadroomBytes(width: records[i].depthWidth, height: records[i].depthHeight)
+                report.requiredFrameHeadroomBytes = max(report.requiredFrameHeadroomBytes ?? 0, required)
+                guard bytes >= required else {
+                    report.memoryStopReason = "frameWorkspace"; return interrupted()
+                }
+                guard adaptCapacity(to: bytes) else { return interrupted(status: interruptionStatus) }
             }
             let tP = Date()
             let produced = autoreleasepool { produce(i) }
             tProduce += Date().timeIntervalSince(tP)
-            if isCancelled() { return interrupted(status: "cancelled") }
+            guard canContinue() else { return interrupted(status: interruptionStatus) }
             if let bytes = memorySnapshot() {
-                if shouldStopForMemory(availableBytes: bytes) { return interrupted() }
-                // Decode/mesh projection may consume the headroom observed before this frame.
-                adaptCapacity(to: bytes)
+                guard adaptCapacity(to: bytes) else { return interrupted(status: interruptionStatus) }
             }
             let tI = Date()
-            grid.insert(produced.measured, boundedMemory: boundedMemory)
-            if !produced.mesh.isEmpty { grid.insert(produced.mesh, measured: false, boundedMemory: boundedMemory) }
+            guard grid.insert(produced.measured, boundedMemory: boundedMemory, shouldContinue: canContinue),
+                  grid.insert(produced.mesh, measured: false, boundedMemory: boundedMemory, shouldContinue: canContinue) else {
+                return interrupted(status: interruptionStatus)
+            }
             tInsert += Date().timeIntervalSince(tI)
             tDecode += produced.decodeSec
             tMesh += produced.meshSec
@@ -713,8 +783,7 @@ nonisolated enum RefusionEngine {
         report.finalVoxelSizeM = grid.voxelSize
         depthCache.clear()
         persistReport()
-        if isCancelled() { return interrupted(status: "cancelled") }
-        if let bytes = memorySnapshot(), shouldStopForMemory(availableBytes: bytes) { return interrupted() }
+        guard canContinue() else { return interrupted(status: interruptionStatus) }
         // 診斷：這條鏈上有三處會悄悄粗化解析度（融合格觸頂、匯出擇優下採樣、訓練高斯預算），
         // 而初始點距直接決定初始高斯大小（依外部訓練器的初始化方式而定）。
         // 過去完全沒有數字，訓練端看到 15cm 的初始高斯卻無從得知是哪一段造成的。
@@ -733,21 +802,16 @@ nonisolated enum RefusionEngine {
         report.boundedExport = boundedMemory
         let out: [CloudPoint]
         if boundedMemory {
-            var interruptedStatus = "memoryPressure"
             var lastPersisted = -1
             guard let exported = grid.consumeExportPoints(target: outputLimit,
-                minNeighbors: config.refuseMinNeighbors, shouldContinue: {
-                    if isCancelled() { interruptedStatus = "cancelled"; return false }
-                    if let bytes = memorySnapshot(), shouldStopForMemory(availableBytes: bytes) { return false }
-                    return true
-                }, progress: { fraction in
+                minNeighbors: config.refuseMinNeighbors, shouldContinue: canContinue, progress: { fraction in
                     report.exportFraction = fraction
                     report.stage = fraction < 0.5 ? "exportFilter" : "exportPoints"
                     report.exportSeconds = Date().timeIntervalSince(tE)
                     let bucket = Int(fraction * 10)
                     if bucket != lastPersisted { persistReport(); lastPersisted = bucket }
                     progress(0.9 + fraction * 0.1)
-                }) else { return interrupted(status: interruptedStatus) }
+                }) else { return interrupted(status: interruptionStatus) }
             out = exported
         } else {
             out = grid.exportPoints(target: outputLimit, minNeighbors: config.refuseMinNeighbors)
@@ -772,7 +836,10 @@ nonisolated enum RefusionEngine {
         if out.count < rawCells {
             msg += "，過濾／取樣移除 \(rawCells - out.count) 格"
         }
-        FileHandle.standardError.write(Data((msg + "\n").utf8))
+        // Xcode's stderr transport can close during a long device run. The legacy
+        // FileHandle.write raises an Objective-C exception (SIGABRT), outside Swift catch.
+        // Unified logging must never decide whether completed scan data is published.
+        Logger(subsystem: "itri.fable", category: "Refusion").info("\(msg, privacy: .public)")
         report.status = "completed"
         report.stage = "finished"
         report.outputPoints = out.count
@@ -933,7 +1000,7 @@ nonisolated enum RefusionEngine {
     /// Reserve room for ARKit, output arrays, dictionary growth and coarsening. In particular,
     /// never impose a 200k-cell minimum when the available memory cannot afford it.
     static func cellBudget(configured: Int, availableBytes: UInt64) -> Int {
-        let reserve: UInt64 = 64 * 1_024 * 1_024
+        let reserve = processingReserveBytes
         let usable = availableBytes > reserve ? availableBytes - reserve : 0
         let cells = usable / 4 / UInt64(kBytesPerCell)
         return max(1, min(max(1, configured), Int(min(cells, UInt64(Int.max)))))
@@ -951,12 +1018,35 @@ nonisolated enum RefusionEngine {
         max(1, min(max(1, megabytes), 512) * 1_024 * 1_024 / kBytesPerCell)
     }
 
+    static let processingReserveBytes: UInt64 = 192 * 1_024 * 1_024
+
+    /// Account for candidate arrays, decoding, current depth and up to four references before allocation.
+    static func frameHeadroomBytes(width: Int?, height: Int?) -> UInt64 {
+        let w = min(4096,max(0,width ?? 0)), h = min(4096,max(0,height ?? 0))
+        return processingReserveBytes + max(32 * 1_024 * 1_024, UInt64(w) * UInt64(h) * 96)
+    }
+
+    static var processFootprintBytes: UInt64? {
+        #if os(iOS)
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let status = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return status == KERN_SUCCESS ? info.phys_footprint : nil
+        #else
+        return nil
+        #endif
+    }
+
     static func shouldStopForMemory(availableBytes: UInt64) -> Bool {
-        availableBytes < 96 * 1_024 * 1_024
+        availableBytes < processingReserveBytes
     }
 
     static func pressureCellLimit(currentLimit: Int, currentCells: Int, availableBytes: UInt64) -> Int {
-        guard availableBytes < 256 * 1_024 * 1_024 else { return currentLimit }
+        guard availableBytes < 384 * 1_024 * 1_024 else { return currentLimit }
         // Include the existing grid when recalculating; otherwise every sample would shrink
         // the budget simply because this same grid has consumed memory since the last sample.
         let existing = UInt64(max(0, currentCells)) * UInt64(kBytesPerCell)

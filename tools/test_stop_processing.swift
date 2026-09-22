@@ -33,7 +33,7 @@ import simd
         check(tiled.count == points.count, "saving a checkpoint preserves the accumulator for resume")
         check(tiled.checkpointPoints(limit: 0).isEmpty, "zero checkpoint limit is safe")
         check(RefusionEngine.shouldStopForMemory(availableBytes: 95 * mib), "critical runtime headroom requests an orderly fallback")
-        check(!RefusionEngine.shouldStopForMemory(availableBytes: 128 * mib), "noncritical headroom can continue with a smaller grid")
+        check(!RefusionEngine.shouldStopForMemory(availableBytes: 256 * mib), "256 MiB headroom can continue with a smaller grid")
         check(RefusionEngine.workingSetCellLimit(megabytes: 96) == 786_432, "device dictionary budget has an absolute ceiling")
         let reduced = RefusionEngine.pressureCellLimit(currentLimit: 786_432, currentCells: 500_000, availableBytes: 128 * mib)
         check(reduced < 500_000 && reduced > 0, "pressure appearing midscan lowers the existing grid budget")

@@ -438,6 +438,10 @@ final class CaptureController: NSObject, ObservableObject {
             capturePerformance.retainedFeatureFrames = retained.descriptorFrames
             capturePerformance.archivedFeatureObservations = retained.archivedObservations
             capturePerformance.discardedFeatureObservations = retained.discardedObservations
+            // Offline matching rebuilds from disk. Do not carry descriptors or JPEG GPU caches
+            // through map snapshots, BA and refusion (also release when BA is disabled).
+            await featureTracker.reset()
+            await writer?.releaseEncodingCaches()
             let intervals = zip(timestamps, timestamps.dropFirst()).map { max(0, $1 - $0) }
             capturePerformance.savedIntervalTotalS = intervals.reduce(0, +)
             capturePerformance.savedIntervalMaxS = intervals.max() ?? 0
