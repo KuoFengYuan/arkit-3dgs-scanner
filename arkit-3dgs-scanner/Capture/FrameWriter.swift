@@ -55,8 +55,8 @@ actor FrameWriter {
         case closed, jpegEncoding
         var errorDescription: String? {
             switch self {
-            case .closed: return "掃描檔案已關閉"
-            case .jpegEncoding: return "無法編碼影像"
+            case .closed: return L10n.text("掃描檔案已關閉")
+            case .jpegEncoding: return L10n.text("無法編碼影像")
             }
         }
     }

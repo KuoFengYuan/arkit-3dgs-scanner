@@ -15,7 +15,7 @@ nonisolated enum TrainingFrameSelector {
         let replacementID: Int?
     }
     struct Report: Codable, Sendable {
-        var version = 2
+        var version = 3
         let inputFrames: Int
         let selectedIDs: [Int]
         let recaptureIDs: [Int]
@@ -23,20 +23,27 @@ nonisolated enum TrainingFrameSelector {
         var motionRiskIDs: [Int]? = nil
         var weakDetailIDs: [Int]? = nil
         var uncertainDetailIDs: [Int]? = nil
+        /// Only measured weak detail warrants a recapture banner. Motion is a risk
+        /// estimate, and textureless/unmeasured images have unknown sharpness.
         var notice: String? {
-            guard !recaptureIDs.isEmpty else { return nil }
-            guard let motionRiskIDs, let weakDetailIDs, let uncertainDetailIDs else {
-                return "舊版報告有 \(recaptureIDs.count) 張視角需檢查，這是風險提示，不代表照片都模糊。"
+            guard let weakDetailIDs, !weakDetailIDs.isEmpty else { return nil }
+            let ids = weakDetailIDs.prefix(5).map(String.init).joined(separator: ", ")
+            return L10n.text("\(weakDetailIDs.count) 張視角細節偏弱，建議檢查或補拍（影格 \(ids)）。")
+        }
+
+        var diagnosticSummary: String? {
+            guard let motionRiskIDs, let uncertainDetailIDs, weakDetailIDs != nil else {
+                return recaptureIDs.isEmpty ? nil
+                    : L10n.text("舊版報告有 \(recaptureIDs.count) 張品質待確認的視角，未區分運動估計與實測細節；可重新優化資料。")
             }
             var notes: [String] = []
-            if !weakDetailIDs.isEmpty {
-                notes.append("\(weakDetailIDs.count) 張視角細節偏弱，建議檢查或補拍（影格 "
-                    + weakDetailIDs.prefix(5).map(String.init).joined(separator: "、") + "）。")
+            if !motionRiskIDs.isEmpty {
+                notes.append(L10n.text("\(motionRiskIDs.count) 張拍攝時的運動估計偏高；這不代表照片已模糊，也不單獨要求補拍。"))
             }
-            if !motionRiskIDs.isEmpty { notes.append("\(motionRiskIDs.count) 張有運動風險，尚未判定為模糊。") }
-            if !uncertainDetailIDs.isEmpty { notes.append("\(uncertainDetailIDs.count) 張低紋理或資料不足，無法判定清晰度。") }
-            return notes.joined(separator: "\n")
-
+            if !uncertainDetailIDs.isEmpty {
+                notes.append(L10n.text("\(uncertainDetailIDs.count) 張低紋理或資料不足，無法判定清晰度。"))
+            }
+            return notes.isEmpty ? nil : notes.joined(separator: "\n")
         }
     }
     struct Evidence: Sendable {
@@ -94,12 +101,13 @@ nonisolated enum TrainingFrameSelector {
         }
         let selectedByID = selected.reduce(into: [Int: FrameRecord]()) { $0[$1.id] = $1 }
         let ids = Set(selected.map(\.id))
-        let risky = selected.filter {
-            // This is a request to inspect/re-capture, never an absolute claim of blur.
-            $0.estimatedBlurPx > BlurFilter.kTrainBlurPx || score($0) <= 0
-                || ($0.sharpnessRatio.isFinite && $0.sharpnessRatio < 0.5)
+        let weakIDs = selected.filter {
+            // A relative drop needs a valid detail measurement; a white wall or missing
+            // measurement is uncertainty, not evidence that recapture will help.
+            score($0) > 0 && $0.sharpness > 0 && $0.sharpness.isFinite
+                && $0.sharpnessRatio.isFinite && $0.sharpnessRatio < 0.5
         }.map(\.id).sorted()
-        var report = Report(inputFrames: records.count, selectedIDs: ids.sorted(), recaptureIDs: risky,
+        var report = Report(inputFrames: records.count, selectedIDs: ids.sorted(), recaptureIDs: weakIDs,
                       decisions: records.map { r in
             let reason: String
             if r.blurVerdict == .drop { reason = "unreliableGeometry" }
@@ -107,11 +115,11 @@ nonisolated enum TrainingFrameSelector {
             else if let replacement = replacements[r.id] {
                 reason = score(r) < score(selectedByID[replacement]!) * 0.65
                     ? "clearerEquivalentView" : "redundantView"
-            } else { reason = risky.contains(r.id) ? "coverageFallbackCheckOrRecapture" : "distinctView" }
+            } else { reason = weakIDs.contains(r.id) ? "coverageFallbackCheckOrRecapture" : "distinctView" }
             return Decision(frameID: r.id, imageFile: r.imageFile, timestamp: r.timestamp,
                             selected: ids.contains(r.id), reason: reason, replacementID: replacements[r.id])
         })
-        report.weakDetailIDs = selected.filter { $0.sharpnessRatio.isFinite && $0.sharpnessRatio < 0.5 }.map(\.id).sorted()
+        report.weakDetailIDs = weakIDs
         let weak = Set(report.weakDetailIDs ?? [])
         report.motionRiskIDs = selected.filter { $0.estimatedBlurPx > BlurFilter.kTrainBlurPx && !weak.contains($0.id) }.map(\.id).sorted()
         report.uncertainDetailIDs = selected.filter { score($0) <= 0 && !weak.contains($0.id) }.map(\.id).sorted()

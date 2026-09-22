@@ -47,7 +47,7 @@ Simulator 可驗證一般介面與資料流程，不能代替真機 ARKit／LiDA
 
 模式只能在開拍前切換。`capture-meta.json` 分別記錄硬體能力 `lidarAvailable` 與本次選擇 `lidarEnabled`。開關控制 App 請求與使用的深度功能，不是感測器電源控制，也無法保證 ARKit 內部完全不用 LiDAR。
 
-相機模式依賴紋理、清晰度與視差，不能把影像推估深度視為感測器量測。詳見 [相機模式精度](docs/CAMERA_ONLY_ACCURACY.md)。
+相機模式依賴紋理、清晰度與視差，不能把影像推估深度視為感測器量測。詳見 [相機模式精度](docs/CAMERA_ONLY_ACCURACY.zh-TW.md)。
 
 ### 厚層、重影與姿態精修
 
@@ -56,13 +56,13 @@ Simulator 可驗證一般介面與資料流程，不能代替真機 ARKit／LiDA
 - 「精細掃描」逐張匹配影像並做局部相機精修。只有通過保留觀測驗證的結果才套用；資料不足或驗證失敗時保留既有姿態。
 - RGB 照片選用與深度融合分開：實際清晰度與視角差異決定訓練照片，可靠深度仍可保留。原始照片不因篩選而刪除。
 
-569 幀掃描的局部厚度中位數曾由 8.94 降到 7.01 cm（約 21.6%）。這是固定局部區域的表面一致性量測，包含真實家具／多層結構，**不是絕對尺寸精度，也不保證 3DGS 無殘影**。方法、效能代價與限制見 [LiDAR 表面共識](docs/LIDAR_SURFACE_CONSENSUS.md)。
+569 幀掃描的局部厚度中位數曾由 8.94 降到 7.01 cm（約 21.6%）。這是固定局部區域的表面一致性量測，包含真實家具／多層結構，**不是絕對尺寸精度，也不保證 3DGS 無殘影**。方法、效能代價與限制見 [LiDAR 表面共識](docs/LIDAR_SURFACE_CONSENSUS.zh-TW.md)。
 
 ### 大場景記憶體
 
 逐幀讀取照片與深度，參考深度快取上限 8 幀／2 MiB；融合 grid 依記憶體預算限制並在必要時粗化，手機輸出點數上限目前為 250,000。這些限制仍用於掃描後處理，移除訓練器不代表可以無限制提高點數。
 
-已有 1,000 幀合成深度串流測試，並保留取消與低記憶體回退。這不是實機長時間掃描不閃退的保證。詳見 [大場景記憶體](docs/LARGE_SCAN_MEMORY.md) 與 [採集吞吐量](docs/CAPTURE_THROUGHPUT.md)。
+已有 1,000 幀合成深度串流測試，並保留取消與低記憶體回退。這不是實機長時間掃描不閃退的保證。詳見 [大場景記憶體](docs/LARGE_SCAN_MEMORY.zh-TW.md) 與 [採集吞吐量](docs/CAPTURE_THROUGHPUT.zh-TW.md)。
 
 ## 歷史、回放與刪除
 
@@ -70,7 +70,7 @@ Simulator 可驗證一般介面與資料流程，不能代替真機 ARKit／LiDA
 
 - **拍攝影像**：照片與橘色相機位置／方向同步，支援跟隨或完整路線檢視；換圖完成前保留上一張，避免輪播閃爍。預覽按姿態旋正，原始 JPEG 不變。
 - **播放速度**：0.5、1、2、5、10、15、30 fps；這是已保存關鍵影格的播放速度，不是原始等速影片。
-- **優化訓練資料**：在手機重新處理照片、姿態與點雲，完成後另存新版本；此操作不執行 Gaussian 訓練。詳見 [手機端資料優化](docs/ON_DEVICE_TRAINING_QUALITY.md)。
+- **優化訓練資料**：在手機重新處理照片、姿態與點雲，完成後另存新版本；此操作不執行 Gaussian 訓練。詳見 [手機端資料優化](docs/ON_DEVICE_TRAINING_QUALITY.zh-TW.md)。
 - **多選／全部刪除**：移除選定掃描的完整資料夾與同名 ZIP，包含照片、深度、姿態、點雲與模型。舊版掃描若有 `gaussians.ply`，也在整筆刪除範圍內；不影響未選紀錄、系統相簿或已分享出去的副本。
 
 歷史紀錄可預覽與重處理；離開掃描工作階段後，不能從歷史頁直接恢復原本的即時續掃。
@@ -103,7 +103,7 @@ scan_…/
 
 依啟用功能及成功結果，可能另有平面圖、世界地圖、影像重建及採集效能報告。新版不產生 `gaussians.ply`；舊版掃描既有模型仍隨原資料保留與分享。
 
-COLMAP 相機與 `points3D.bin` 預設一起繞世界 X 軸旋轉 180°；`points.ply`、`review.ply` 與 JSONL 保留 ARKit 世界座標。不要把不同座標系的點雲與姿態直接混用。詳見 [座標系](docs/COORDINATES.md) 與 [歷史訓練匯出](docs/HISTORY_TRAINING_EXPORT.md)。
+COLMAP 相機與 `points3D.bin` 預設一起繞世界 X 軸旋轉 180°；`points.ply`、`review.ply` 與 JSONL 保留 ARKit 世界座標。不要把不同座標系的點雲與姿態直接混用。詳見 [座標系](docs/COORDINATES.zh-TW.md) 與 [歷史訓練匯出](docs/HISTORY_TRAINING_EXPORT.zh-TW.md)。
 
 輸出模型用於提供校準相機與初始化點，沒有完整 SfM 特徵觀測與 tracks；不能只執行 COLMAP BA 就期待補出缺少的觀測。沒有種子點時仍可匯出空點集，但外部訓練器可能需要額外初始化。
 
@@ -151,4 +151,32 @@ python3 -m venv .venv
 .venv/bin/python tools/arkit2gs.py /path/to/scan -o /path/to/dataset --format both
 ```
 
-更多說明：[掃描架構](docs/CAPTURE_ARCHITECTURE.md)、[深度品質與即時預覽](docs/LIDAR_QUALITY_AND_PREVIEW.md)、[外部訓練說明](docs/TRAINING.md)。
+更多說明：[掃描架構](docs/CAPTURE_ARCHITECTURE.zh-TW.md)、[深度品質與即時預覽](docs/LIDAR_QUALITY_AND_PREVIEW.zh-TW.md)、[外部訓練說明](docs/TRAINING.zh-TW.md)。
+
+## 雙語與開發流程
+
+App 預設繁體中文，首頁可切 English 並保存選擇；文件英文優先，每份提供繁中對照。動態訊息、錯誤與無障礙標籤也支援雙語。詳見 [語系說明](docs/LOCALIZATION.zh-TW.md)。
+
+融合後單純運動估計偏高不再出補拍警告，放在收合的品質資訊；有實測細節偏弱才顯示需檢查的影格。這不會去除照片模糊，也不更動原照片／可靠深度。
+
+遵循 [貢獻流程](CONTRIBUTING.zh-TW.md)與 [工作規範](AGENTS.zh-TW.md)：Feature/ 新功能、Bugfix/ 修錯、Enhance/ 改善，區分大小寫。完成驗證後 commit/push、開 PR、必要檢查通過後合併，刪除本次遠端與本機分支，回到 main；不繞過保護。
+
+```sh
+python3 tools/check_project.py
+bash tools/test_localization.sh
+bash tools/test_training_quality.sh
+```
+
+## 文件索引
+
+- [掃描架構](docs/CAPTURE_ARCHITECTURE.zh-TW.md)
+- [手機端資料優化](docs/ON_DEVICE_TRAINING_QUALITY.zh-TW.md)
+- [LiDAR 多視角共識](docs/LIDAR_SURFACE_CONSENSUS.zh-TW.md)
+- [無 LiDAR 重建](docs/CAMERA_ONLY_ACCURACY.zh-TW.md)
+- [歷史匯出](docs/HISTORY_TRAINING_EXPORT.zh-TW.md)
+- [外部訓練](docs/TRAINING.zh-TW.md)
+- [拍攝吞吐量](docs/CAPTURE_THROUGHPUT.zh-TW.md)
+- [即時預覽與品質閘門](docs/LIDAR_QUALITY_AND_PREVIEW.zh-TW.md)
+- [大場景記憶體](docs/LARGE_SCAN_MEMORY.zh-TW.md)
+- [座標慣例](docs/COORDINATES.zh-TW.md)
+- [裝置操作](docs/DEVICE_NOTES.zh-TW.md)

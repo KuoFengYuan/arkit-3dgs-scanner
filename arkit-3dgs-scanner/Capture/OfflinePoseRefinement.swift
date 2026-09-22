@@ -25,16 +25,16 @@ nonisolated enum OfflinePoseRefinement {
         var seconds = 0.0
         var notice: String {
             switch status {
-            case "validated": return "已匹配 \(processedFrames) 張影像，\(changedFrames) 張位置通過驗證並修正。"
-            case "insufficientDepthFrames": return "深度影格不足，保留原本相機位置。"
+            case "validated": return L10n.text("已匹配 \(processedFrames) 張影像，\(changedFrames) 張位置通過驗證並修正。")
+            case "insufficientDepthFrames": return L10n.text("深度影格不足，保留原本相機位置。")
             case "noObservations", "insufficientTrackSupport":
-                return "跨影格匹配不足（\(supportedFrames) 張達到求解需求），保留原本位置。"
-            case "insufficientHoldoutTracks": return "驗證用匹配不足，保留原本位置。"
-            case "noImprovement": return "精修未降低殘差，保留原本位置。"
-            case "holdoutDidNotImprove": return "驗證殘差未改善至少 3%，保留原本位置。"
-            case "excessiveCorrection": return "修正幅度超出安全範圍，保留原本位置。"
-            case "memoryPressure", "observationBudgetExceeded": return "精修資源不足，保留原本位置。"
-            default: return "精修未通過或資料不足，保留原本位置。"
+                return L10n.text("跨影格匹配不足（\(supportedFrames) 張達到求解需求），保留原本位置。")
+            case "insufficientHoldoutTracks": return L10n.text("驗證用匹配不足，保留原本位置。")
+            case "noImprovement": return L10n.text("精修未降低殘差，保留原本位置。")
+            case "holdoutDidNotImprove": return L10n.text("驗證殘差未改善至少 3%，保留原本位置。")
+            case "excessiveCorrection": return L10n.text("修正幅度超出安全範圍，保留原本位置。")
+            case "memoryPressure", "observationBudgetExceeded": return L10n.text("精修資源不足，保留原本位置。")
+            default: return L10n.text("精修未通過或資料不足，保留原本位置。")
             }
         }
     }

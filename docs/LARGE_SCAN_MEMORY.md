@@ -1,50 +1,50 @@
-# 大場景／千張影格的融合記憶體控制
+# Fusion memory control for large scans
 
-## 回報與確認的配置重疊
+**English** | [繁體中文](LARGE_SCAN_MEMORY.zh-TW.md)
 
-使用者提供的兩次成功紀錄分別為 403 幀／519,789 格／74.41 秒及 257 幀／425,007 格／47.44 秒，並回報更大場景容易在融合中閃退。尚未取得失敗那次的 crash 或 jetsam 紀錄，因此無法認定唯一原因。
+## Reported failures and overlapping allocations
 
-程式確認有兩個可避免的重疊：即時預覽 CPU 格在離線融合時仍完整保留；平面圖將融合輸出目標提升至 200 萬，產出後又另建擇優下採樣字典。舊 log 只印一般 `exportMaxPoints`，所以會出現「519,371 點，上限 250,000」；不是融合表寫越界，而是覆寫的目標沒有顯示。
+Two successful device logs recorded 403 frames / 519,789 cells / 74.41 seconds and 257 frames / 425,007 cells / 47.44 seconds; larger scans reportedly crashed during fusion. Without the failed run's crash or jetsam report, no single cause can be established.
 
-## 現在的工作集
+Two avoidable overlaps were found: live CPU preview cells remained fully allocated during offline fusion, and floor-plan generation raised the output target to two million points before another downsampling dictionary was built. Earlier logs printed only the ordinary 250,000-point setting, explaining output above that displayed limit.
 
-| 資料 | 控制方式 |
+## Current working set
+
+| Data | Bound or handling |
 | --- | --- |
-| 原始 RGB、深度、信心圖 | 持續寫入磁碟，融合一次解碼一張；沒有新增照片總張數限制 |
-| 停止後保留的即時格 | 完成 GPU 幾何釋放及預覽存檔後，將 CPU 格按比例縮至最多 100,000 格 |
-| 磚錨點與剩餘格 | 保留局部位置、顏色、權重與方向位元，續掃可重新補充細節 |
-| 離線融合格 | 沿用 96 MiB 估計預算及可用記憶體降額；128 B／格是預估，不是實測 RSS |
-| 插入暫存 | 手機直接序列插入，不建立分片候選副本；每 1,024 點檢查容量，因此格數可短暫超出上限一小批 |
-| 相鄰深度快取 | 同時限制 8 個項目及 2 MiB 深度／信心陣列資料；LRU 淘汰，低於 256 MiB 可用空間時清空 |
-| 最終點雲與平面圖來源 | 手機要求的輸出目標被 `exportMaxPoints` 夾住，預設 250,000；不再建立額外的大型下採樣字典 |
-| 特徵與姿態 metadata | 既有特徵上限維持：4 幀描述子及 200,000 筆歷史觀測；影格姿態／檔名 metadata 仍隨張數增加 |
+| RGB, depth, confidence | Written to disk continuously; decoded one frame at a time, without a new photo-count limit |
+| Retained live cells | Reduced proportionally to at most 100,000 after GPU release and preview persistence |
+| Anchors and remaining cells | Preserve local positions, colors, weights, and direction bits for resumed scanning |
+| Offline grid | Estimated 96 MiB budget plus available-memory reductions; 128 bytes/cell is an estimate, not RSS |
+| Insertion scratch | Serial mobile insertion without shard candidate copies; capacity checked every 1,024 points, allowing a small temporary overshoot |
+| Reference-depth cache | LRU capped at eight entries and 2 MiB of depth/confidence arrays; cleared below 256 MiB available memory |
+| Final cloud / floor-plan input | Mobile target clamped to `exportMaxPoints`, currently 250,000; no extra large downsampling dictionary |
+| Features / pose metadata | Live tracker keeps four descriptor frames and at most 200,000 historical observations; pose/filename metadata still grows with frame count |
 
-即時格縮減逐磚取出與替換，避免在遍歷整份字典快照時把所有舊格保留到最後。它不改 voxel 尺寸，也不重設磚座標，但立即續掃時先顯示較稀疏的舊區域。完整照片與深度仍供最終重融合使用。
+Live cells are removed and replaced tile by tile to avoid retaining a snapshot of the entire old dictionary. Voxel size and tile coordinates remain unchanged, but resumed preview initially has less detail. Full-resolution saved media remain available for final fusion.
 
-快取限制不包含目前處理中的深度、鄰幀引用、JPEG 解碼及容器本身的成本。異常大的單張深度若超過快取預算，仍可供當次驗證使用，但不放入快取。其目的是避免重複配置與磁碟讀取，不保證某個固定加速比例。
+The cache budget excludes the current frame, active reference views, JPEG decoding, and container overhead. An unusually large depth image may be used once without caching. Cache limits reduce repeated allocation/I/O; they do not guarantee a speedup or total process memory limit.
 
-手機插入路徑保留原有加權順序與 LiDAR 優先規則。未觸發容量縮減時，測試比對其輸出與既有平行分片路徑逐位元相同；容量吃緊時的粗化時機不同，結果可能有差異。桌機可繼續使用原有較高密度 target 與平行路徑。
+Serial insertion preserves weighted ordering and LiDAR priority. Without capacity reductions, regression output matches the desktop parallel-shard path bit for bit. Under pressure, different coarsening timing can change results. Desktop tools retain their higher-density/parallel options.
 
-## 取消、退回及品質折衷
+## Cancellation and fallbacks
 
-離開頁面或重設掃描會設定獨立取消旗標。融合在每幀開始、候選產出後及匯出前檢查，回報 `cancelled`，不把半成品交給驗收；舊進度、位姿及平面圖回呼也檢查掃描 generation。取消不是立即中斷 ImageIO 或 ARKit 系統呼叫。
+Leaving or resetting sets a separate cancellation flag. Fusion checks it before each frame, after candidate generation, and before export, returning `cancelled` rather than a partial result. Generation checks reject stale progress, pose, and floor-plan callbacks. Cancellation does not instantly interrupt ImageIO or ARKit calls.
 
-現有低於 96 MiB 可用記憶體時的 `memoryPressure` 回退保留，會使用有限的即時預覽，而不是把半成品當作完整融合。原始檔案仍保留。照片數增加主要增加串流處理時間，不會讓融合保留全部照片像素；掃描範圍增大仍可能觸發格網粗化。
+Below 96 MiB available memory, fusion returns `memoryPressure` and review uses a bounded live preview. Raw media remain intact. More photos primarily increase streaming time, but a larger spatial extent can still force grid coarsening. The limited final cloud may omit thin/short walls or need coarser floor-plan cells. These safeguards do not relax depth-consistency thresholds.
 
-平面圖現在共用有限的最終點雲，超大空間可能少掉細牆、短牆或需要較粗的製圖格距。這是為穩定性做的明確取捨；原始資料可交給桌機重建較高密度結果。這輪未改模糊判定或放寬深度一致性門檻。
+## Diagnostics
 
-## 診斷
+Refusion report v2 added:
 
-`refusion-progress.json` 第 2 版新增：
+- `effectiveOutputLimit`: actual output cap for this run.
+- `depthCacheHits`, `depthCacheLoads`, `depthCachePeakBytes`, `depthCachePeakEntries`.
+- `depthReadSeconds`, `unprojectSeconds`, `consistencySeconds`; the latter includes reference reads. Mesh timing remains in logs.
+- `cancelled`, alongside `memoryPressure` and `completed` statuses.
 
-- `effectiveOutputLimit`：本次真正使用的輸出上限。
-- `depthCacheHits`、`depthCacheLoads`、`depthCachePeakBytes`、`depthCachePeakEntries`：快取使用及陣列儲存峰值。
-- `depthReadSeconds`、`unprojectSeconds`、`consistencySeconds`：本幀深度讀取、反投影與含鄰幀讀取的一致性驗證時間；mesh 計時仍在 log 中。
-- `status` 可為 `cancelled`，原有 `memoryPressure`、`completed` 保留。
+Times are wall-clock durations. The first total-time segment includes stop/drain work, map and preview saving, and keyframe reads. Refusion includes any floor-plan work inside that stage. Final history persistence happens after the total is printed and is not included.
 
-時間是牆鐘耗時，不再稱作 CPU 時間。總時間中的首段改稱「停止收尾與讀取關鍵幀」，包含之前已執行的世界地圖、預覽及待完成工作；重融合段包含其中執行的平面圖。最後歷史存檔仍在總時間列印之後，未計入。
-
-## 驗證
+## Validation
 
 ```sh
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
@@ -53,8 +53,8 @@ swiftc -O -module-cache-path /tmp/fable-swift-cache \
 /usr/bin/time -l /tmp/fable-large-scan-test
 ```
 
-測試包含 1,000 幀真實磁碟讀取／JPEG 解碼／256×192 深度融合，檢查快取與格數上限、手機 target 夾制、已知平面位置及取消後原始檔案保留。影格共用合成平面圖片與深度檔，套用不同相機位置，不代表 1,000 張複雜室內照片或 iPhone 上的 ARKit／RoomPlan 記憶體負載。
+The fixture streams 1,000 JPEG/depth frames with 256×192 depth, checks cache/grid limits, mobile output clamping, plane location, cancellation, and media preservation. It reuses synthetic image/depth files with varying camera positions; it does not simulate 1,000 complex indoor photos or ARKit/RoomPlan memory.
 
-另以小批插入建立 520,000 格、跨 20 m 的合成表面，檢查輸出不超過 250,000 點且維持空間範圍。預覽縮減測試檢查實際格數減少、修正後座標不變、錨點保留與續掃可補點。整體記憶體峰值仍須在目標 iPhone 的大場景掃描量測；通過這些界限測試不代表能保證所有情境不閃退。
+A separate 520,000-cell surface spanning 20 m tests the 250,000-point output cap and spatial extent. Preview reduction checks cell counts, corrected coordinates, anchors, and resumed insertion. Historical validation passed 24 large-scan, 39 depth-consistency, and 26 stop-capacity checks plus device/Simulator builds.
 
-本輪 24 項大場景／千幀檢查、39 項 LiDAR 一致性回歸與 26 項停止容量檢查均通過（共 89 項），iPhone／Simulator 未簽章 Debug 建置成功。大場景測試指令在本機 macOS 的最大 RSS 為 107,839,488 bytes（約 103 MiB），此數字包含 52 萬格 fixture，但不含 ARKit、RoomPlan、SceneKit 或真機 GPU；千幀部分刻意設定小格數預算以測試粗化，不能當作 iPhone App 的記憶體上限。既有桌機平行插入的 Sendable 編譯警告仍存在，手機使用本輪新增的序列插入路徑。
+Historical Mac maximum RSS was 107,839,488 bytes (about 103 MiB), including the 520,000-cell fixture but excluding ARKit, RoomPlan, SceneKit, and device GPU allocations. The 1,000-frame case deliberately uses a small grid budget to exercise coarsening. This is not an iPhone memory ceiling or a guarantee against crashes. The desktop parallel path still has a pre-existing Sendable warning; mobile uses serial insertion.

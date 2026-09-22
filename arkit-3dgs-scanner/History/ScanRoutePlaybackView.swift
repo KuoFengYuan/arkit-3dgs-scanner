@@ -56,10 +56,10 @@ struct ScanRoutePlaybackView: View {
         .fullScreenCover(isPresented: $expanded) {
             NavigationStack {
                 ScanRoutePlaybackView(preview: preview, currentIndex: $currentIndex, playbackFPS: $playbackFPS, allowsFullscreen: false)
-                    .navigationTitle("拍攝路線回放")
+                    .navigationTitle(L10n.text("拍攝路線回放"))
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) { Button("完成") { expanded = false } }
+                        ToolbarItem(placement: .topBarTrailing) { Button(L10n.text("完成")) { expanded = false } }
                     }
             }
         }
@@ -73,7 +73,7 @@ struct ScanRoutePlaybackView: View {
             displayedFrame = succeeded ? frames.first(where: { $0.image == url }) : nil
         }
             .background(.black)
-            .overlay(alignment: .topLeading) { badge("拍攝影像", icon: "photo") }
+            .overlay(alignment: .topLeading) { badge(L10n.text("拍攝影像"), icon: "photo") }
             .overlay(alignment: .bottomLeading) {
                 if let time = relativeTime {
                     Text(time).font(.caption.monospacedDigit()).padding(8)
@@ -88,18 +88,18 @@ struct ScanRoutePlaybackView: View {
             if preview.points.isEmpty && preview.trajectory.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "point.3.connected.trianglepath.dotted").font(.title)
-                    Text("沒有點雲或路線資料").font(.subheadline)
-                    Text("仍可播放拍攝影像").font(.caption)
+                    Text(L10n.text("沒有點雲或路線資料")).font(.subheadline)
+                    Text(L10n.text("仍可播放拍攝影像")).font(.caption)
                 }.foregroundStyle(.white.opacity(0.7))
             } else {
                 ReviewPointCloudView(points: preview.points, trajectory: preview.trajectory,
                                      highlightedPose: displayedFrame?.pose, resetCameraToken: resetCameraToken,
                                      followsHighlightedPose: following, isPlaying: playing,
                                      followTransitionDuration: ScanPlaybackTiming.transitionDuration(fps: playbackFPS))
-                    .accessibilityLabel("拍攝路線點雲；橘色標記為目前影像的相機位置與方向")
+                    .accessibilityLabel(L10n.text("拍攝路線點雲；橘色標記為目前影像的相機位置與方向"))
             }
         }
-        .overlay(alignment: .topLeading) { badge(preview.points.isEmpty ? "拍攝路線" : "點雲與路線", icon: "view.3d") }
+        .overlay(alignment: .topLeading) { badge(preview.points.isEmpty ? L10n.text("拍攝路線") : L10n.text("點雲與路線"), icon: "view.3d") }
         .overlay(alignment: .topTrailing) {
             HStack(spacing: 8) {
                 Button { following.toggle() } label: {
@@ -107,22 +107,22 @@ struct ScanRoutePlaybackView: View {
                         .foregroundStyle(following ? Color.orange : .white)
                         .frame(width: 44, height: 44)
                 }
-                .accessibilityLabel(following ? "停止跟隨拍攝位置" : "跟隨拍攝位置")
-                .accessibilityValue(following ? "已開啟" : "已關閉")
+                .accessibilityLabel(following ? L10n.text("停止跟隨拍攝位置") : L10n.text("跟隨拍攝位置"))
+                .accessibilityValue(following ? L10n.text("已開啟") : L10n.text("已關閉"))
                 Button { playing = false; following = false; resetCameraToken += 1 } label: {
                     Image(systemName: "scope").frame(width: 44, height: 44)
-                }.accessibilityLabel("查看完整路線")
+                }.accessibilityLabel(L10n.text("查看完整路線"))
                 if allowsFullscreen {
                     Button { playing = false; expanded = true } label: {
                         Image(systemName: "arrow.up.left.and.arrow.down.right").frame(width: 44, height: 44)
-                    }.accessibilityLabel("全螢幕預覽")
+                    }.accessibilityLabel(L10n.text("全螢幕預覽"))
                 }
             }
             .buttonStyle(.plain).foregroundStyle(.white)
             .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 12)).padding(8)
         }
         .overlay(alignment: .bottomLeading) {
-            Text(displayedFrame?.pose == nil ? "此影像沒有對應位置" : (following ? "自動跟隨拍攝位置與方向" : "橘色：目前視角 · 綠色：拍攝路線"))
+            Text(displayedFrame?.pose == nil ? L10n.text("此影像沒有對應位置") : (following ? L10n.text("自動跟隨拍攝位置與方向") : L10n.text("橘色：目前視角 · 綠色：拍攝路線")))
                 .font(.caption2).foregroundStyle(.white)
                 .padding(8).background(.black.opacity(0.65), in: Capsule()).padding(8)
                 .allowsHitTesting(false)
@@ -141,12 +141,12 @@ struct ScanRoutePlaybackView: View {
                    in: 0...Double(max(1, frames.count - 1)), step: 1,
                    onEditingChanged: { _ in playing = false })
                 .disabled(frames.count < 2)
-                .accessibilityLabel("拍攝影像進度")
-                .accessibilityValue("第 \(frames.isEmpty ? 0 : index + 1) 張，共 \(frames.count) 張")
+                .accessibilityLabel(L10n.text("拍攝影像進度"))
+                .accessibilityValue(L10n.text("第 \(frames.isEmpty ? 0 : index + 1) 張，共 \(frames.count) 張"))
             HStack(spacing: 12) {
                 Button { playing = false; following = true; currentIndex = max(0, index - 1) } label: {
                     Image(systemName: "backward.end.fill").frame(width: 44, height: 44)
-                }.disabled(index == 0).accessibilityLabel("上一張")
+                }.disabled(index == 0).accessibilityLabel(L10n.text("上一張"))
                 Button {
                     if !playing { following = true }
                     if index == frames.count - 1 { currentIndex = 0 }
@@ -157,15 +157,15 @@ struct ScanRoutePlaybackView: View {
                         .foregroundStyle(.white).background(Color.accentColor, in: Circle())
                 }
                 .disabled(frames.count < 2)
-                .accessibilityLabel(playing ? "暫停回放" : (index == frames.count - 1 ? "重新播放" : "播放拍攝路線"))
+                .accessibilityLabel(playing ? L10n.text("暫停回放") : (index == frames.count - 1 ? L10n.text("重新播放") : L10n.text("播放拍攝路線")))
                 Button { playing = false; following = true; currentIndex = min(frames.count - 1, index + 1) } label: {
                     Image(systemName: "forward.end.fill").frame(width: 44, height: 44)
-                }.disabled(index + 1 >= frames.count).accessibilityLabel("下一張")
+                }.disabled(index + 1 >= frames.count).accessibilityLabel(L10n.text("下一張"))
                 Spacer(minLength: 0)
                 VStack(alignment: .trailing, spacing: 3) {
                     Text("\(frames.isEmpty ? 0 : index + 1) / \(frames.count)").font(.subheadline.monospacedDigit())
                     Menu {
-                        Picker("每秒影格數", selection: $playbackFPS) {
+                        Picker(L10n.text("每秒影格數"), selection: $playbackFPS) {
                             ForEach(ScanPlaybackTiming.supportedFPS, id: \.self) { fps in
                                 Text("\(fps.formatted()) fps").tag(fps)
                             }
@@ -174,8 +174,8 @@ struct ScanRoutePlaybackView: View {
                         Label("\(playbackFPS.formatted()) fps", systemImage: "speedometer")
                             .font(.caption).frame(minHeight: 32)
                     }
-                    .accessibilityLabel("回放速度")
-                    .accessibilityValue("每秒 \(playbackFPS.formatted()) 張")
+                    .accessibilityLabel(L10n.text("回放速度"))
+                    .accessibilityValue(L10n.text("每秒 \(playbackFPS.formatted()) 張"))
                 }
             }.buttonStyle(.plain)
         }.padding(.vertical, 8)
@@ -185,6 +185,6 @@ struct ScanRoutePlaybackView: View {
         guard let start = frames.compactMap(\.timestamp).first, let timestamp = displayedFrame?.timestamp,
               timestamp >= start, timestamp - start < 86_400 else { return nil }
         let seconds = Int(timestamp - start)
-        return String(format: "拍攝時間 +%02d:%02d", seconds / 60, seconds % 60)
+        return String(format: L10n.text("拍攝時間 +%02d:%02d"), seconds / 60, seconds % 60)
     }
 }

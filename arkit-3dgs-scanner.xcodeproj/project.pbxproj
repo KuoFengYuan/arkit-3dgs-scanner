@@ -7,13 +7,13 @@
 	objects = {
 
 /* Begin PBXFileReference section */
-		2EF362443008B6C7000B089C /* arkit-3dgs-scanner.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = arkit-3dgs-scanner.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		2EF362443008B6C7000B089C /* arkit-3dgs-scanner.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "arkit-3dgs-scanner.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		2EF362463008B6C7000B089C /* arkit-3dgs-scanner */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = arkit-3dgs-scanner;
+			path = "arkit-3dgs-scanner";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -63,10 +63,10 @@
 			fileSystemSynchronizedGroups = (
 				2EF362463008B6C7000B089C /* arkit-3dgs-scanner */,
 			);
-			name = arkit-3dgs-scanner;
+			name = "arkit-3dgs-scanner";
 			packageProductDependencies = (
 			);
-			productName = arkit-3dgs-scanner;
+			productName = "arkit-3dgs-scanner";
 			productReference = 2EF362443008B6C7000B089C /* arkit-3dgs-scanner.app */;
 			productType = "com.apple.product-type.application";
 		};
@@ -86,11 +86,12 @@
 				};
 			};
 			buildConfigurationList = 2EF3623F3008B6C7000B089C /* Build configuration list for PBXProject "arkit-3dgs-scanner" */;
-			developmentRegion = en;
+			developmentRegion = "zh-Hant";
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				en,
 				Base,
+				"zh-Hant",
 			);
 			mainGroup = 2EF3623B3008B6C7000B089C;
 			minimizedProjectReferenceProxies = 1;
@@ -251,12 +252,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = arkit-3dgs-scanner/ARKit3DGSScanner.entitlements;
+				CODE_SIGN_ENTITLEMENTS = "arkit-3dgs-scanner/ARKit3DGSScanner.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = MFA9Y67P5P;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "ARKit 3DGS Scanner";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "需要相機與 AR 追蹤權限，以採集 3DGS 訓練所需的影像與相機姿態";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -271,9 +273,8 @@
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = itri.fable;
-				PRODUCT_NAME = "$(TARGET_NAME)";
 				PRODUCT_MODULE_NAME = ARKit3DGSScanner;
-				INFOPLIST_KEY_CFBundleDisplayName = "ARKit 3DGS Scanner";
+				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -289,12 +290,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = arkit-3dgs-scanner/ARKit3DGSScanner.entitlements;
+				CODE_SIGN_ENTITLEMENTS = "arkit-3dgs-scanner/ARKit3DGSScanner.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = MFA9Y67P5P;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "ARKit 3DGS Scanner";
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "需要相機與 AR 追蹤權限，以採集 3DGS 訓練所需的影像與相機姿態";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -309,9 +311,8 @@
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = itri.fable;
-				PRODUCT_NAME = "$(TARGET_NAME)";
 				PRODUCT_MODULE_NAME = ARKit3DGSScanner;
-				INFOPLIST_KEY_CFBundleDisplayName = "ARKit 3DGS Scanner";
+				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;

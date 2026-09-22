@@ -36,11 +36,11 @@ struct HUDOverlay: View {
             }
             .padding()
         }
-        .confirmationDialog("離開掃描檢視？", isPresented: $showExitConfirm, titleVisibility: .visible) {
-            Button("離開並保留檔案") { dismiss() }
-            Button("留在這裡", role: .cancel) {}
+        .confirmationDialog(L10n.text("離開掃描檢視？"), isPresented: $showExitConfirm, titleVisibility: .visible) {
+            Button(L10n.text("離開並保留檔案")) { dismiss() }
+            Button(L10n.text("留在這裡"), role: .cancel) {}
         } message: {
-            Text("掃描會保留在首頁的「掃描紀錄」，之後可預覽、分享或刪除。離開後無法接續這次即時掃描。")
+            Text(L10n.text("掃描會保留在首頁的「掃描紀錄」，之後可預覽、分享或刪除。離開後無法接續這次即時掃描。"))
         }
         .onChange(of: controller.phase) { _, _ in
             showAdvanced = false
@@ -65,12 +65,12 @@ struct HUDOverlay: View {
 
     private var phaseTitle: String {
         switch controller.phase {
-        case .idle: return controller.trackingReady ? "準備就緒" : "準備相機"
-        case .scanning: return controller.trackingReady ? "正在掃描" : "等待追蹤恢復"
-        case .processing: return "正在整理掃描"
-        case .review: return "檢查掃描成果"
-        case .exporting: return "正在匯出"
-        case .done: return "檔案已準備好"
+        case .idle: return controller.trackingReady ? L10n.text("準備就緒") : L10n.text("準備相機")
+        case .scanning: return controller.trackingReady ? L10n.text("正在掃描") : L10n.text("等待追蹤恢復")
+        case .processing: return L10n.text("正在整理掃描")
+        case .review: return L10n.text("檢查掃描成果")
+        case .exporting: return L10n.text("正在匯出")
+        case .done: return L10n.text("檔案已準備好")
         }
     }
 
@@ -88,15 +88,15 @@ struct HUDOverlay: View {
     private var sessionRecoveryControls: some View {
         switch controller.sessionState {
         case .permissionDenied:
-            Button("開啟相機設定") {
+            Button(L10n.text("開啟相機設定")) {
                 if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
             }
             .buttonStyle(.borderedProminent)
         case .failed:
-            Button("重新啟動相機") { controller.prepareCamera() }
+            Button(L10n.text("重新啟動相機")) { controller.prepareCamera() }
                 .buttonStyle(.borderedProminent)
         case .relocalizing where controller.continueFromLastMap:
-            Button("改為全新掃描") { controller.setContinueFromLastMap(false) }
+            Button(L10n.text("改為全新掃描")) { controller.setContinueFromLastMap(false) }
                 .buttonStyle(.borderedProminent)
         default: EmptyView()
         }
@@ -141,7 +141,7 @@ struct HUDOverlay: View {
                             symbol: "pause.circle.fill", tint: .orange)
         }
         if controller.relocalizing {
-            return Guidance(text: "重新定位中：請把鏡頭對準上次掃描過的區域",
+            return Guidance(text: L10n.text("重新定位中：請把鏡頭對準上次掃描過的區域"),
                             symbol: "point.3.connected.trianglepath.dotted",
                             tint: .blue)
         }
@@ -153,7 +153,7 @@ struct HUDOverlay: View {
         }
         // 正在掉幀：這是實測結果不是推估，優先於所有「可能會怎樣」的提示
         if controller.recentRejectCount >= 4 {
-            return Guidance(text: "畫面不夠清晰，已略過 \(controller.recentRejectCount) 個候選影格・請稍停讓對焦穩定",
+            return Guidance(text: L10n.text("畫面不夠清晰，已略過 \(controller.recentRejectCount) 個候選影格・請稍停讓對焦穩定"),
                             symbol: "camera.metering.none",
                             tint: .red)
         }
@@ -200,7 +200,7 @@ struct HUDOverlay: View {
         if controller.phase == .scanning, controller.showPointCloud,
            controller.colorMode == .fusionQuality {
             HStack(spacing: 8) {
-                Text("視角").font(.caption2)
+                Text(L10n.text("視角")).font(.caption2)
                 HStack(spacing: 3) {
                     ForEach(0..<7) { i in
                         let q = Double(i) / 6
@@ -211,7 +211,7 @@ struct HUDOverlay: View {
                             .frame(width: 14, height: 8)
                     }
                 }
-                Text("單一角度 → 多角度").font(.caption2)
+                Text(L10n.text("單一角度 → 多角度")).font(.caption2)
             }
             .hudText()
             .padding(.horizontal, 12).padding(.vertical, 6)
@@ -237,7 +237,7 @@ struct HUDOverlay: View {
                 .disabled(!controller.canClose)
                 .opacity(controller.canClose ? 1 : 0)
                 .accessibilityHidden(!controller.canClose)
-                .accessibilityLabel("離開掃描")
+                .accessibilityLabel(L10n.text("離開掃描"))
 
                 if controller.phase == .scanning {
                     // RoomPlan 即時結構：掃到的牆／門／窗以發光邊框疊在實景上。
@@ -267,7 +267,7 @@ struct HUDOverlay: View {
                             .hudGlass(Circle())
                     }
                     .foregroundStyle(controller.showPointCloud ? .cyan : .white)
-                    .accessibilityLabel(controller.showPointCloud ? "隱藏點雲" : "顯示點雲")
+                    .accessibilityLabel(controller.showPointCloud ? L10n.text("隱藏點雲") : L10n.text("顯示點雲"))
 
                     // 融合品質熱圖：直接把「這塊還沒掃夠」畫在表面上，
                     // 比任何數字或文字提示都直觀 —— 使用者看到紅色就知道要再繞一次。
@@ -282,7 +282,7 @@ struct HUDOverlay: View {
                                 .hudGlass(Circle())
                         }
                         .foregroundStyle(controller.colorMode == .fusionQuality ? .orange : .white)
-                        .accessibilityLabel(controller.colorMode == .fusionQuality ? "切換真實顏色" : "顯示掃描品質熱圖")
+                        .accessibilityLabel(controller.colorMode == .fusionQuality ? L10n.text("切換真實顏色") : L10n.text("顯示掃描品質熱圖"))
                     }
                 }
             }
@@ -291,21 +291,21 @@ struct HUDOverlay: View {
 
             if controller.phase != .idle {   // 掃描與驗收階段顯示統計
             VStack(alignment: .trailing, spacing: 3) {
-                Label("\(controller.keyframeCount) 幀", systemImage: "camera.viewfinder")
-                Label("\(controller.pointCount / 1000)k 點", systemImage: "circle.grid.3x3.fill")
+                Label(L10n.text("\(controller.keyframeCount) 幀"), systemImage: "camera.viewfinder")
+                Label(L10n.text("\(controller.pointCount / 1000)k 點"), systemImage: "circle.grid.3x3.fill")
                 // 融合完成度：場景模式沒有涵蓋率圓頂，這是唯一的「掃夠了沒」訊號。
                 // 顏色即結論——紅/橘代表大部分表面觀測不足，別急著停。
                 if controller.phase == .scanning && controller.hasLiDAR {
                     let f = controller.fusionCompleteness
-                    Label(String(format: "視角 %.0f%%", f * 100),
+                    Label(String(format: L10n.text("視角 %.0f%%"), f * 100),
                           systemImage: "arrow.triangle.turn.up.right.diamond.fill")
                         .foregroundStyle(f < 0.3 ? .red : (f < 0.6 ? .orange : .green))
                 }
                 Label(storageEstimate, systemImage: "internaldrive")
                 if !controller.hasLiDAR {
-                    Label("側向移動以驗證特徵點", systemImage: "arrow.left.and.right")
+                    Label(L10n.text("側向移動以驗證特徵點"), systemImage: "arrow.left.and.right")
                         .foregroundStyle(.cyan)
-                    Label(controller.supportsLiDAR ? "LiDAR 已關閉" : "無 LiDAR", systemImage: "exclamationmark.triangle")
+                    Label(controller.supportsLiDAR ? L10n.text("LiDAR 已關閉") : L10n.text("無 LiDAR"), systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.yellow)
                 }
             }
@@ -321,10 +321,10 @@ struct HUDOverlay: View {
 
     private static func ago(_ d: Date) -> String {
         let s = Int(Date().timeIntervalSince(d))
-        if s < 90 { return "剛剛" }
-        if s < 3600 { return "\(s / 60) 分鐘前" }
-        if s < 86400 { return "\(s / 3600) 小時前" }
-        return "\(s / 86400) 天前"
+        if s < 90 { return L10n.text("剛剛") }
+        if s < 3600 { return L10n.text("\(s / 60) 分鐘前") }
+        if s < 86400 { return L10n.text("\(s / 3600) 小時前") }
+        return L10n.text("\(s / 86400) 天前")
     }
 
     private var storageEstimate: String {
@@ -378,19 +378,19 @@ struct HUDOverlay: View {
         switch controller.phase {
         case .idle:
             return controller.refineCameraPoses && controller.hasLiDAR
-                ? "精細掃描已開啟・沿著空間緩慢移動"
-                : "沿著空間緩慢移動，影像會自動儲存"
+                ? L10n.text("精細掃描已開啟・沿著空間緩慢移動")
+                : L10n.text("沿著空間緩慢移動，影像會自動儲存")
         case .scanning:
             if !controller.trackingReady { return controller.sessionState.message }
             if let reason = controller.assessment.blockReason { return reason.message }
-            return "沿著空間緩慢移動・新視角會自動存成照片"
+            return L10n.text("沿著空間緩慢移動・新視角會自動存成照片")
         case .processing:
-            return "點雲優化中：姿態修正 + 多視角加權融合…"
+            return L10n.text("點雲優化中：姿態修正 + 多視角加權融合…")
         case .review:
-            if !controller.canUseScan { return "尚未取得可用影像，請繼續掃描並緩慢移動" }
-            return "單指旋轉・雙指縮放，檢查是否有遺漏的區域"
+            if !controller.canUseScan { return L10n.text("尚未取得可用影像，請繼續掃描並緩慢移動") }
+            return L10n.text("單指旋轉・雙指縮放，檢查是否有遺漏的區域")
         case .exporting:
-            return "打包 COLMAP 資料集…"
+            return L10n.text("打包 COLMAP 資料集…")
         case .done:
             return nil
         }
@@ -403,8 +403,8 @@ struct HUDOverlay: View {
                 if controller.supportsLiDAR {
                     Toggle(isOn: Binding(get: { controller.useLiDAR }, set: { controller.setLiDAREnabled($0) })) {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text("LiDAR 深度掃描").font(.subheadline.weight(.medium))
-                            Text(controller.hasLiDAR ? "深度量測與彩色點雲" : "僅相機追蹤，保留影像與稀疏點雲")
+                            Text(L10n.text("LiDAR 深度掃描")).font(.subheadline.weight(.medium))
+                            Text(controller.hasLiDAR ? L10n.text("深度量測與彩色點雲") : L10n.text("僅相機追蹤，保留影像與稀疏點雲"))
                                 .font(.caption2)
                         }
                     }
@@ -416,7 +416,7 @@ struct HUDOverlay: View {
                     Button {
                         withAnimation { showAdvanced.toggle() }
                     } label: {
-                        Label(showAdvanced ? "收合掃描設定" : "掃描設定",
+                        Label(showAdvanced ? L10n.text("收合掃描設定") : L10n.text("掃描設定"),
                               systemImage: "slider.horizontal.3")
                             .font(.subheadline)
                             .padding(.horizontal, 16).padding(.vertical, 12)
@@ -432,7 +432,7 @@ struct HUDOverlay: View {
                     Toggle(isOn: Binding(
                         get: { controller.continueFromLastMap },
                         set: { controller.setContinueFromLastMap($0) })) {
-                        Label(String(format: "延續上次座標系（%.1f MB · %@）",
+                        Label(String(format: L10n.text("延續上次座標系（%.1f MB · %@）"),
                                      Double(info.bytes) / 1_048_576,
                                      Self.ago(info.modified)),
                               systemImage: "point.3.filled.connected.trianglepath.dotted")
@@ -448,8 +448,8 @@ struct HUDOverlay: View {
                 if controller.hasLiDAR {
                     Toggle(isOn: $controller.refineCameraPoses) {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text("精細掃描").font(.subheadline)
-                            Text("校正相機位置，完成後需較多處理時間").font(.caption2)
+                            Text(L10n.text("精細掃描")).font(.subheadline)
+                            Text(L10n.text("校正相機位置，完成後需較多處理時間")).font(.caption2)
                         }
                     }
                     .tint(.cyan).padding(14)
@@ -460,8 +460,8 @@ struct HUDOverlay: View {
                 if !controller.hasLiDAR {
                     Toggle(isOn: $controller.reconstructFromImages) {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text("影像深度重建").font(.subheadline)
-                            Text("停止後以重疊照片重建點雲，需較多處理時間").font(.caption2)
+                            Text(L10n.text("影像深度重建")).font(.subheadline)
+                            Text(L10n.text("停止後以重疊照片重建點雲，需較多處理時間")).font(.caption2)
                         }
                     }
                     .tint(.cyan).padding(14)
@@ -472,7 +472,7 @@ struct HUDOverlay: View {
                 // 相機參數鎖定開關（預設開啟）：按快門當下鎖定曝光/白平衡。
                 // 對焦刻意不在此列 —— 鎖對焦＝凍結景深，離開起始距離就糊。
                 Toggle(isOn: $controller.lockCameraParams) {
-                    Label("鎖定曝光 / 白平衡",
+                    Label(L10n.text("鎖定曝光 / 白平衡"),
                           systemImage: controller.lockCameraParams ? "lock.fill" : "lock.open")
                         .font(.caption.weight(.medium))
                 }
@@ -488,7 +488,7 @@ struct HUDOverlay: View {
             case .idle, .scanning:
                 VStack(spacing: 8) {
                     shutterButton
-                    Text(controller.phase == .scanning ? "結束掃描" : "開始掃描")
+                    Text(controller.phase == .scanning ? L10n.text("結束掃描") : L10n.text("開始掃描"))
                         .font(.subheadline.weight(.semibold))
                         .hudText()
                 }
@@ -542,7 +542,7 @@ struct HUDOverlay: View {
                         .hudGlass(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     } else {
                         // 收合態：只留「有 N 項要注意」＋最嚴重那項的顏色
-                        Label("\(rows.count) 項掃描提醒", systemImage: "exclamationmark.circle")
+                        Label(L10n.text("\(rows.count) 項掃描提醒"), systemImage: "exclamationmark.circle")
                             .font(.caption.weight(.medium))
                             .foregroundStyle(rows.first?.tint ?? .secondary)
                             .padding(.horizontal, 12).padding(.vertical, 6)
@@ -557,23 +557,23 @@ struct HUDOverlay: View {
         var rows: [(String, String, Color)] = []
         // 迴環：未閉合代表 ARKit 沒機會做全域修正，遠端誤差留在資料裡
         if s.traveledM >= 8 && !s.loopClosed {
-            rows.append((String(format: "走了 %.0fm 未回起點 —— 遠端可能有累積漂移", s.traveledM),
+            rows.append((String(format: L10n.text("走了 %.0fm 未回起點 —— 遠端可能有累積漂移"), s.traveledM),
                          "arrow.triangle.capsulepath", .orange))
         }
         // 漂移修正幅度：大代表這次追蹤本來就飄，全域幾何可信度低
         if s.driftMaxCm >= 10 {
-            rows.append((String(format: "姿態修正 中位數 %.0fcm / 最大 %.0fcm",
+            rows.append((String(format: L10n.text("姿態修正 中位數 %.0fcm / 最大 %.0fcm"),
                                 s.driftMedianCm, s.driftMaxCm),
                          "scope", s.driftMaxCm >= 30 ? .red : .orange))
         }
         if s.blurDropped + s.blurDemoted > 0 {
             rows.append((s.blurDropped > 0
-                         ? "排除 \(s.blurDropped) 幀（幾何不可信）、\(s.blurDemoted) 幀（顏色糊）"
-                         : "\(s.blurDemoted) 幀顏色糊，不進訓練但仍供點雲",
+                         ? L10n.text("排除 \(s.blurDropped) 幀（幾何不可信）、\(s.blurDemoted) 幀（RGB 品質篩選）")
+                         : L10n.text("\(s.blurDemoted) 幀未選為訓練影像，深度仍供融合"),
                          "camera.metering.none", .secondary))
         }
         if let mb = s.worldMapMB {
-            rows.append((String(format: "世界地圖已存 %.1f MB —— 下次可延續同一座標系", mb),
+            rows.append((String(format: L10n.text("世界地圖已存 %.1f MB —— 下次可延續同一座標系"), mb),
                          "point.3.filled.connected.trianglepath.dotted", .secondary))
         }
         // BA 的判定。**用保留集，不用 BA 自己的殘差** —— 後者下降是必然的（那是它在
@@ -583,14 +583,14 @@ struct HUDOverlay: View {
         if let d = s.baHoldoutDelta {
             let pct = String(format: "%+.0f%%", d * 100)
             if s.baApplied {
-                rows.append(("BA 已套用位姿（保留集 \(pct)）", "checkmark.circle", .secondary))
+                rows.append((L10n.text("BA 已套用位姿（保留集 \(pct)）"), "checkmark.circle", .secondary))
             } else if d < BundleAdjuster.kHoldoutGate {
                 // 閘門過了卻沒套用 ⇒ 硬總開關被關著。這是非預期狀態，要看得見
-                rows.append(("BA 保留集 \(pct) 通過，但總開關關著 ⇒ 位姿未修正",
+                rows.append((L10n.text("BA 保留集 \(pct) 通過，但總開關關著 ⇒ 位姿未修正"),
                              "exclamationmark.triangle", .orange))
             } else {
                 // 這是正常結果，不是問題：房間尺度下位姿誤差本來就低於觀測雜訊
-                rows.append(("BA 未套用（保留集 \(pct)，此距離下位姿誤差低於觀測雜訊）",
+                rows.append((L10n.text("BA 未套用（保留集 \(pct)，此距離下位姿誤差低於觀測雜訊）"),
                              "pause.circle", .secondary))
             }
         }
@@ -602,8 +602,8 @@ struct HUDOverlay: View {
             scanSummaryCard
             if let report = controller.imageReconstructionReport {
                 Text(report.outputPoints > 0
-                     ? "影像重建 \(report.outputPoints) 點 · \(report.contributingReferences) 個參考視角"
-                     : "影像重建：尚無可靠匹配")
+                     ? L10n.text("影像重建 \(report.outputPoints) 點 · \(report.contributingReferences) 個參考視角")
+                     : L10n.text("影像重建：尚無可靠匹配"))
                     .font(.caption).foregroundStyle(.white)
                     .padding(.horizontal, 14).padding(.vertical, 7)
                     .hudGlass(Capsule())
@@ -616,8 +616,8 @@ struct HUDOverlay: View {
                     }
                 } label: {
                     Label(controller.showFloorPlan
-                          ? "回到點雲"
-                          : String(format: "平面圖（%d 牆 · %.1f×%.1fm）",
+                          ? L10n.text("回到點雲")
+                          : String(format: L10n.text("平面圖（%d 牆 · %.1f×%.1fm）"),
                                    fp.walls.count, fp.sizeM.x, fp.sizeM.y),
                           systemImage: controller.showFloorPlan ? "cube" : "map")
                         .font(.caption.weight(.medium))
@@ -629,7 +629,7 @@ struct HUDOverlay: View {
             Button {
                 controller.exportAndShare()
             } label: {
-                Label("匯出 3DGS 訓練資料", systemImage: "square.and.arrow.up")
+                Label(L10n.text("匯出 3DGS 訓練資料"), systemImage: "square.and.arrow.up")
                     .font(.headline)
                     .padding(.horizontal, 22)
                     .padding(.vertical, 13)
@@ -642,7 +642,7 @@ struct HUDOverlay: View {
                 Button {
                     controller.resumeScan()
                 } label: {
-                    Label("續掃", systemImage: "plus.viewfinder")
+                    Label(L10n.text("續掃"), systemImage: "plus.viewfinder")
                         .font(.subheadline.weight(.medium))
                         .padding(.horizontal, 16).padding(.vertical, 10)
                         .hudGlass(Capsule())
@@ -659,12 +659,12 @@ struct HUDOverlay: View {
                         .hudGlass(Circle())
                         .foregroundStyle(.red)
                 }
-                .accessibilityLabel("捨棄本次掃描")
+                .accessibilityLabel(L10n.text("捨棄本次掃描"))
             }
         }
-        .confirmationDialog("捨棄這次掃描？", isPresented: $showDiscardConfirm, titleVisibility: .visible) {
-            Button("刪除掃描資料", role: .destructive) { controller.discardScan() }
-            Button("取消", role: .cancel) {}
+        .confirmationDialog(L10n.text("捨棄這次掃描？"), isPresented: $showDiscardConfirm, titleVisibility: .visible) {
+            Button(L10n.text("刪除掃描資料"), role: .destructive) { controller.discardScan() }
+            Button(L10n.text("取消"), role: .cancel) {}
         }
     }
 
@@ -694,8 +694,8 @@ struct HUDOverlay: View {
         // 重定位未完成時姿態不可信，此時開拍等於把錯的外參寫進資料 —— 直接擋住
         .disabled(shutterBlocked)
         .opacity(shutterBlocked ? 0.4 : 1)
-        .accessibilityLabel(controller.phase == .scanning ? "結束掃描並檢視成果" : "開始掃描")
-        .accessibilityHint(controller.phase == .scanning ? "儲存影像並產生點雲" : controller.sessionState.message)
+        .accessibilityLabel(controller.phase == .scanning ? L10n.text("結束掃描並檢視成果") : L10n.text("開始掃描"))
+        .accessibilityHint(controller.phase == .scanning ? L10n.text("儲存影像並產生點雲") : controller.sessionState.message)
     }
 
     private var shutterBlocked: Bool {
@@ -706,7 +706,7 @@ struct HUDOverlay: View {
         HStack(spacing: 12) {
             if let zip = controller.exportedZip {
                 ShareLink(item: zip) {
-                    Label("分享 .zip", systemImage: "square.and.arrow.up")
+                    Label(L10n.text("分享 .zip"), systemImage: "square.and.arrow.up")
                         .font(.headline)
                         .padding(.horizontal, 18)
                         .padding(.vertical, 12)
@@ -717,7 +717,7 @@ struct HUDOverlay: View {
             Button {
                 controller.resetForNewScan()
             } label: {
-                Label("新掃描", systemImage: "arrow.counterclockwise")
+                Label(L10n.text("新掃描"), systemImage: "arrow.counterclockwise")
                     .font(.headline)
                     .padding(.horizontal, 18)
                     .padding(.vertical, 12)

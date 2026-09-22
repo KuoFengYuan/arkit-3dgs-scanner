@@ -11,7 +11,7 @@
 //  空曠的地板中央因此會跟牆一樣被判成「牆」。修法是先切掉地板/天花板帶。
 //
 //  編譯：
-//    swiftc -O -o /tmp/pctest arkit-3dgs-scanner/Capture/FloorPlanData.swift \
+//    swiftc arkit-3dgs-scanner/Capture/Localization.swift -O -o /tmp/pctest arkit-3dgs-scanner/Capture/FloorPlanData.swift \
 //           arkit-3dgs-scanner/Capture/FloorPlanDrawing.swift \
 //           arkit-3dgs-scanner/Capture/PointCloudFloorPlan.swift arkit-3dgs-scanner/Capture/FloorPlanDXF.swift \
 //           tools/test_pointcloud_plan.swift && /tmp/pctest

@@ -61,9 +61,9 @@ actor ScanLibrary {
         case invalidDirectory, unsupportedPLY, damagedPLY
         var errorDescription: String? {
             switch self {
-            case .invalidDirectory: return "找不到掃描資料，請重新整理歷史紀錄"
-            case .unsupportedPLY: return "此點雲格式不支援預覽"
-            case .damagedPLY: return "點雲檔案不完整"
+            case .invalidDirectory: return L10n.text("找不到掃描資料，請重新整理歷史紀錄")
+            case .unsupportedPLY: return L10n.text("此點雲格式不支援預覽")
+            case .damagedPLY: return L10n.text("點雲檔案不完整")
             }
         }
     }
@@ -120,9 +120,9 @@ actor ScanLibrary {
             do {
                 let points = try Self.readPLY(url, limit: 120_000)
                 return ScanPreview(points: points, trajectory: trajectory, images: images,
-                                   note: points.isEmpty ? "這次掃描沒有可預覽的點雲，仍可查看拍攝影像。" : nil, playbackFrames: frames)
+                                   note: points.isEmpty ? L10n.text("這次掃描沒有可預覽的點雲，仍可查看拍攝影像。") : nil, playbackFrames: frames)
             } catch {
-                note = "既有點雲無法讀取，嘗試從原始深度重建預覽。"
+                note = L10n.text("既有點雲無法讀取，嘗試從原始深度重建預覽。")
             }
         }
         // 舊版未匯出的掃描通常只有影像、姿態與深度。限制融合預算，避免開歷史時耗盡記憶體。
@@ -136,11 +136,11 @@ actor ScanLibrary {
             let points = RefusionEngine.refuse(records: usable, sessionDir: directory, config: config,
                                                target: 120_000, progress: { _ in })
             return ScanPreview(points: points, trajectory: trajectory, images: images,
-                               note: points.isEmpty ? "原始深度不足以產生點雲，可切換查看影像。"
-                                   : "這是由舊版深度資料重建的預覽；原始檔案未變更。", playbackFrames: frames)
+                               note: points.isEmpty ? L10n.text("原始深度不足以產生點雲，可切換查看影像。")
+                                   : L10n.text("這是由舊版深度資料重建的預覽；原始檔案未變更。"), playbackFrames: frames)
         }
         return ScanPreview(points: [], trajectory: trajectory, images: images,
-                           note: note ?? "這次掃描沒有儲存點雲或深度資料，可切換查看影像。", playbackFrames: frames)
+                           note: note ?? L10n.text("這次掃描沒有儲存點雲或深度資料，可切換查看影像。"), playbackFrames: frames)
     }
 
     /// 以檔名配對，不以陣列位置配對；缺圖、缺姿態時仍保留正確的影像／位置關係。
@@ -205,7 +205,7 @@ actor ScanLibrary {
         let failedCount: Int
         let reason: String
         var errorDescription: String? {
-            "已刪除 \(deletedCount) 筆，另有 \(failedCount) 筆未能完整刪除。請重新整理後重試。\n\(reason)"
+            L10n.text("已刪除 \(deletedCount) 筆，另有 \(failedCount) 筆未能完整刪除。請重新整理後重試。\n\(reason)")
         }
     }
 

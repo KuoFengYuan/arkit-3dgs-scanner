@@ -9,9 +9,12 @@ import SwiftUI
 
 @main
 struct ARKit3DGSScannerApp: App {
+    @AppStorage(AppLanguage.preferenceKey) private var language = AppLanguage.traditionalChinese.rawValue
+
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environment(\.locale, AppLanguage.resolve(language).locale)
         }
     }
 }

@@ -68,7 +68,7 @@ nonisolated struct FloorPlanRoom: Codable, Sendable {
     /// 圖面與 UI 一律用這個，不要各自決定要顯示哪個名稱
     var displayName: String {
         if let c = customLabel, !c.trimmingCharacters(in: .whitespaces).isEmpty { return c }
-        return label.map(FloorPlanData.roomName) ?? "房間"
+        return label.map(FloorPlanData.roomName) ?? L10n.text("房間")
     }
 }
 
@@ -76,7 +76,7 @@ nonisolated struct FloorPlanData: Codable, Sendable {
     var generator = "fable-roomplan"
     var version = 1
     var coordinateSystem = "arkit_world_y_up_meters"
-    var planeMapping = "svg_x = world_x, svg_y = world_z（俯視、非鏡像）"
+    var planeMapping = "svg_x = world_x, svg_y = world_z (top view, not mirrored)"
     var roomCount = 1
     var walls: [FloorPlanSurface] = []
     var doors: [FloorPlanSurface] = []
@@ -145,25 +145,25 @@ extension FloorPlanData {
         guard !walls.isEmpty else { return nil }
         if medianWallHeightM < 2.0 {
             return isFromPointCloud
-                ? String(format: "牆只掃到 %.2fm 高（樓高看起來是 %.2fm）："
-                         + "請把鏡頭往上帶、沿牆面上下掃過去 —— "
-                         + "牆是靠「同一位置的垂直跨度」認出來的，掃得越高越完整",
+                ? String(format: L10n.text("牆只掃到 %.2fm 高（樓高看起來是 %.2fm）：")
+                         + L10n.text("請把鏡頭往上帶、沿牆面上下掃過去 —— ")
+                         + L10n.text("牆是靠「同一位置的垂直跨度」認出來的，掃得越高越完整"),
                          medianWallHeightM, sizeM.max() > 0 ? boundingHeightHint : 0)
-                : String(format: "牆只掃到 %.2fm 高：請把鏡頭往上帶到牆與天花板的交界",
+                : String(format: L10n.text("牆只掃到 %.2fm 高：請把鏡頭往上帶到牆與天花板的交界"),
                          medianWallHeightM)
         }
         if longestWallM < sizeM.max() * 0.5 {
             return isFromPointCloud
-                ? "牆面破碎：多半是家具擋住了牆的下半部，或只掃了房間的一角 —— "
-                  + "請沿著牆面走，讓每一面牆從地板到天花板都被掃過"
-                : "牆面破碎、房間未閉合：請沿著牆面走一圈並回到起點"
+                ? L10n.text("牆面破碎：多半是家具擋住了牆的下半部，或只掃了房間的一角 —— ")
+                  + L10n.text("請沿著牆面走，讓每一面牆從地板到天花板都被掃過")
+                : L10n.text("牆面破碎、房間未閉合：請沿著牆面走一圈並回到起點")
         }
         // **門窗只對 RoomPlan 有意義。** 點雲版是刻意不推論門窗的 ——
         // 牆上的缺口跟「那一段沒掃到」在點雲裡長得一模一樣，
         // 判成門會憑空生出不存在的門。對它報「沒偵測到門窗」等於每次都跳一個
         // 永遠無法滿足的警告，那比不報還糟。
         if !isFromPointCloud, doors.isEmpty && windows.isEmpty {
-            return "沒有偵測到任何門窗：沿牆掃過時請讓門窗完整入鏡"
+            return L10n.text("沒有偵測到任何門窗：沿牆掃過時請讓門窗完整入鏡")
         }
         return nil
     }
@@ -258,7 +258,7 @@ extension FloorPlanData {
     func svg(pxPerMeter: Float = 110, showAllFurniture: Bool = false) -> String {
         let b = drawingBoundsM
         guard b.count == 4, b[2] > b[0], b[3] > b[1] else {
-            return #"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="60"><text x="8" y="34" font-size="13">無牆面資料</text></svg>"#
+            return #"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="60"><text x="8" y="34" font-size="13">\#(L10n.text("無牆面資料"))</text></svg>"#
         }
         let w = (b[2] - b[0]) * pxPerMeter
         let h = (b[3] - b[1]) * pxPerMeter

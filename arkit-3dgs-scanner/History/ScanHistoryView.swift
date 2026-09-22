@@ -14,7 +14,7 @@ struct ScanHistoryView: View {
     private struct DeletionRequest {
         let entries: [ScanEntry]
         var all = false
-        var title: String { all ? "刪除全部 \(entries.count) 筆掃描？" : "刪除 \(entries.count) 筆掃描？" }
+        var title: String { all ? L10n.text("刪除全部 \(entries.count) 筆掃描？") : L10n.text("刪除 \(entries.count) 筆掃描？") }
     }
 
     private var selectedEntries: [ScanEntry] { entries.filter { selectedIDs.contains($0.id) } }
@@ -23,15 +23,15 @@ struct ScanHistoryView: View {
         NavigationStack {
             Group {
                 if loading && entries.isEmpty {
-                    ProgressView("讀取掃描紀錄…")
+                    ProgressView(L10n.text("讀取掃描紀錄…"))
                 } else if entries.isEmpty {
                     ContentUnavailableView {
-                        Label(error == nil ? "還沒有掃描紀錄" : "無法讀取紀錄", systemImage: "clock.arrow.circlepath")
+                        Label(error == nil ? L10n.text("還沒有掃描紀錄") : L10n.text("無法讀取紀錄"), systemImage: "clock.arrow.circlepath")
                     } description: {
-                        Text(error ?? "完成掃描後會自動保留在這裡，之後可預覽、分享或刪除。")
+                        Text(error ?? L10n.text("完成掃描後會自動保留在這裡，之後可預覽、分享或刪除。"))
                     } actions: {
-                        if error != nil { Button("重試") { Task { await reload() } } }
-                        else { Button("返回開始掃描") { dismiss() }.buttonStyle(.borderedProminent) }
+                        if error != nil { Button(L10n.text("重試")) { Task { await reload() } } }
+                        else { Button(L10n.text("返回開始掃描")) { dismiss() }.buttonStyle(.borderedProminent) }
                     }
                 } else {
                     List {
@@ -49,7 +49,7 @@ struct ScanHistoryView: View {
                                         .contentShape(Rectangle())
                                     }
                                     .buttonStyle(.plain)
-                                    .accessibilityValue(selectedIDs.contains(entry.id) ? "已選取" : "未選取")
+                                    .accessibilityValue(selectedIDs.contains(entry.id) ? L10n.text("已選取") : L10n.text("未選取"))
                                 } else {
                                     NavigationLink {
                                         ScanHistoryDetail(entry: entry) {
@@ -59,49 +59,49 @@ struct ScanHistoryView: View {
                                     .swipeActions {
                                         Button(role: .destructive) {
                                             pendingDelete = DeletionRequest(entries: [entry])
-                                        } label: { Label("刪除", systemImage: "trash") }
+                                        } label: { Label(L10n.text("刪除"), systemImage: "trash") }
                                     }
                                 }
                             }
                         } footer: {
-                            Text("包含舊版拍攝的掃描。刪除會一併移除照片、模型、點雲與分享檔案。")
+                            Text(L10n.text("包含舊版拍攝的掃描。刪除會一併移除照片、模型、點雲與分享檔案。"))
                         }
                     }
                     .refreshable { if !deleting { await reload() } }
                     .disabled(deleting)
                 }
             }
-            .navigationTitle(selecting ? "已選取 \(selectedIDs.count) 筆" : "掃描紀錄")
+            .navigationTitle(selecting ? L10n.text("已選取 \(selectedIDs.count) 筆") : L10n.text("掃描紀錄"))
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if !entries.isEmpty {
-                        Button(selecting ? "取消選取" : "選取") {
+                        Button(selecting ? L10n.text("取消選取") : L10n.text("選取")) {
                             selecting.toggle()
                             selectedIDs.removeAll()
                         }.disabled(deleting || loading)
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成") { dismiss() }.disabled(deleting)
+                    Button(L10n.text("完成")) { dismiss() }.disabled(deleting)
                 }
             }
             .safeAreaInset(edge: .bottom) {
                 if !entries.isEmpty {
                     HStack {
                         if deleting {
-                            ProgressView("正在刪除照片與模型…")
+                            ProgressView(L10n.text("正在刪除照片與模型…"))
                         } else if selecting {
-                            Button(selectedIDs.count == entries.count ? "取消全選" : "全選") {
+                            Button(selectedIDs.count == entries.count ? L10n.text("取消全選") : L10n.text("全選")) {
                                 selectedIDs = selectedIDs.count == entries.count ? [] : Set(entries.map(\.id))
                             }
                             Spacer()
-                            Button("刪除所選（\(selectedIDs.count)）", role: .destructive) {
+                            Button(L10n.text("刪除所選（\(selectedIDs.count)）"), role: .destructive) {
                                 pendingDelete = DeletionRequest(entries: selectedEntries)
                             }.disabled(selectedIDs.isEmpty)
                         } else {
-                            Text("共 \(entries.count) 筆").foregroundStyle(.secondary)
+                            Text(L10n.text("共 \(entries.count) 筆")).foregroundStyle(.secondary)
                             Spacer()
-                            Button("全部刪除", role: .destructive) {
+                            Button(L10n.text("全部刪除"), role: .destructive) {
                                 pendingDelete = DeletionRequest(entries: entries, all: true)
                             }
                         }
@@ -112,20 +112,20 @@ struct ScanHistoryView: View {
             }
             .interactiveDismissDisabled(deleting)
             .task { await reload() }
-            .confirmationDialog(pendingDelete?.title ?? "刪除掃描？", isPresented: Binding(
+            .confirmationDialog(pendingDelete?.title ?? L10n.text("刪除掃描？"), isPresented: Binding(
                 get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
                 titleVisibility: .visible, presenting: pendingDelete) { request in
-                Button("永久刪除 \(request.entries.count) 筆掃描", role: .destructive) {
+                Button(L10n.text("永久刪除 \(request.entries.count) 筆掃描"), role: .destructive) {
                     pendingDelete = nil
                     deleting = true
                     Task { await delete(request.entries) }
                 }
-                Button("取消", role: .cancel) { pendingDelete = nil }
+                Button(L10n.text("取消"), role: .cancel) { pendingDelete = nil }
             } message: { _ in
-                Text("所選掃描的所有照片、模型、點雲、深度與姿態資料、平面圖及同名 ZIP 都會刪除，無法復原。")
+                Text(L10n.text("所選掃描的所有照片、模型、點雲、深度與姿態資料、平面圖及同名 ZIP 都會刪除，無法復原。"))
             }
-            .alert("無法完成操作", isPresented: Binding(get: { error != nil && !entries.isEmpty }, set: { if !$0 { error = nil } })) {
-                Button("好") { error = nil }
+            .alert(L10n.text("無法完成操作"), isPresented: Binding(get: { error != nil && !entries.isEmpty }, set: { if !$0 { error = nil } })) {
+                Button(L10n.text("好")) { error = nil }
             } message: { Text(error ?? "") }
         }
     }
@@ -137,14 +137,14 @@ struct ScanHistoryView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12))
             VStack(alignment: .leading, spacing: 5) {
                 Text(entry.date, format: .dateTime.month().day().hour().minute()).font(.headline)
-                Text("\(entry.frameCount) 張影像" + (entry.pointCount.map { "・\($0.formatted()) 個點" } ?? ""))
+                Text(L10n.text("\(entry.frameCount) 張影像") + (entry.pointCount.map { L10n.text("・\($0.formatted()) 個點") } ?? ""))
                     .font(.caption).foregroundStyle(.secondary)
                 if let lidar = entry.usedLiDAR {
-                    Label(lidar ? "LiDAR 開啟" : "LiDAR 關閉・相機模式",
+                    Label(lidar ? L10n.text("LiDAR 開啟") : L10n.text("LiDAR 關閉・相機模式"),
                           systemImage: lidar ? "sensor.tag.radiowaves.forward" : "camera")
                         .font(.caption).foregroundStyle(lidar ? Color.accentColor : .secondary)
                 }
-                Text(entry.archive == nil ? "已儲存於裝置" : "已有分享檔案")
+                Text(entry.archive == nil ? L10n.text("已儲存於裝置") : L10n.text("已有分享檔案"))
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -195,47 +195,54 @@ private struct ScanHistoryDetail: View {
     var body: some View {
         VStack(spacing: 0) {
             if let lidar = currentEntry.usedLiDAR {
-                Text(lidar ? "LiDAR 深度掃描" : "相機模式・未使用 LiDAR 深度")
+                Text(lidar ? L10n.text("LiDAR 深度掃描") : L10n.text("相機模式・未使用 LiDAR 深度"))
                     .font(.caption).foregroundStyle(.secondary).padding(.top, 8)
             }
             if optimizedEntry != nil {
-                Text("已另存優化版本，原始掃描仍保留").font(.caption).foregroundStyle(.secondary)
+                Text(L10n.text("已另存優化版本，原始掃描仍保留")).font(.caption).foregroundStyle(.secondary)
             }
             if let poseNotice {
                 Text(poseNotice).font(.caption2).foregroundStyle(.secondary).padding(.horizontal)
             }
             if let selection {
-                Text("訓練選用 \(selection.selectedIDs.count) / \(selection.inputFrames) 張影像")
+                Text(L10n.text("訓練選用 \(selection.selectedIDs.count) / \(selection.inputFrames) 張影像"))
                     .font(.caption).foregroundStyle(.secondary).padding(.top, 4)
                 if let notice = selection.notice {
                     Text(notice).font(.caption2).foregroundStyle(.orange)
                         .lineLimit(3).padding(.horizontal)
                 }
+                if let information = selection.diagnosticSummary {
+                    DisclosureGroup(L10n.text("拍攝品質資訊")) {
+                        Text(information).font(.caption2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .font(.caption).foregroundStyle(.secondary).padding(.horizontal)
+                }
             }
             if optimizationTask != nil {
                 ProgressView(optimizationText, value: optimizationProgress).padding()
             }
-            Picker("預覽內容", selection: $selectedTab) {
-                Text("3D 點雲").tag(0)
-                Text("拍攝影像").tag(1)
+            Picker(L10n.text("預覽內容"), selection: $selectedTab) {
+                Text(L10n.text("3D 點雲")).tag(0)
+                Text(L10n.text("拍攝影像")).tag(1)
             }
             .pickerStyle(.segmented).padding()
             if let preview {
                 if selectedTab == 0 {
                     if preview.points.isEmpty {
-                        ContentUnavailableView("沒有可預覽的點雲", systemImage: "cube.transparent",
-                                               description: Text(preview.note ?? "可切換查看拍攝影像。"))
+                        ContentUnavailableView(L10n.text("沒有可預覽的點雲"), systemImage: "cube.transparent",
+                                               description: Text(preview.note ?? L10n.text("可切換查看拍攝影像。")))
                     } else {
                         ZStack(alignment: .bottom) {
                             ReviewPointCloudView(points: preview.points, trajectory: preview.trajectory)
-                            Text("單指旋轉・雙指縮放與平移")
+                            Text(L10n.text("單指旋轉・雙指縮放與平移"))
                                 .font(.caption).padding(10).hudGlass(Capsule()).foregroundStyle(.white)
                                 .padding().allowsHitTesting(false)
                         }
-                        .accessibilityLabel("歷史掃描 3D 點雲")
+                        .accessibilityLabel(L10n.text("歷史掃描 3D 點雲"))
                     }
                 } else if preview.images.isEmpty {
-                    ContentUnavailableView("沒有拍攝影像", systemImage: "photo")
+                    ContentUnavailableView(L10n.text("沒有拍攝影像"), systemImage: "photo")
                 } else {
                     ScanRoutePlaybackView(preview: preview, currentIndex: $photoIndex, playbackFPS: $playbackFPS)
                 }
@@ -244,8 +251,8 @@ private struct ScanHistoryDetail: View {
                 }
             } else {
                 Spacer()
-                ProgressView("準備預覽…")
-                Text("舊版掃描可能需要從深度資料重建點雲")
+                ProgressView(L10n.text("準備預覽…"))
+                Text(L10n.text("舊版掃描可能需要從深度資料重建點雲"))
                     .font(.caption).foregroundStyle(.secondary).padding()
                 Spacer()
             }
@@ -253,30 +260,30 @@ private struct ScanHistoryDetail: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 if optimizationTask != nil {
-                    Button("取消") { optimizationTask?.cancel() }
+                    Button(L10n.text("取消")) { optimizationTask?.cancel() }
                 } else {
-                    Button("優化訓練資料") {
+                    Button(L10n.text("優化訓練資料")) {
                         optimizationTask = Task { await optimize() }
                     }.disabled(busy || preview == nil)
                 }
             }
         }
         .onDisappear { optimizationTask?.cancel() }
-        .navigationTitle(currentEntry.date.formatted(date: .abbreviated, time: .shortened))
+        .navigationTitle(currentEntry.date.formatted(.dateTime.locale(L10n.locale).year().month().day().hour().minute()))
         .navigationBarTitleDisplayMode(.inline)
         .safeAreaInset(edge: .bottom) {
             HStack {
-                if busy { ProgressView("處理中…") }
+                if busy { ProgressView(L10n.text("處理中…")) }
                 else if let archive {
-                    ShareLink(item: archive) { Label("分享掃描", systemImage: "square.and.arrow.up") }
+                    ShareLink(item: archive) { Label(L10n.text("分享掃描"), systemImage: "square.and.arrow.up") }
                 } else {
                     Button { Task { await makeArchive() } } label: {
-                        Label("匯出 3DGS 訓練資料", systemImage: "square.and.arrow.up")
+                        Label(L10n.text("匯出 3DGS 訓練資料"), systemImage: "square.and.arrow.up")
                     }
                 }
                 Spacer()
                 Button(role: .destructive) { showDelete = true } label: {
-                    Label("刪除", systemImage: "trash")
+                    Label(L10n.text("刪除"), systemImage: "trash")
                 }
             }
             .disabled(busy || preview == nil)
@@ -297,8 +304,8 @@ private struct ScanHistoryDetail: View {
                 preview = ScanPreview(points: [], trajectory: [], images: [], note: error.localizedDescription)
             }
         }
-        .confirmationDialog("刪除這次掃描？", isPresented: $showDelete, titleVisibility: .visible) {
-            Button("刪除照片、模型與所有資料", role: .destructive) {
+        .confirmationDialog(L10n.text("刪除這次掃描？"), isPresented: $showDelete, titleVisibility: .visible) {
+            Button(L10n.text("刪除照片、模型與所有資料"), role: .destructive) {
                 Task {
                     busy = true
                     defer { busy = false }
@@ -306,9 +313,9 @@ private struct ScanHistoryDetail: View {
                     catch { self.error = error.localizedDescription }
                 }
             }
-        } message: { Text("此掃描的所有照片、模型、點雲、深度與姿態資料、平面圖及同名 ZIP 都會刪除，無法復原。") }
-        .alert("無法完成操作", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
-            Button("好") { error = nil }
+        } message: { Text(L10n.text("此掃描的所有照片、模型、點雲、深度與姿態資料、平面圖及同名 ZIP 都會刪除，無法復原。")) }
+        .alert(L10n.text("無法完成操作"), isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+            Button(L10n.text("好")) { error = nil }
         } message: { Text(error ?? "") }
     }
 
@@ -324,7 +331,7 @@ private struct ScanHistoryDetail: View {
     }
     private func optimize() async {
         busy = true
-        optimizationText = "準備優化…"
+        optimizationText = L10n.text("準備優化…")
         optimizationProgress = 0
         UIApplication.shared.isIdleTimerDisabled = true
         defer {
@@ -407,6 +414,6 @@ struct ScanPhoto: View {
                 onImageLoaded?(url, replacement != nil)
             }
         }
-        .accessibilityLabel("掃描影像")
+        .accessibilityLabel(L10n.text("掃描影像"))
     }
 }

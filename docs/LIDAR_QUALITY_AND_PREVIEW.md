@@ -1,70 +1,99 @@
-# LiDAR 重影、即時預覽與擷取一致性修正
+# LiDAR consistency, live preview, and capture gating
 
-本輪依實機回報處理三個症狀：表面重影／厚牆／漂浮點、即時更新不連續，以及稍微移動就暫停照片、點數卻繼續增加。歷史列表截圖只有模式、照片數和點數，無法據此量測幾何誤差；以下是程式修正與合成驗證，尚未拿到該次掃描原始資料或完成真機 A/B。
+**English** | [繁體中文](LIDAR_QUALITY_AND_PREVIEW.zh-TW.md)
 
-## 已確認的程式問題
+This work addresses thick/double surfaces, floating points, uneven preview updates, and photos pausing on small movements while point counts increased. A history screenshot alone cannot quantify geometry error. The checks below are implementation and synthetic evidence; the later real-scan comparison is documented in [surface consensus](LIDAR_SURFACE_CONSENSUS.md).
 
-- 不同深度的樣本若落在不同 voxel，原本會各自留下一層。權重再低也不代表會被刪除；單靠同格加權平均無法排除跨格重影。
-- mesh 原有 10 cm 深度容差是取色可見性檢查，不能當成幾何精度標準。它可能在沒有量測的格子補回第二層表面。
-- 即時預覽原本只在融合完成後取兩塊待更新磚，使用 Set 的非先進先出順序。持續變動的磚可能反覆搶先；暫停抓幀後也不再排空待更新資料。
-- 背景忙碌或 buffer 複製失敗時，外層仍更新「上次融合影格」，額外延後下一次嘗試。
-- 照片額外檢查清晰度，但即時點雲沒有共用這一關。HUD 的暫停狀態也沒有涵蓋所有實際拒絕條件。
-- 線速度先對單幀位移取長度，再做 EMA，正負定位抖動會被整流成持續的正速度；除以近距離景深後會放大模糊估計。
-- 清晰度基準原本在角速度超過 0.2 rad/s 時就凍結。正常掃描轉到另一片較低紋理的表面，也可能一直與前一片表面比較。
-- 智慧快門在照片 buffer 複製之前就消耗拍攝位置；複製失敗後可能得再移動一段距離才重試。
+## Confirmed issues
 
-## 深度一致性
+- Different-depth samples in different voxels could form multiple layers even with low weights. Same-cell averaging cannot remove cross-cell ghosts.
+- Mesh's old 10 cm color-visibility tolerance was not a geometry-accuracy threshold and could refill rejected layers.
+- Preview only drained two dirty tiles after fusion using unordered Set traversal. Frequently changing tiles could starve others, and capture pauses stopped draining.
+- Busy workers or failed image copies still advanced the last-fused timestamp, delaying retries.
+- Photos checked sharpness separately from point insertion, while the HUD did not represent every rejection condition.
+- Averaging magnitudes of per-frame position jitter created positive speed and inflated close-range blur estimates.
+- Freezing sharpness baseline at 0.2 rad/s could keep comparing a newly viewed low-texture surface with a previous surface.
+- Shutter state advanced before buffer copying succeeded, consuming a viewpoint after a failed copy.
 
-新增 `DepthConsistencyView`，持有小尺寸深度圖、confidence、內參與相機逆矩陣。候選點投影到其他視角，透過同一表面上的四個可信樣本做雙線性深度取樣；深度斷層、低信心、畫面外與無效數值不提供支持。
+## Depth consistency
 
-容差為 `0.015 m + measuredDepth × 0.005`，2 m 處為 2.5 cm。這是初始參數，不是實測精度承諾。
+`DepthConsistencyView` holds small depth/confidence arrays, intrinsics, and camera inverse matrices. It projects candidates into another view and bilinearly samples four confident, same-surface pixels. Discontinuities, low confidence, out-of-frame positions, and invalid values do not vote.
 
-| 比較結果 | 處理 |
+Tolerance is `0.015 m + measuredDepth × 0.005`, or 2.5 cm at 2 m. This parameter is not an accuracy claim.
+
+| Observation | Vote |
 | --- | --- |
-| 點與量測深度一致 | 計為支持 |
-| 點位於來源所見前景後方 | 視為遮擋，不當成反證 |
-| 點比量測表面更靠近相機 | 位於量測的空間中，計為反證 |
-| 越界、無效、低信心或深度斷層 | 未觀測，不投票 |
+| Point agrees with measured depth | Support |
+| Point lies behind a visible foreground | Occluded; no contradiction |
+| Point lies in front of the measured surface | Free-space contradiction |
+| Invalid, out of bounds, low confidence, discontinuity | Unobserved |
 
-至少有一次支持，且支持票多於反證票才接受。因此單個錯誤來源不能否決多個一致來源；被前景遮住的背景也能由其他視角驗證。
+Support must exceed contradictions. Live preview requires at least one support; current offline consensus requires two when at least two references exist, as described in [surface consensus](LIDAR_SURFACE_CONSENSUS.md).
 
-- **即時**：使用前一個合格的原始 `sceneDepth` 封包作參考。首幀建立參考，下一個合格深度幀才新增幾何；追蹤 epoch 變更、時間倒退／重複或間隔超過 0.5 秒會重新建立參考。只保留一張參考深度，記憶體有界。
-- **停止後**：每個關鍵幀在前後各四筆紀錄內，最多載入四張其他有效深度圖。排除 `.drop`、同 ID、時間太近、缺檔及毀損的來源，使用修正後姿態比對。每個工作單元只有固定數量小圖，不載入整份掃描深度。
-- **mesh**：除了取色檢查，還必須通過本幀及其他深度視角的一致性檢查，避免用 mesh 補回被拒絕的殼層。
+Live preview uses the previous eligible raw-depth packet. The first establishes a reference; the next can add geometry. Epoch changes, repeated/reversed timestamps, or gaps over 0.5 seconds reset it. Offline fusion uses at most four references with corrected poses; current selection prefers spatially diverse views and falls back to temporal neighbors. Dropped, duplicate, near-time, missing, and corrupt sources are excluded. Mesh must pass color visibility and depth support.
 
-無支持的區域可能變稀疏。整份離線結果為空時，仍沿用經即時驗證的備援點雲。此機制不會修正 ARKit 系統性漂移，也不能識別跨幀一致的感測器錯誤；大幅遮擋、快速動態與不準的姿態仍需實測。相鄰深度有時間相關性，支持票並非統計上完全獨立。
+Unsupported regions can become sparse. An empty offline result can retain a validated live fallback. Correlated sensor errors and systematic pose drift can still pass; support votes are not independent measurements.
 
-## 即時刷新
+## Preview scheduling
 
-`DirtyTileQueue` 使用有去重的 FIFO。重複編輯尚未顯示的磚只更新內容，不改變排隊位置；更新完成後再次變動就回到隊尾。
+`DirtyTileQueue` is a deduplicated FIFO. Editing a pending tile does not move it ahead; an updated tile that changes again rejoins the tail.
 
-渲染與融合分開排程。預設每批完成後間隔約 33 ms，再向 actor 取下一批，最多 8 塊、24,000 點。單塊超過點數預算時仍整塊送出以避免卡住，因此這是批次預算，並非每幀的嚴格時間上限，也不代表真機保證 30 FPS。
+Rendering and fusion are scheduled separately. Batches wait about 33 ms after the previous batch and request at most eight tiles / 24,000 points. An oversized tile is sent whole to avoid starvation, so the budget is not a strict deadline or a 30 FPS guarantee.
 
-只有實際接受封包才更新融合取樣時間；actor 打包幾何，主執行緒套用 SceneKit 節點，關閉隱式動畫，未改變的計數不重複發布。停止、背景與離開頁面會取消刷新工作；續掃重新標記所有磚。待建立錨點需在主執行緒套用後才確認移除，取消中的批次不會遺失錨點。
+Only accepted packets advance fusion timing. The actor packs geometry; the main thread applies SceneKit nodes without implicit animations and avoids publishing unchanged counts. Stop, backgrounding, and dismissal cancel refresh work. Resume marks tiles dirty again. Pending anchors are acknowledged only after main-thread application so cancelled batches do not lose them.
 
-## 移動與照片／點雲同步判定
+## Shared motion/photo/point decisions
 
-`CaptureQualityPolicy` 集中追蹤、紋理、嚴重模糊、速度與清晰度條件。照片和新增即時點共用 `allowCapture`；品質暫停時，不再繼續接收新的點雲封包。此前已接受的背景工作與排隊幾何仍可完成，所以畫面可能短暫繼續呈現已取得的資料。
+`CaptureQualityPolicy` centralizes tracking, texture, severe exposure blur, speed, and sharpness. Photos and new point packets share `allowCapture`. Already-accepted background work may briefly continue to appear after a quality pause.
 
-`CaptureMotionEstimator` 以約 80 ms 的淨位移估算線速度，避免先把每幀微抖變成正值再平均。旋轉以四元數角差計算；陀螺儀只有在與 ARFrame 時間差不超過 20 ms 時才補強，避免用較晚的轉動去拒絕已曝光的畫面。
+`CaptureMotionEstimator` estimates velocity from about 80 ms net displacement, avoiding rectified per-frame jitter. Rotation uses quaternion differences; gyroscope data strengthen it only within 20 ms of the ARFrame timestamp.
 
-清晰度基準改為按經過時間衰減，只在超過嚴重運動門檻時凍結。後續走動回報下，進一步把曝光模糊與捲簾風險分開：`exposureBlurPixels = blurPixels × exposure / (exposure + readout)`，24 px 遮斷門檻只套用曝光部分；總風險仍保留於提示、照片 metadata 與融合權重。急速角速度／線速度上限改為 1.6 rad/s／1.6 m/s，清晰度比例 0.4 與追蹤門檻不變。這允許較多走動影格，代價是部分較高幾何風險影格需由跨幀驗證與停止後複核排除，不能視為所有走動照片都會清晰。短暫對焦仍暫停接收，但不立即閃紅框；持續不清晰才顯示強警告。
+Sharpness baseline decays with elapsed time and freezes only at severe motion. Exposure blur is separated from rolling-shutter risk:
 
-HUD 區分「追蹤恢復」「紋理不足」「移動過快」「等待清晰」。通過品質也不代表每幀存照片：仍需新的位移／角度、最小時間間隔與可用寫入容量。`SmartShutter.isDue` 不改狀態，成功複製照片並準備寫入後才 `markCaptured`，複製失敗可在下一個合格影格重試。
+```text
+exposureBlurPixels = blurPixels × exposure / (exposure + readout)
+```
 
-## 真機效能報告
+The 24 px blocking threshold applies to exposure blur, while total estimated risk remains in guidance, metadata, and weights. Severe speed limits are 1.6 rad/s and 1.6 m/s; sharpness ratio 0.4 and tracking checks remain. More walking frames can be accepted, but higher-risk frames still need later verification. Brief focus waits do not immediately flash the strong red warning.
 
-新的 LiDAR 掃描停止後會在資料夾寫入 `preview-performance.json`，隨掃描封裝：
+The HUD distinguishes recovering tracking, low texture, moving too fast, and waiting for sharpness. Eligible frames still need new viewpoints, minimum interval, and a write slot. `SmartShutter.isDue` is pure; `markCaptured` runs only after a photo copy is ready, permitting retry after copy failure.
 
-- 候選／接受點次數與融合影格數（不是去重後點數）。
-- 融合總耗時與最慢一次耗時。
-- 打包批次、磚數、最大待更新磚數、打包耗時。
-- 主執行緒套用總耗時與最慢一次耗時。
-- 追蹤／品質檢查影格數與被擋影格數。
+## Preview diagnostics
 
-這些數字量測程式工作，沒有量測 GPU 顯示 FPS。比較時應用相同裝置、建置模式、路徑與光線；Debug 和 Release 的 Swift 熱迴圈速度可能不同。
+`preview-performance.json` records candidate/accepted observations, fusion count and mean/max time, packed batches/tiles, maximum pending tiles, packing time, main-thread application time, and quality rejection counts. Observation counts are not unique points; work durations are not GPU display FPS. Compare on identical devices, paths, lighting, and build modes.
 
-## 驗證
+## Stop-time safeguards
+
+Reports described crashes seconds after Stop, before visible fusion progress. Without crash/jetsam records, allocation risks are evidence, not a confirmed sole cause.
+
+The stop sequence now:
+
+1. Shows processing and drains accepted photo/fusion/render work.
+2. Releases live SceneKit geometry and the image pool, retaining the accumulator for resume.
+3. Samples at most 100,000 preview points directly from tiles and saves history without first copying/downsampling the full cloud. Final output atomically replaces it.
+4. Copies at most 150,000 mesh vertices with a whole-scene sampling stride, capacity reservation, anchor-to-anchor yielding, buffer bounds, and finite-coordinate checks. ARKit's own mesh allocation is separate.
+5. Saves the world map, finishes the RoomPlan segment, then pauses ARSession. Map serialization does not overlap model building/refusion. Below 128 MiB available memory, map saving is skipped with a notice while photos/preview remain.
+6. Runs blur review, RoomPlan modeling, refusion, and required point-cloud floor-plan work sequentially. Successful RoomPlan no longer requests another two-million-point floor-plan source.
+
+Each fusion frame uses an autorelease pool. Initial iOS grid budgeting reserves 64 MiB and uses at most a quarter of remaining memory, without the old 200,000-cell minimum. Coarsening repeats until within capacity. These application budgets do not bound system allocations.
+
+## Pressure during fusion
+
+The mobile grid estimates 128 bytes per cell within a default 96 MiB dictionary budget (up to 786,432 cells), separate from overall RSS. Available memory is rechecked before decoding, insertion, and export. Below 256 MiB, capacity is reduced using both current estimated grid cost and remaining space. Coarsening releases shards progressively; when points straddle the origin and coarsening cannot converge, bounded sampling stops ineffective doubling.
+
+Below 96 MiB, processing returns `memoryPressure` before another decode/insertion/full output. Review uses at most 100,000 live points, skipping expensive floor-plan/output work. Raw images/depth and resumable accumulator remain. This is a fallback, not successful refined fusion, and cannot guarantee reacting before a sudden system allocation spike.
+
+Mobile output uses one bounded proportional sample rather than a full point array plus another spatial dictionary. Consistency and isolation filters remain; fewer details or fewer points than the cap are possible. Desktop tools retain their quality-ranked path.
+
+`refusion-progress.json` is atomically updated at start, every eight frames, before output, and at completion. Fields include status/stage, frame counts, `peakCells`, limits/reductions, available memory, output count, and final voxel size. `peakCells` is measured after per-frame insertion, not allocation peak/RSS. A report left at `running` locates the last completed stage but does not diagnose the crash alone.
+
+## Denser viewpoints
+
+Defaults changed from 10 cm / 6° / 0.15 seconds to 5 cm / 3° / 0.10 seconds. Near-range LiDAR translation uses `min(5 cm, max(2 cm, depth × 0.05))`; RGB uses a 4 cm floor and requires 4 cm baseline even for rotation triggers. Unknown depth uses 5 cm.
+
+The minimum interval is not fixed capture FPS. Stationary views do not continuously save duplicates. Tracking, sharpness, severe blur, and three-write backpressure still apply. More photos increase storage and processing time without proving better geometry or angular coverage.
+
+## Validation
 
 ```sh
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
@@ -73,65 +102,20 @@ swiftc -O -module-cache-path /tmp/fable-swift-cache \
 /tmp/fable-lidar-test
 
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
-  arkit-3dgs-scanner/Capture/{Models,BlurFilter,CaptureConfig,Utils,SmartShutter,CaptureQualityPolicy}.swift \
+  arkit-3dgs-scanner/Capture/{Localization,Models,BlurFilter,CaptureConfig,Utils,SmartShutter,CaptureQualityPolicy}.swift \
   tools/test_capture_quality_policy.swift -o /tmp/fable-quality-test
 /tmp/fable-quality-test
-```
 
-深度／預覽 39 項檢查包含前後假牆、遮擋、多數共識、低信心／邊緣、時間與 epoch、FIFO 公平性、批次預算、取消與錨點確認。完整磁碟重融合 fixture 使用五幀、2 m 真牆、1.9／2.1 m 假牆及 1.94 m mesh 假層：舊路徑重現多層牆，新路徑保留超過 100 個有效點且全部距真平面小於 3 cm。這是理想合成驗證。
-
-擷取策略 30 項檢查包含普通移動、警告與遮斷差異、統一清晰度決策、2 mm 抖動、真實 0.3 m/s 平移、陀螺儀時間對齊、旋轉、清晰度基準恢復，以及快門失敗重試；新增 1.1 m/s 普通走動、捲簾與曝光分離、低光長曝光和快速行走案例。
-
-還需實機以同一片有紋理平面重掃，測量牆厚、漂浮點與尺寸誤差，並比較報告中的品質拒絕比例、融合時間與待刷新磚數。未聲稱合成結果等於現場精度。
-
-本輪共 173 項檢查通過（26 停止流程容量、39 深度／預覽、30 擷取策略、18 既有融合、29 RGB 重建、26 無 LiDAR 品質、5 分片融合一致性）；iPhone 與 Simulator 未簽章 Debug 建置成功。既有融合程式的 UnsafeMutableBufferPointer Sendable 警告仍存在。尚未完成本輪真機 UI／FPS 驗證。
-
-## 長時間掃描結束時的防護
-
-使用者回報按結束後數秒內、尚未看到融合進度就閃退。未取得該裝置的 crash／jetsam 記錄；目前確認的程式風險包括主執行緒無界複製 mesh、即時 GPU 幾何未釋放，以及大型後處理同時進行。
-
-停止流程改為：
-
-1. 顯示處理狀態，等待已接受的照片／融合／刷新任務完成。
-2. 釋放即時 SceneKit 點雲幾何與影像 pool，保留 accumulator 供續掃使用。
-3. 直接從空間磚等間隔選最多 100,000 點，寫入現有 `review.ply` 與歷史摘要。此中繼取樣不先複製全部點，也不建立全點雲下採樣字典；最終結果仍會原子寫入取代預覽。
-4. 依全場景頂點總數計算 mesh 步長，最多複製 150,000 個頂點，一次預留容量、各 anchor 間讓出主執行緒，檢查 buffer 邊界與有限座標。這限制的是複製出的 CPU 頂點，不限制 ARKit 自己管理的網格。
-5. 保存世界地圖，等待 RoomPlan 片段，再暫停 ARSession。地圖序列化不與 RoomPlan 建模／重融合重疊；可用記憶體少於 128 MiB 時略過地圖保存並提示，照片與中繼預覽仍在。
-6. 在背景複核模糊幀，再依序建立 RoomPlan、重融合、必要的點雲平面圖與下採樣。RoomPlan 已成功時不再額外要求 200 萬點的平面圖輸入。
-
-重融合改為一次處理一個影格，每幀使用 `autoreleasepool` 釋放 ImageIO／Foundation 暫存。iOS 格數預算先保留 64 MiB，再只取剩餘可用空間的四分之一，按每格估計成本換算；取消舊的 200,000 格下限。單批仍超標時持續粗化，直到回到容量內。這些是保守的應用程式預算，無法保證作業系統或 ARKit 不會另外增加用量；記憶體不足時輸出可能變稀疏。
-
-```sh
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
   arkit-3dgs-scanner/Capture/{Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,PointCloudFusion}.swift \
   tools/test_stop_processing.swift -o /tmp/fable-stop-test
 /tmp/fable-stop-test
 ```
 
-26 項停止流程容量檢查包含低可用記憶體、設定上限、最高 2,000 萬原始頂點的取樣數量計算、單批 12,000 點降至 128 格、有限中繼輸出與保留續掃資料。取樣測試驗證索引數量，不是實機配置 2,000 萬頂點的壓力測試。iOS 實際峰值與本次閃退原因仍須用裝置紀錄確認。
+Historical validation comprised 173 checks: 26 stop-capacity, 39 depth/preview, 30 capture-policy, 18 fusion, 29 RGB reconstruction, 26 camera-only, and five shard checks; unsigned device/Simulator builds passed. The parallel desktop path retains a pre-existing Sendable warning.
 
-## 融合中途記憶體壓力
+Depth fixtures cover false layers, occlusion, consensus, edges/confidence, time/epoch reset, FIFO fairness, budgets, cancellation, and anchor acknowledgment. A five-frame 2 m plane with 1.9/2.1 m false layers and a 1.94 m mesh layer retained over 100 points all within 3 cm of the true plane. This is ideal synthetic evidence.
 
-初始預算之外，iOS 融合格採每格 128 B 的保守估計及預設 96 MiB 工作集預算（最多 786,432 格）。此數值僅估計字典，不代表整個 App 的 RSS 上限；ARKit、原始預覽格、照片解碼、粗化與輸出也會佔記憶體。
+Motion tests include 2 mm jitter, 0.3 m/s translation, time-aligned gyro, focus recovery, failed-copy retry, 1.1 m/s walking, long exposure, and fast motion. Capacity tests cover low memory before frame three and before export, post-decode reductions, raw-media preservation, bounded samples, nonconverging coarsening, and index calculations for up to 20 million mesh vertices. That last test does not allocate 20 million real device vertices. Shutter tests cover baseline/angle/time, near-range overlap, stationary deduplication, and at least 11 views over a two-second 0.3 m/s path.
 
-每幀解碼前、候選點插入前與匯出前重新讀取可用記憶體。低於 256 MiB 時，按「現有格估計成本＋剩餘空間」重新降低容量，不會因同一張表已使用空間就反覆重算成零；粗化仍逐片釋放。容量極小且點分處座標原點兩側時，加粗也無法合併，會停止無效粗化並保留有界樣本，避免無止境加倍。
-
-低於 96 MiB 時不再解碼／插入或配置完整輸出，回傳 `memoryPressure`。控制器顯示原因、從原有 accumulator 取最多 100,000 點預覽，跳過平面圖與大型擇優輸出；原始照片與深度保留。續掃仍可使用原有累積格。這是保守回退，不是精細融合成功，也不保證系統突然增加記憶體用量時一定來得及反應。
-
-手機端匯出使用單次有界取樣，不先建立全部點及第二張空間字典。跨幀與孤立點驗證保留；超過輸出上限時採遍歷比例取樣，不再逐格挑最高分，可能減少細節，少量孤立點被排除後也可能低於指定上限。桌機離線工具仍可使用原本的分層擇優路徑。
-
-`refusion-progress.json` 在開始、每 8 幀、輸出前及結束時原子更新，欄位包含 `status`、`stage`、`totalFrames`、`completedFrames`、`peakCells`、`initialCellLimit`、`capacityReductions`、`minimumAvailableBytes`、`outputPoints` 與 `finalVoxelSizeM`。`peakCells` 是每幀插入完成後的最大格數，不是配置尖峰或實測 RSS；狀態停在 `running` 可定位最近完成的位置，但不能單靠此值判定閃退原因。
-
-新增磁碟測試在第 3 幀前與輸出前注入低記憶體，驗證中止狀態、報告落盤、原始照片保留及不回傳半成品；也驗證解碼後才降低記憶體時會在插入前調整容量；正常預算下驗證有限輸出依然排除假牆。容量測試包含中途降額、跨整片表面的有限輸出與原點兩側不收斂案例。
-
-## 更密集的視角取樣
-
-預設從 10 cm／6°／0.15 s 改為 5 cm／3°／0.10 s。LiDAR 近距離位移門檻為 `min(5 cm, max(2 cm, depth × 0.05))`，RGB 為 `min(5 cm, max(4 cm, depth × 0.05))`；RGB 的轉角觸發仍須同時滿足 4 cm 基線。沒有可靠距離時使用 5 cm。
-
-0.10 s 是最短間隔，不是固定拍攝 FPS；站著不動不會持續保存重複照片。追蹤、實測清晰度、嚴重模糊與最多 3 張待寫入限制不變；忙碌時保留待拍視角，下一個合格影格重試。更密的視角會增加磁碟用量與融合時間，不等於感測深度本身更精準，也不能用照片數冒充視角涵蓋率。
-
-新增快門測試涵蓋 5 cm 平移、3° 旋轉、100 ms 間隔、近距離重疊、RGB 基線、靜止去重，以及 0.3 m/s、2 秒路徑至少 11 個取樣視角。
-
-## API 依據
-
-Apple 說明 [smoothedSceneDepth](https://developer.apple.com/documentation/arkit/arframe/smoothedscenedepth) 會對深度做跨時間平滑。本輪幾何檢查採用原始 `sceneDepth`，將時間一致性在已知相機姿態下自行比對。
+Real-device wall thickness, dimensions, floating points, UI FPS, and peak memory still need measurement. Apple documents [temporal smoothing](https://developer.apple.com/documentation/arkit/arframe/smoothedscenedepth); this pipeline prefers raw depth and validates it using known poses.

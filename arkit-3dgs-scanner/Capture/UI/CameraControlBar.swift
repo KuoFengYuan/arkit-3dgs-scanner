@@ -34,8 +34,8 @@ struct CameraControlBar: View {
                 .hudGlass(Circle())
         }
         .foregroundStyle(controls.hasManualOverride ? .yellow : .white)
-        .accessibilityLabel("相機進階控制")
-        .accessibilityValue(controls.hasManualOverride ? "手動" : "自動")
+        .accessibilityLabel(L10n.text("相機進階控制"))
+        .accessibilityValue(controls.hasManualOverride ? L10n.text("手動") : L10n.text("自動"))
     }
 
     // MARK: - 圖示列
@@ -143,7 +143,7 @@ struct CameraControlBar: View {
                 }
             }
             if item == .shutter {
-                Text("上限 1/60s：再長就必定動態模糊")
+                Text(L10n.text("較長曝光會增加運動模糊風險"))
                     .font(.caption2).foregroundStyle(.white.opacity(0.6))
             }
         }
@@ -158,11 +158,11 @@ struct CameraControlBar: View {
         switch item {
         case .ev:      String(format: "%+.1f EV", controls.ev)
         case .shutter: controls.shutterManual
-                        ? "1/\(Int((1 / controls.shutterSec).rounded()))s" : "自動"
-        case .iso:     controls.isoManual ? "\(Int(controls.iso))" : "自動"
-        case .wb:      controls.wbManual ? "\(Int(controls.kelvin))K" : "自動"
+                        ? "1/\(Int((1 / controls.shutterSec).rounded()))s" : L10n.text("自動")
+        case .iso:     controls.isoManual ? "\(Int(controls.iso))" : L10n.text("自動")
+        case .wb:      controls.wbManual ? "\(Int(controls.kelvin))K" : L10n.text("自動")
         case .focus:   controls.focusManual
-                        ? String(format: "%.2f", controls.lensPosition) : "自動"
+                        ? String(format: "%.2f", controls.lensPosition) : L10n.text("自動")
         }
     }
 }

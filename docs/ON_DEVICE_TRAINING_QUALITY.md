@@ -1,54 +1,62 @@
-# 手機端掃描與訓練資料優化
+# On-device dataset refinement
 
-App 已移除手機端 Gaussian 訓練；本文件描述的是匯出前的資料處理。實際 3DGS 訓練在外部工具進行。
+**English** | [繁體中文](ON_DEVICE_TRAINING_QUALITY.zh-TW.md)
 
-照片挑選、跨影格匹配、相機位置驗證與深度重融合全部在 iPhone 上執行，不需要桌面 COLMAP。匯出仍為 LichtFeld / MrNeRF 可讀的 `images/ + sparse/0`。
+Gaussian training has been removed from the app. This document covers preparation before export; actual 3DGS training runs in an external tool.
 
-## 操作
+Photo selection, cross-frame matching, camera-pose validation, and depth refusion run on the iPhone without desktop COLMAP. Export remains `images/ + sparse/0` for compatible trainers.
 
-- **新掃描**：LiDAR 模式保持「精細掃描」開啟。停止後先逐張匹配，再校正位置、重融合及挑選訓練照片。
-- **既有掃描**：掃描紀錄 → 開啟一筆 → 右上角「優化訓練資料」。完成後自動顯示新的優化版本，可再按「匯出 3DGS 訓練資料」。原始版本保留，方便以同一套 MrNeRF 設定比較。
-- 可在歷史優化期間按「取消」；離開詳情也會取消。未完成的版本不會出現在紀錄中。
-- 照片／深度檔保持原樣。新的歷史版本優先以硬連結共用原始影像與深度，不另複製一整份；不支援硬連結時才複製。刪除任一版本不會刪除另一版本仍在使用的資料。
+## Usage
 
-## RGB 選幀與補拍提示
+- **New scans:** leave Refined scanning enabled in LiDAR mode. Stopping runs image matching, pose validation, refusion, and training-image selection.
+- **Existing scans:** open Scan history → a scan → Optimize training data. The completed optimized copy opens automatically; export it as a 3DGS dataset. Keep the original for comparisons with identical trainer settings.
+- Cancel during history optimization, or leave the detail view to cancel. Incomplete copies are not published.
+- Images and depth remain unchanged. Optimized copies use hard links where supported, otherwise file copies. Deleting either version leaves media referenced by the other version intact.
 
-`TrainingFrameSelector` 在原本幾何／RGB 複核之後再做獨立的 RGB 匯出挑選，不修改 `blurVerdict`，也不改深度融合輸入。這個第二階段沒有「最多排除 30%」的限制。
+## RGB selection and quality messages
 
-每次只解碼一張最長邊 320px 的感測器方向灰階縮圖，量測二階差分相對梯度能量及 16×12 圖像摘要。相機相距不超過 4cm、完整旋轉差不超過 3°，且圖像摘要相近，才視為可互相替代的候選，優先保留細節指標較高者。不同視角、基線、圖像內容或缺少可靠清晰度量測者保留。相似度是保守的啟發式，不能保證偵測所有細小遮擋；低紋理表面不因缺乏邊緣而被當成模糊。
+`TrainingFrameSelector` runs after geometry/RGB review. It does not change `blurVerdict` or depth-fusion inputs. This second selection stage has no 30% exclusion cap.
 
-運動模糊估計超過 10px 不會單獨觸發刪除。若保留視角仍有高風險或缺少清晰度資料，畫面分開顯示「細節偏弱（附影格 ID）」、「只有運動風險」及「低紋理／資訊不足」；這不是絕對模糊判定。`training-selection.json` 包含每張的選用結果、替代影格、排除理由與時間戳。
+It decodes one sensor-oriented grayscale thumbnail at a time, at most 320 pixels on the long edge. It measures second differences relative to gradient energy and a 16×12 image signature. Only cameras within 4 cm, within 3° of full rotation, and with similar image signatures are treated as replaceable views; the view with stronger detail wins. Different viewpoints, baselines, content, and views lacking reliable sharpness measurements are retained. This conservative heuristic cannot detect every small occlusion; a textureless surface is not automatically blurry.
 
-原始 `images/` 仍保留全部照片，**訓練影像清單以 `sparse/0/images.bin` 為準**；自行重新掃描 images 資料夾建立資料集的工具，需使用報告中的 `selectedIDs` 同步篩選。
+An estimated motion value above 10 px does **not** by itself exclude an image or trigger a recapture banner. Report v3 separates:
 
-## 停止後的相機精修
+- **Weak measured detail:** retained views with valid positive detail evidence and capture sharpness, and a finite sharpness ratio below 0.5, receive a review/recapture message with frame IDs. This relative metric is not proof of optical blur.
+- **Motion estimate only:** available in the collapsed Capture quality information section in history; it does not claim a photo is blurry or request recapture by itself.
+- **Low texture / insufficient evidence:** informational, without a recapture banner.
 
-`OfflinePoseRefinement` 從磁碟逐張處理所有未標為幾何 drop 的深度影格，補足即時 worker 因忙碌略過的工作。使用 960px 縮圖，特徵座標換回原始像素，保持原始內參；LiDAR 提供公尺尺度的特徵位置。匹配包含 ZNCC、次佳比值、反向匹配、深度一致性及單幀 track 唯一性檢查。
+Older reports without these categories show an informational suggestion to optimize again, rather than reclassifying all legacy recapture IDs as blurry. Raw media, selected-image geometry, and depth support remain intact. This changes the warning policy; it does not deblur photos. Better light, shorter exposure, slower movement and turning, and genuinely clearer overlapping views are still needed for better source images.
 
-這是 **LiDAR 輔助的引導式匹配與局部 BA**，不是完整全域 SfM，也不假稱有任意大視角的迴環修正。沿路保留四個參考影格，加上最近四幀，可在仍有視覺重疊時連回較早觀測。
+`training-selection.json` records decisions, replacement frames, reasons, timestamps, and category IDs. All original photos remain in `images/`. **Use `sparse/0/images.bin` as the training-image list.** A trainer that rescans the entire images folder must also respect `selectedIDs`.
 
-- 一次一張灰階影像／深度；最多 8 幀參考描述子，另加正在處理的一幀。
-- 全段最多 180,000 筆緊湊觀測，每幀最多 128 筆，依掃描總長度調整預算，避免只留下尾段資料。
-- 目前每幀分配不足 40 筆（超過 4,500 個有效深度影格）時明確回報預算不足，保留原位姿。
-- BA 保留 20% tracks 不參與求解，保留觀測中位重投影殘差至少改善 3% 才套用；套用的就是被驗證的解，不再混入保留集重解。
-- 整組修正若任一幀移動超過 15cm 或旋轉超過 5°，整組退回，避免逐幀截斷後破壞驗證條件。
-- 取消、記憶體不足、匹配不足或驗證失敗均保留原位姿。`pose-refinement.json` 記錄處理數、觀測數、通過／失敗原因、保留觀測殘差與耗時。
+## Pose refinement after capture
 
-成功後用同一組位姿重新融合 LiDAR。新位姿不能和舊點雲直接混用，因此新掃描套用 BA 後不再混入未經相同修正的 ARKit mesh。若新掃描因記憶體不足退回即時點雲，影像位姿也退回錨點修正版本。歷史優化先在暫存目錄完成全部檔案，再發布新紀錄；不複製舊 Gaussian 模型或平面圖，避免它們與新位姿混用。
+`OfflinePoseRefinement` reads all non-dropped depth frames from disk, filling gaps left by the best-effort live worker. Features are extracted from 960-pixel thumbnails and mapped back to original pixels with original intrinsics. LiDAR supplies metric feature positions. Matching checks ZNCC, the second-best ratio, reverse matching, depth consistency, and per-frame track uniqueness.
 
-**無 LiDAR 資料可做照片挑選，但此輪新增的位置精修需要保存的 LiDAR 深度。** 不會把沒有執行的精修標成成功。既有相機模式重建流程保留。
+This is **LiDAR-guided matching and local BA**, not global SfM or unrestricted loop closure. Four retained route references plus the latest four frames allow connections to earlier observations when visual overlap remains.
 
-## 驗證與限制
+- One current grayscale image/depth and at most eight reference descriptor frames.
+- At most 180,000 compact observations overall and 128 per frame, with allocation adjusted to scan length.
+- Fewer than 40 observations per frame (over 4,500 eligible depth frames) explicitly reports insufficient budget and preserves poses.
+- 20% of tracks are held out from BA. The median held-out reprojection residual must improve by at least 3%; the validated solution is applied without refitting on the holdout set.
+- Any correction exceeding 15 cm or 5° rejects the entire solution. Clipping individual corrections would invalidate the holdout result.
+- Cancellation, memory pressure, insufficient matches, or failed validation preserve original poses. `pose-refinement.json` records counts, status, residuals, and timings.
 
-`tools/test_training_quality.swift` 涵蓋等價視角擇優、保留視差／不同內容、低紋理、原始檔不變、感測器方向、損毀深度、取消、1,000 幀處理及歷史優化發布／刪除。這個 1,000 幀案例使用重複的小型合成影像，驗證處理排程與容量限制，**不能當作大場景畫質或 iPhone 峰值記憶體量測**。既有 BA 合成測試另驗證已知位姿擾動及純雜訊案例。
+Successful poses are used to refusion LiDAR depth. New scans with applied BA do not mix in ARKit mesh that has not received the same correction. If memory pressure requires a live-preview fallback, image poses also revert to the anchor-corrected version. History optimization stages all files before publishing and omits old Gaussian models and floor plans that could disagree with new poses.
 
-使用同一份資料與固定 MrNeRF 設定，對原始／優化版本比較未參與訓練的視角、桌緣雙邊與文字細節。重投影改善不等於絕對公分精度，實際 3DGS 畫質仍需重訓比較。
+Camera-only scans can use photo selection; this pose-refinement pass requires saved LiDAR depth. It never reports success for work that did not run. The separate camera-only reconstruction pipeline remains available.
 
-## 逐張匹配加速與計時
+## Matching speed and timing
 
-- 角點結構張量、卷積與特徵值使用 Apple Accelerate；保留既有取樣解析度、門檻、NMS 和 patch 定義，避免為加速降低幾何檢查。
-- 參考影格的空間索引與反矩陣只建立一次；使用 track 集合取代線性搜尋。每幀完成後才回寫描述子，減少 Swift 陣列 copy-on-write。
-- 報告 v2 分開記錄 `decodeSeconds`、`featureExtractionSeconds`、`matchingSeconds`、`bundleAdjustmentSeconds`。精修失敗時區分觀測不足、驗證 tracks 不足、殘差未改善、修正過大及資源不足。
-- `tools/test_feature_response.swift` 對照原本的純量公式。在本次 Mac Debug 測試，960×720 角點核心約 0.524s → 0.004s，最大數值差 0.015625；這是核心運算的數字，**不是整段 iPhone 的加速倍率**。
-- 以原有 45 幀資料在 Mac 比較，加速前後皆產生 1,166 筆有效觀測、修正 14 幀，保留觀測中位數同為 5.107 → 4.788px。採集資料未修改，這也不是 3DGS 畫質改善幅度。
-- 整段演算法在 Debug 與 Release 的耗時仍會差很多；請用相同裝置、相同資料與相同建置設定比較。正在手機執行中的程序不會自動取得程式碼更新。
+- Apple Accelerate computes corner tensors, convolution, and eigenvalues while preserving resolution, thresholds, NMS, and patch definitions.
+- Reference spatial indices and inverse matrices are built once. Track sets replace linear searches; descriptors are written back after each frame to reduce array copy-on-write.
+- Pose report v2 splits `decodeSeconds`, `featureExtractionSeconds`, `matchingSeconds`, and `bundleAdjustmentSeconds`, with separate failure reasons.
+- Historical Mac Debug comparison: the 960×720 corner kernel took about 0.524 → 0.004 seconds, with maximum numerical difference 0.015625. This is a kernel measurement, not an iPhone end-to-end speedup.
+- A 45-frame Mac comparison preserved 1,166 observations, 14 corrected frames, and held-out median 5.107 → 4.788 px. This does not measure 3DGS image quality.
+- Compare on the same device, data, and build mode. An already-running phone process does not receive code updates automatically.
+
+## Validation and limits
+
+`tools/test_training_quality.swift` covers equivalent-view selection, parallax/content preservation, weak/motion-only/unknown evidence, legacy reports, immutable source files, sensor orientation, corrupt depth, cancellation, 1,000-frame processing, and optimized-copy publication/deletion. The 1,000-frame fixture repeats small synthetic images; it tests scheduling and capacity, not large-scene image quality or iPhone peak memory. BA tests separately exercise known pose perturbations and noise-only inputs.
+
+Compare original and optimized exports with fixed trainer settings and held-out views, especially double edges and text. Improved reprojection residuals do not establish absolute centimeter accuracy; 3DGS quality requires retraining and visual evaluation.
