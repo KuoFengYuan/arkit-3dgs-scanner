@@ -59,6 +59,12 @@ open arkit-3dgs-scanner.xcodeproj
 
 The interface supports Traditional Chinese (default) and English; switch languages on the home screen. Documentation is English first with a Traditional Chinese version of every page. The repository, Xcode project, and scheme are named `arkit-3dgs-scanner`. The app identifier remains `itri.fable` to preserve existing installations and scan data.
 
+## Interface and controls
+
+The home screen keeps scan history above an expandable first-scan guide. Before capture, open **Scan settings** for scrollable capture-mode, quality, camera, and coordinate-system sections. Surface reconstruction explicitly includes pose refinement; disable reconstruction first to configure refinement independently.
+
+Review screens keep quality details in a separate scrollable sheet so long diagnostics do not cover the point cloud. In history, **More actions** contains scene-scale validation, optimization, and deletion; the bottom button exports or shares the dataset. Delete still requires confirmation and removes the complete selected scan. Scan overlay tools have 44-point touch targets and spoken labels. All new controls are available in English and Traditional Chinese.
+
 ## Capture modes
 
 | Mode | Saved data and processing |

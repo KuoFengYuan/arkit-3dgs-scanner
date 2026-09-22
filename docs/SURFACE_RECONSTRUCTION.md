@@ -2,7 +2,7 @@
 
 **English** | [繁體中文](SURFACE_RECONSTRUCTION.zh-TW.md)
 
-The LiDAR capture settings include **Surface reconstruction (experimental)**, enabled initially. It includes camera refinement, even if the separate fine-scan toggle is off. Turn it off to compare with the existing voxel fusion; fine-scan feature refinement remains independently selectable. Camera-only capture is unchanged. History's Optimize Training Data action enables the new method and creates a separate result, preserving original images and depth.
+The LiDAR capture settings include **Surface reconstruction (experimental)**, enabled initially. It includes camera refinement. The fine-scan control shows this dependency and cannot be disabled independently while surface reconstruction is on. Turn it off to compare with the existing voxel fusion; fine-scan feature refinement remains independently selectable. Camera-only capture is unchanged. History's Optimize Training Data action enables the new method and creates a separate result, preserving original images and depth.
 
 ## Processing
 
