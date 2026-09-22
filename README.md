@@ -8,7 +8,8 @@ Capture photos, camera poses, and point clouds with ARKit. Refine the data on yo
 
 - **Optional LiDAR:** fuse sensor depth or capture with RGB and verified sparse features.
 - **On-device data refinement:** image selection, validated camera pose refinement, and multi-view depth fusion.
-- **Review before export:** inspect point clouds, replay photos along the camera route, and continue an active scan to fill gaps.
+- **Review before export:** inspect point clouds, replay the capture route in first person, and continue an active scan to fill gaps.
+- **Visible processing:** a bilingual, dark fusion progress page with real stages, elapsed time, and a lightweight particle animation.
 - **COLMAP export:** calibrated images, camera poses, and initialization points in `images/ + sparse/0`.
 
 The app handles capture and dataset preparation. **On-device Gaussian Splatting training has been removed.** Training runs in an external tool; scanning, refinement, and preview stay on the phone.
@@ -21,6 +22,8 @@ Scan → Refine → Review point cloud → Export COLMAP ZIP → External 3DGS t
 
 Scan history → Photo / point-cloud / route preview → Refine a copy, export, or delete
 ```
+
+See [fusion progress, first-person review, and export safeguards](docs/FUSION_REVIEW.md).
 
 ## Features
 

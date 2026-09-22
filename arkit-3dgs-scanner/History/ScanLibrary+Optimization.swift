@@ -33,7 +33,7 @@ extension ScanLibrary {
                 progress(L10n.text("用修正後位置重融合深度…"), 0.45)
                 let cfg = CaptureConfig()
                 let fusion = RefusionEngine.refuseWithReport(records: outputRecords, sessionDir: source, config: cfg,
-                    meshVertices: [], target: cfg.exportMaxPoints, isCancelled: { Task.isCancelled },
+                    meshVertices: [], target: cfg.exportMaxPoints, diagnosticsDirectory: staging, isCancelled: { Task.isCancelled },
                     progress: { progress(L10n.text("用修正後位置重融合深度…"), 0.45 + $0 * 0.4) })
                 try Task.checkCancellation()
                 guard fusion.report.status != "memoryPressure", !fusion.points.isEmpty else {

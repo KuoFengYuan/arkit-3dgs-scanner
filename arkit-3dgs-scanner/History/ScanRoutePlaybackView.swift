@@ -96,7 +96,7 @@ struct ScanRoutePlaybackView: View {
                                      highlightedPose: displayedFrame?.pose, resetCameraToken: resetCameraToken,
                                      followsHighlightedPose: following, isPlaying: playing,
                                      followTransitionDuration: ScanPlaybackTiming.transitionDuration(fps: playbackFPS))
-                    .accessibilityLabel(L10n.text("拍攝路線點雲；橘色標記為目前影像的相機位置與方向"))
+                    .accessibilityLabel(L10n.text("拍攝路線點雲；第一人稱同步影像位置，總覽顯示橘色相機標記"))
             }
         }
         .overlay(alignment: .topLeading) { badge(preview.points.isEmpty ? L10n.text("拍攝路線") : L10n.text("點雲與路線"), icon: "view.3d") }
@@ -107,7 +107,7 @@ struct ScanRoutePlaybackView: View {
                         .foregroundStyle(following ? Color.orange : .white)
                         .frame(width: 44, height: 44)
                 }
-                .accessibilityLabel(following ? L10n.text("停止跟隨拍攝位置") : L10n.text("跟隨拍攝位置"))
+                .accessibilityLabel(following ? L10n.text("離開第一人稱") : L10n.text("第一人稱視角"))
                 .accessibilityValue(following ? L10n.text("已開啟") : L10n.text("已關閉"))
                 Button { playing = false; following = false; resetCameraToken += 1 } label: {
                     Image(systemName: "scope").frame(width: 44, height: 44)
@@ -122,7 +122,7 @@ struct ScanRoutePlaybackView: View {
             .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 12)).padding(8)
         }
         .overlay(alignment: .bottomLeading) {
-            Text(displayedFrame?.pose == nil ? L10n.text("此影像沒有對應位置") : (following ? L10n.text("自動跟隨拍攝位置與方向") : L10n.text("橘色：目前視角 · 綠色：拍攝路線")))
+            Text(displayedFrame?.pose == nil ? L10n.text("此影像沒有對應位置") : (following ? L10n.text("第一人稱 · 同步拍攝位置與方向") : L10n.text("橘色：目前視角 · 綠色：拍攝路線")))
                 .font(.caption2).foregroundStyle(.white)
                 .padding(8).background(.black.opacity(0.65), in: Capsule()).padding(8)
                 .allowsHitTesting(false)

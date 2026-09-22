@@ -157,6 +157,7 @@ nonisolated struct FusedVoxelGrid {
             // Mobile path: no duplicate candidate buckets or concurrent dictionary expansion.
             // Check capacity every 1,024 points instead of overshooting by a whole mesh frame.
             for (index, pt) in candidates.enumerated() {
+                guard pt.score.isFinite else { continue }
                 if let key = PointCloudMath.voxelKey(SIMD3(pt.x, pt.y, pt.z), size: voxelSize) {
                     let s = shardIndex(key)
                     let pos = SIMD3<Float>(pt.x, pt.y, pt.z)
@@ -191,6 +192,7 @@ nonisolated struct FusedVoxelGrid {
         let guess = candidates.count / n + 8
         for i in 0..<n { byShard[i].reserveCapacity(guess) }
         for pt in candidates {
+            guard pt.score.isFinite else { continue }
             guard let key = PointCloudMath.voxelKey(SIMD3<Float>(pt.x, pt.y, pt.z),
                                                     size: voxelSize) else { continue }
             byShard[shardIndex(key)].append((key, pt))
@@ -305,6 +307,76 @@ nonisolated struct FusedVoxelGrid {
         return out
     }()
 
+    /// Filter into one bit per cell, then consume shards while materializing the bounded output.
+    /// Sampling AFTER rejection preserves the requested density when many cells are isolated.
+    /// A nil result means cancellation/pressure: never publish a partial cloud as successful.
+    mutating func consumeExportPoints(target: Int, minNeighbors: Int,
+                                      shouldContinue: () -> Bool,
+                                      progress: (Double) -> Void) -> [CloudPoint]? {
+        guard shouldContinue() else { return nil }
+        guard target > 0, count > 0 else { return [] }
+        let total = count
+        var accepted = [[UInt64]]()
+        var eligible = 0, visited = 0
+        for shard in shards {
+            var bits = [UInt64](repeating: 0, count: (shard.count + 63) / 64)
+            for (index, entry) in shard.enumerated() {
+                if visited % 4096 == 0 {
+                    guard shouldContinue() else { return nil }
+                    progress(Double(visited) / Double(total) * 0.5)
+                }
+                visited += 1
+                let cell = entry.value
+                guard cell.color.x.isFinite, cell.color.y.isFinite, cell.color.z.isFinite,
+                      cell.mean.x.isFinite, cell.mean.y.isFinite, cell.mean.z.isFinite,
+                      cell.weight.isFinite, cell.bestScore.isFinite else { continue }
+                var neighbors = 0
+                if minNeighbors > 0 {
+                    let center = PointCloudMath.cellCenter(entry.key, size: voxelSize)
+                    for offset in Self.neighborOffsets {
+                        if let key = PointCloudMath.voxelKey(center + offset * voxelSize, size: voxelSize),
+                           shards[shardIndex(key)][key] != nil {
+                            neighbors += 1
+                            if neighbors >= minNeighbors { break }
+                        }
+                    }
+                }
+                guard neighbors >= minNeighbors else { continue }
+                bits[index / 64] |= UInt64(1) << (index % 64)
+                eligible += 1
+            }
+            accepted.append(bits)
+        }
+        guard shouldContinue() else { return nil }
+        let limit = min(target, eligible)
+        var output: [CloudPoint] = []
+        output.reserveCapacity(limit)
+        var selected = 0
+        visited = 0
+        func color(_ value: Float) -> UInt8 { UInt8(min(255, max(0, value))) }
+        for shardIndex in shards.indices {
+            // Dictionary order is stable until mutation; acceptance bits belong to this snapshot.
+            for (index, cell) in shards[shardIndex].values.enumerated() {
+                if visited % 4096 == 0 {
+                    guard shouldContinue() else { return nil }
+                    progress(0.5 + Double(visited) / Double(total) * 0.5)
+                }
+                visited += 1
+                guard accepted[shardIndex][index / 64] & (UInt64(1) << (index % 64)) != 0 else { continue }
+                let before = selected * limit / max(1, eligible)
+                selected += 1
+                guard selected * limit / max(1, eligible) > before else { continue }
+                output.append(CloudPoint(x: cell.mean.x, y: cell.mean.y, z: cell.mean.z,
+                    r: color(cell.color.x), g: color(cell.color.y), b: color(cell.color.z),
+                    score: cell.bestScore * min(1, cell.weight / 1.5)))
+            }
+            shards[shardIndex] = [:]
+            accepted[shardIndex] = []
+        }
+        progress(1)
+        return output
+    }
+
     /// 匯出：孤立點移除（飄浮雜點）+ 單次觀測降權，再分層擇優到 target。
     /// minNeighbors>0 時，26 鄰域占據數不足的 voxel 視為雜訊剔除。
     func exportPoints(target: Int, minNeighbors: Int, boundedMemory: Bool = false) -> [CloudPoint] {
@@ -412,7 +484,7 @@ nonisolated enum RefusionEngine {
     }
 
     struct Report: Codable, Sendable {
-        var version = 3
+        var version = 4
         var status = "running"
         var stage = "frames"
         var totalFrames = 0
@@ -425,6 +497,8 @@ nonisolated enum RefusionEngine {
         var boundedExport = false
         var finalVoxelSizeM: Float = 0
         var effectiveOutputLimit = 0
+        var exportFraction: Double?
+        var exportSeconds: Double?
         var depthCacheHits = 0
         var depthCacheLoads = 0
         var depthCachePeakBytes = 0
@@ -440,6 +514,7 @@ nonisolated enum RefusionEngine {
     /// availableMemory is injectable to reproduce pressure appearing midway through a scan.
     static func refuseWithReport(records: [FrameRecord], sessionDir: URL, config: CaptureConfig,
                                  meshVertices: [SIMD3<Float>] = [], target: Int? = nil,
+                                 diagnosticsDirectory: URL? = nil,
                                  availableMemory: () -> UInt64? = { availableMemoryBytes },
                                  isCancelled: () -> Bool = { false },
                                  progress: @Sendable (Double) -> Void) -> Result {
@@ -449,7 +524,7 @@ nonisolated enum RefusionEngine {
         func persistReport() {
             do {
                 let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                try encoder.encode(report).write(to: sessionDir.appendingPathComponent("refusion-progress.json"), options: .atomic)
+                try encoder.encode(report).write(to: (diagnosticsDirectory ?? sessionDir).appendingPathComponent("refusion-progress.json"), options: .atomic)
             } catch { print("融合診斷儲存失敗：\(error.localizedDescription)") }
         }
         func memorySnapshot() -> UInt64? {
@@ -463,6 +538,7 @@ nonisolated enum RefusionEngine {
             ? max(0, min(target ?? config.exportMaxPoints, config.exportMaxPoints))
             : max(0, target ?? config.exportMaxPoints)
         report.effectiveOutputLimit = outputLimit
+        report.boundedExport = boundedMemory
         let initialLimit = initialMemory.map {
             min(cellBudget(configured: config.refuseMaxCells, availableBytes: $0),
                 workingSetCellLimit(megabytes: config.refuseMemoryBudgetMB))
@@ -633,7 +709,8 @@ nonisolated enum RefusionEngine {
             if i % 8 == 0 || i == records.count - 1 { persistReport() }
             progress(Double(i + 1) / Double(total) * 0.9)
         }
-        report.stage = "export"
+        report.stage = "exportFilter"
+        report.finalVoxelSizeM = grid.voxelSize
         depthCache.clear()
         persistReport()
         if isCancelled() { return interrupted(status: "cancelled") }
@@ -654,9 +731,28 @@ nonisolated enum RefusionEngine {
         let tE = Date()
         // On device, use a bounded pass rather than a full cloud + downsampling dictionary.
         report.boundedExport = boundedMemory
-        let out = grid.exportPoints(target: outputLimit,
-                                    minNeighbors: config.refuseMinNeighbors,
-                                    boundedMemory: report.boundedExport)
+        let out: [CloudPoint]
+        if boundedMemory {
+            var interruptedStatus = "memoryPressure"
+            var lastPersisted = -1
+            guard let exported = grid.consumeExportPoints(target: outputLimit,
+                minNeighbors: config.refuseMinNeighbors, shouldContinue: {
+                    if isCancelled() { interruptedStatus = "cancelled"; return false }
+                    if let bytes = memorySnapshot(), shouldStopForMemory(availableBytes: bytes) { return false }
+                    return true
+                }, progress: { fraction in
+                    report.exportFraction = fraction
+                    report.stage = fraction < 0.5 ? "exportFilter" : "exportPoints"
+                    report.exportSeconds = Date().timeIntervalSince(tE)
+                    let bucket = Int(fraction * 10)
+                    if bucket != lastPersisted { persistReport(); lastPersisted = bucket }
+                    progress(0.9 + fraction * 0.1)
+                }) else { return interrupted(status: interruptedStatus) }
+            out = exported
+        } else {
+            out = grid.exportPoints(target: outputLimit, minNeighbors: config.refuseMinNeighbors)
+        }
+        report.exportSeconds = Date().timeIntervalSince(tE)
         print(String(format: "  匯出擇優 %.2fs（%d 格 → %d 點）",
                      Date().timeIntervalSince(tE), rawCells, out.count))
         var msg = "Refusion: \(records.count) frames"
@@ -680,7 +776,7 @@ nonisolated enum RefusionEngine {
         report.status = "completed"
         report.stage = "finished"
         report.outputPoints = out.count
-        report.finalVoxelSizeM = grid.voxelSize
+        report.finalVoxelSizeM = gridVoxel
         persistReport()
         progress(1)
         return Result(points: out, report: report)

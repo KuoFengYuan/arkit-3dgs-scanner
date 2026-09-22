@@ -22,7 +22,15 @@ struct CaptureView: View {
                     .ignoresSafeArea()
                     .id(controller.reviewPoints.count)   // 續掃後重新處理 → 重建場景
             }
-            HUDOverlay(controller: controller)
+            if controller.phase == .processing {
+                FusionProcessingView(progress: controller.exportProgress,
+                                     stage: controller.processingStage,
+                                     detail: controller.statusText,
+                                     frameCount: controller.keyframeCount,
+                                     startedAt: controller.processingStartedAt)
+            } else {
+                HUDOverlay(controller: controller)
+            }
         }
         .statusBarHidden()
         // 平面圖用獨立頁面而非疊層：它的資訊與操作跟點雲檢視完全不同一組，

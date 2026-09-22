@@ -114,13 +114,18 @@ actor ScanLibrary {
             .map { RefusionEngine.float4x4(rowMajor: $0.transform) }
         let frames = Self.playbackFrames(images: images, records: records)
         var note: String?
+        if let data = try? Data(contentsOf: directory.appendingPathComponent("refusion-progress.json")),
+           let report = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           let status = report["status"] as? String, status != "completed" {
+            note = L10n.text("上次精細融合未完成，目前顯示備援預覽。照片與深度仍保留，可使用「優化訓練資料」重新處理。")
+        }
         for name in hasNewFrames ? [] : ["review.ply", "points.ply"] {
             let url = directory.appendingPathComponent(name)
             guard fm.fileExists(atPath: url.path) else { continue }
             do {
                 let points = try Self.readPLY(url, limit: 120_000)
                 return ScanPreview(points: points, trajectory: trajectory, images: images,
-                                   note: points.isEmpty ? L10n.text("這次掃描沒有可預覽的點雲，仍可查看拍攝影像。") : nil, playbackFrames: frames)
+                                   note: points.isEmpty ? L10n.text("這次掃描沒有可預覽的點雲，仍可查看拍攝影像。") : note, playbackFrames: frames)
             } catch {
                 note = L10n.text("既有點雲無法讀取，嘗試從原始深度重建預覽。")
             }
