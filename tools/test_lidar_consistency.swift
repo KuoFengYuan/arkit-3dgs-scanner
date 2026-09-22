@@ -195,7 +195,7 @@ import ImageIO
         memorySamples = 0
         let exportStop = RefusionEngine.refuseWithReport(records: records, sessionDir: dir, config: enabled,
             availableMemory: { memorySamples += 1; return memorySamples <= 11 ? 512 * mib : 80 * mib }, progress: { _ in })
-        check(exportStop.report.status == "memoryPressure" && exportStop.report.stage == "export" && exportStop.report.completedFrames == 5,
+        check(exportStop.report.status == "memoryPressure" && exportStop.report.stage == "exportFilter" && exportStop.report.boundedExport && exportStop.report.completedFrames == 5,
               "pressure before output allocation also takes the safe fallback")
         memorySamples = 0
         let afterDecode = RefusionEngine.refuseWithReport(records: records, sessionDir: dir, config: enabled,

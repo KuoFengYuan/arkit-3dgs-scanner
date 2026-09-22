@@ -65,8 +65,8 @@ struct ReviewPointCloudView: UIViewRepresentable {
             view.allowsCameraControl = true
             return
         }
-        // 播放時由資料驅動視角；暫停後仍可手動查看附近的點雲。
-        view.allowsCameraControl = !isPlaying
+        // 第一人稱與顯示影格鎖定；切換總覽後才啟用軌道相機。
+        view.allowsCameraControl = false
         let samePose = coordinator.lastFollowedPose.map { previous in
             (0..<4).allSatisfy { previous[$0] == pose[$0] }
         } ?? false
@@ -84,6 +84,7 @@ struct ReviewPointCloudView: UIViewRepresentable {
         SCNTransaction.animationDuration = animated && coordinator.wasFollowing ? followTransitionDuration : 0
         SCNTransaction.disableActions = !animated || !coordinator.wasFollowing
         camera.simdTransform = follow.transform
+        camera.camera?.zNear = 0.02
         SCNTransaction.commit()
         view.defaultCameraController.target = SCNVector3(follow.target)
         coordinator.lastFollowedPose = pose
@@ -92,7 +93,7 @@ struct ReviewPointCloudView: UIViewRepresentable {
 
     private func updateHighlight(in view: SCNView) {
         guard let marker = view.scene?.rootNode.childNode(withName: "selectedCamera", recursively: false) else { return }
-        marker.isHidden = highlightedPose == nil
+        marker.isHidden = highlightedPose == nil || followsHighlightedPose
         if let highlightedPose { marker.simdTransform = highlightedPose }
     }
 

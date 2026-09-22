@@ -10,7 +10,8 @@ import Foundation
         let fm = FileManager.default, source = URL(fileURLWithPath: CommandLine.arguments[1])
         let output = URL(fileURLWithPath: CommandLine.arguments[2])
         guard !fm.fileExists(atPath: output.path) else { print("Output must not exist"); exit(2) }
-        var records = ScanLibrary.readRecords(source.appendingPathComponent("review-poses.jsonl"))
+        var records = ScanLibrary.readRecords(source.appendingPathComponent("fusion-input-poses.jsonl"))
+        if records.isEmpty { records = ScanLibrary.readRecords(source.appendingPathComponent("review-poses.jsonl")) }
         if records.isEmpty { records = ScanLibrary.readRecords(source.appendingPathComponent("poses.jsonl")) }
         guard !records.isEmpty else { print("No records"); exit(2) }
         try fm.createDirectory(at: output, withIntermediateDirectories: true)

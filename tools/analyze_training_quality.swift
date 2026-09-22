@@ -16,8 +16,9 @@ import Foundation
         guard !records.isEmpty else { print("No pose records"); exit(1) }
         let selection = TrainingFrameSelector.select(records,
             evidence: TrainingFrameSelector.evidence(records: records, directory: source))
-        let result = await OfflinePoseRefinement.run(records: records, directory: source, rounds: 6)
+        let result = await OfflinePoseRefinement.run(records: BlurFilter.annotate(records), directory: source, rounds: 6)
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        try ExportManager.writeRefinedPoses(BlurFilter.annotate(result.records), to: output.appendingPathComponent("fusion-input-poses.jsonl"))
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(selection).write(to: output.appendingPathComponent("training-selection.json"))
         try encoder.encode(result.report).write(to: output.appendingPathComponent("pose-refinement.json"))

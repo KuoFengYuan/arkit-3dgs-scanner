@@ -72,6 +72,8 @@ final class CaptureController: NSObject, ObservableObject {
     /// 由 QualityMonitor 的清晰度閘門（直接量影像，不是推估）擋掉，不讓它們變成關鍵幀。
     @Published var lockCameraParams = true
     @Published var exportProgress: Double = 0
+    @Published var processingStage: ScanProcessingStage = .preparing
+    @Published var processingStartedAt = Date()
     /// Review 階段顯示（＝實際將匯出）的重融合點雲與修正後軌跡
     @Published var reviewPoints: [CloudPoint] = []
     @Published var reviewTrajectory: [simd_float4x4] = []
@@ -410,6 +412,8 @@ final class CaptureController: NSObject, ObservableObject {
         fusionCancel.cancel()
         fusionCancel = CancelFlag()
         phase = .processing
+        processingStage = .preparing
+        processingStartedAt = Date()
         previewRenderTask?.cancel()
         exportProgress = 0
         statusText = L10n.text("正在儲存最後的影像…")
@@ -522,12 +526,13 @@ final class CaptureController: NSObject, ObservableObject {
         // 先前進度條只由重融合的回呼驅動，而重融合是**最後**一段 ——
         // 前面三段使用者看到的是一條靜止在 0% 的進度條，那比沒有進度條更像卡住。
         // 權重是暫定的：真實比例要等新的分段計時（見下方 mark）跑過實機才知道。
-        func stage(_ text: String, _ base: Double) {
+        func stage(_ text: String, _ base: Double, _ step: ScanProcessingStage) {
+            processingStage = step
             statusText = text
-            exportProgress = base
+            exportProgress = max(exportProgress, base)
         }
 
-        stage(L10n.text("讀取關鍵幀…"), 0)
+        stage(L10n.text("讀取關鍵幀…"), 0, .preparing)
         let raw = await writer.snapshotRecords()
         guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
         if !raw.isEmpty {
@@ -563,7 +568,7 @@ final class CaptureController: NSObject, ObservableObject {
         mark("停止收尾與讀取關鍵幀")
         let anchorCorrectedRecords = refinedRecords
         if config.baRounds > 0 {
-            stage(L10n.text("逐張匹配拍攝影像…"), 0.10)
+            stage(L10n.text("逐張匹配拍攝影像…"), 0.10, .aligning)
             let records = BlurFilter.annotate(refinedRecords)
             let rounds = config.baRounds
             // The live worker is best-effort; release it and rebuild tracks from ALL saved
@@ -571,7 +576,7 @@ final class CaptureController: NSObject, ObservableObject {
             await featureTracker.reset()
             let onProgress: @Sendable (Double) -> Void = { p in
                 Task { @MainActor [weak self] in
-                    guard let self, self.phase == .processing, self.scanGeneration == generation else { return }
+                    guard let self, self.phase == .processing, self.processingStage == .aligning, self.scanGeneration == generation else { return }
                     self.exportProgress = 0.10 + p * 0.24
                     self.statusText = p < 0.85 ? L10n.text("逐張匹配拍攝影像… \(Int(p / 0.85 * 100))%") : L10n.text("驗證相機位置修正…")
                 }
@@ -595,7 +600,7 @@ final class CaptureController: NSObject, ObservableObject {
         // 的鄰居，用未修正的姿態會找錯鄰居。判定寫回紀錄而非直接刪除，
         // poses_refined.jsonl 與 images/ 都保留完整，可回頭檢查判定對不對。
         mark("位姿校正")
-        stage(L10n.text("複核模糊幀…"), 0.35)
+        stage(L10n.text("複核模糊幀…"), 0.35, .checking)
         let recordsToCheck = refinedRecords
         let annotated = await Task.detached(priority: .userInitiated) {
             BlurFilter.annotate(recordsToCheck)
@@ -611,7 +616,7 @@ final class CaptureController: NSObject, ObservableObject {
 
         mark("模糊複核")
         if hasLiDAR, config.captureFloorPlan, FloorPlanCapture.isSupported {
-            stage(L10n.text("建立空間結構…"), 0.40)
+            stage(L10n.text("建立空間結構…"), 0.40, .checking)
             let plan = await floorPlan.build()
             guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
             if let plan, !plan.walls.isEmpty {
@@ -624,14 +629,17 @@ final class CaptureController: NSObject, ObservableObject {
         var points: [CloudPoint] = []
         var fusionInterrupted = false
         if hasLiDAR && config.saveDepth && !refinedRecords.isEmpty {
-            stage(L10n.text("融合點雲…"), 0.45)
+            stage(L10n.text("融合點雲…"), 0.45, .fusing)
             let records = refinedRecords
             let cfg = config
             // 重融合佔進度條的後 55%（前面三段各自佔一段，見 stage）
             let onProg: @Sendable (Double) -> Void = { p in
                 Task { @MainActor [weak self] in
-                    guard let self, self.phase == .processing, self.scanGeneration == generation else { return }
-                    self.exportProgress = 0.45 + p * 0.50
+                    guard let self, self.phase == .processing, self.processingStage == .fusing, self.scanGeneration == generation else { return }
+                    self.exportProgress = max(self.exportProgress, 0.45 + p * 0.50)
+                    self.statusText = p < 0.9
+                        ? L10n.text("融合點雲… \(min(records.count, Int((p / 0.9 * Double(records.count)).rounded()))) / \(records.count) 幀")
+                        : L10n.text("篩選並儲存融合點雲…")
                 }
             }
             let mesh = (config.baApplyPoses && !(baResult?.poses.isEmpty ?? true)) ? [] : meshVertices
@@ -639,7 +647,10 @@ final class CaptureController: NSObject, ObservableObject {
             // Do not materialize a 2M-point plan cloud plus a second downsampling dictionary.
             let needsDensePlan = config.pointCloudFloorPlan && floorPlanData == nil
             let result = await Task.detached(priority: .userInitiated) {
-                RefusionEngine.refuseWithReport(records: records, sessionDir: dir, config: cfg,
+                // Persist the actual input poses separately from the live fallback cloud.
+                // A failed fusion must not make review.ply use a different camera coordinate set.
+                try? ExportManager.writeRefinedPoses(records, to: dir.appendingPathComponent("fusion-input-poses.jsonl"))
+                return RefusionEngine.refuseWithReport(records: records, sessionDir: dir, config: cfg,
                                       meshVertices: mesh,
                                       target: cfg.exportMaxPoints,
                                       isCancelled: { cancel.isCancelled },
@@ -657,7 +668,7 @@ final class CaptureController: NSObject, ObservableObject {
             } else {
                 let dense = result.points
                 if needsDensePlan, RefusionEngine.hasOptionalProcessingHeadroom {
-                    stage(L10n.text("建立平面圖…"), 0.96)
+                    stage(L10n.text("建立平面圖…"), 0.96, .finalizing)
                     await usePointCloudPlan(dense)
                 }
                 guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
@@ -665,12 +676,12 @@ final class CaptureController: NSObject, ObservableObject {
             }
         }
         if !hasLiDAR && config.reconstructFromImages {
-            stage(L10n.text("影像多視角重建…"), 0.45)
+            stage(L10n.text("影像多視角重建…"), 0.45, .fusing)
             let records = refinedRecords, cfg = config
             let onProgress: @Sendable (Double) -> Void = { p in
                 Task { @MainActor [weak self] in
-                    guard let self, self.phase == .processing else { return }
-                    self.exportProgress = 0.45 + p * 0.55
+                    guard let self, self.phase == .processing, self.processingStage == .fusing, self.scanGeneration == generation else { return }
+                    self.exportProgress = max(self.exportProgress, 0.45 + p * 0.50)
                 }
             }
             let result = await Task.detached(priority: .userInitiated) {
@@ -708,7 +719,7 @@ final class CaptureController: NSObject, ObservableObject {
               + seg.map { String(format: "%@ %.2fs", $0.0, $0.1) }.joined(separator: " + ")
               + "（含停止收尾；重融合段含已執行的平面圖，尚未計入最後歷史存檔）")
 
-        stage(L10n.text("挑選訓練影像…"), 0.98)
+        stage(L10n.text("挑選訓練影像…"), 0.98, .finalizing)
         let selectionRecords = refinedRecords
         let selection = await Task.detached(priority: .utility) {
             TrainingFrameSelector.select(selectionRecords,
@@ -743,6 +754,7 @@ final class CaptureController: NSObject, ObservableObject {
                 try encoder.encode(performance).write(to: dir.appendingPathComponent("preview-performance.json"), options: .atomic)
             } catch { print("預覽效能報告儲存失敗：\(error.localizedDescription)") }
         }
+        stage(L10n.text("儲存掃描成果…"), 0.99, .finalizing)
         reviewTrajectory = refinedRecords.map { RefusionEngine.float4x4(rowMajor: $0.transform) }
         pointCount = points.count
         do {

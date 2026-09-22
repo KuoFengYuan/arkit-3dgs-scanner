@@ -319,3 +319,53 @@
 "點雲與路線" = "Point cloud and path";
 "（3DGS 那種繞著物件拍的路徑產生不出完整的牆）" = "(Circling an object for 3DGS does not capture complete walls.)";
 "（RoomPlan 需要沿牆掃一圈，" = "(RoomPlan needs a walk along the walls; ";
+
+"離開第一人稱" = "Leave first-person view";
+
+"第一人稱視角" = "First-person view";
+
+"第一人稱 · 同步拍攝位置與方向" = "First person · Synced camera position and direction";
+
+"拍攝路線點雲；第一人稱同步影像位置，總覽顯示橘色相機標記" = "Capture route point cloud; first person follows the photo position, overview shows an orange camera marker";
+
+"空間重建" = "SPATIAL RECONSTRUCTION";
+
+"裝置端處理" = "ON DEVICE";
+
+"正在合成你的空間" = "Building your space";
+
+"將拍攝視角與深度逐步融合為 3D 點雲" = "Bringing your views and depth together into a 3D point cloud";
+
+"整體進度 %" = "TOTAL PROGRESS %";
+
+"處理進度" = "Processing progress";
+
+"已用時間" = "Elapsed time";
+
+"階段 %@ / %@" = "Stage %@ / %@";
+
+"保存拍攝資料" = "Save capture data";
+
+"對齊相機視角" = "Align camera views";
+
+"檢查影像品質" = "Check image quality";
+
+"融合空間點雲" = "Fuse the point cloud";
+
+"整理掃描成果" = "Prepare scan results";
+
+"處理中" = "IN PROGRESS";
+
+"已完成" = "COMPLETE";
+
+"請保持 App 開啟。照片越多，處理時間越長；完成後會自動顯示預覽。" = "Keep the app open. Larger scans take longer; your preview will appear when processing finishes.";
+
+"融合點雲… %@ / %@ 幀" = "Fusing point cloud… %@ / %@ frames";
+
+"篩選並儲存融合點雲…" = "Filtering and saving the fused point cloud…";
+
+"儲存掃描成果…" = "Saving scan results…";
+
+"上次精細融合未完成，目前顯示備援預覽。照片與深度仍保留，可使用「優化訓練資料」重新處理。" = "The previous fusion did not finish. This is a fallback preview; photos and depth remain available. Use Refine training data to process them again.";
+
+"融合點雲… 176 / 399 幀" = "Fusing point cloud… 176 / 399 frames";

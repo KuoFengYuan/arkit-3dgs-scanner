@@ -8,8 +8,9 @@ struct PlaybackCameraTests {
         let original = PlaybackCameraPose.following(matrix_identity_float4x4)!
         let viewDirection = -xyz(original.transform.columns.2)
         precondition(simd_dot(viewDirection, simd_normalize(original.target - xyz(original.transform.columns.3))) > 0.9999)
-        precondition(simd_dot(viewDirection, -xyz(original.transform.columns.3)) > 0)
-        print("PASS: 跟隨相機朝向拍攝前方，目前拍攝位置位於視野前方")
+        precondition(near(xyz(original.transform.columns.3), .zero))
+        precondition(near(viewDirection, SIMD3<Float>(0, 0, -1)))
+        print("PASS: 跟隨相機朝向拍攝前方，視點就是拍攝位置，不再有後方偏移")
 
         var translated = matrix_identity_float4x4
         let offset = SIMD3<Float>(10, -3, 7)
@@ -33,6 +34,12 @@ struct PlaybackCameraTests {
             precondition(abs(simd_determinant(simd_float3x3(columns: (x, y, z))) - 1) < 0.0001)
         }
         print("PASS: 垂直仰拍／俯拍保持有限正交相機姿態，不產生無效視角")
+
+        let portrait = simd_float4x4(simd_quatf(angle: -.pi / 2, axis: SIMD3<Float>(0, 0, 1)))
+        let upright = PlaybackCameraPose.following(portrait)!
+        precondition(near(xyz(upright.transform.columns.1), SIMD3<Float>(0, 1, 0)))
+        precondition(near(-xyz(upright.transform.columns.2), SIMD3<Float>(0, 0, -1)))
+        print("PASS: 直式感光元件姿態以重力轉正，仍朝相同方向")
 
         var bad = matrix_identity_float4x4; bad.columns.3.x = .nan
         precondition(PlaybackCameraPose.following(bad) == nil)
