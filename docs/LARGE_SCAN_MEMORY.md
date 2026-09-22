@@ -48,7 +48,7 @@
 
 ```sh
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
-  fable/Capture/{Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,PointCloudFusion}.swift \
+  arkit-3dgs-scanner/Capture/{Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,PointCloudFusion}.swift \
   tools/test_large_scan_memory.swift -o /tmp/fable-large-scan-test
 /usr/bin/time -l /tmp/fable-large-scan-test
 ```

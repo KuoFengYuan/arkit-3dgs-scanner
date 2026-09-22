@@ -1,4 +1,4 @@
-// swiftc -O fable/Capture/{Models,BlurFilter,CaptureConfig,Utils,SmartShutter,DepthSampleFilter,CameraOnlyGeometry,SparseLandmarkFilter}.swift tools/test_camera_only_accuracy.swift -o /tmp/camera-accuracy && /tmp/camera-accuracy
+// swiftc -O arkit-3dgs-scanner/Capture/{Models,BlurFilter,CaptureConfig,Utils,SmartShutter,DepthSampleFilter,CameraOnlyGeometry,SparseLandmarkFilter}.swift tools/test_camera_only_accuracy.swift -o /tmp/camera-accuracy && /tmp/camera-accuracy
 import Foundation
 import simd
 

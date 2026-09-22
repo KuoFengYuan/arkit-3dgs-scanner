@@ -6,9 +6,9 @@
 //  或想在桌機上調參數看效果，不必每次重掃。
 //  跑的是**與 App 完全同一份** PointCloudFloorPlan，所以結果一致。
 //
-//    swiftc -O -o /tmp/ply2plan fable/Capture/FloorPlanData.swift \
-//           fable/Capture/FloorPlanDrawing.swift \
-//           fable/Capture/PointCloudFloorPlan.swift fable/Capture/FloorPlanDXF.swift \
+//    swiftc -O -o /tmp/ply2plan arkit-3dgs-scanner/Capture/FloorPlanData.swift \
+//           arkit-3dgs-scanner/Capture/FloorPlanDrawing.swift \
+//           arkit-3dgs-scanner/Capture/PointCloudFloorPlan.swift arkit-3dgs-scanner/Capture/FloorPlanDXF.swift \
 //           tools/ply_to_floorplan.swift
 //    /tmp/ply2plan <scan_dir>          # 就地覆寫 floorplan_pc.{svg,dxf,json}
 //

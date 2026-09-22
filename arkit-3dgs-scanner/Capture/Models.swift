@@ -54,7 +54,37 @@ nonisolated struct FrameRecord: Codable, Sendable {
     var depthHeight: Int?
 }
 
-/// meta.json：一次掃描的全域資訊，Python 端據此判斷座標慣例與深度格式
+/// Scan metadata has a capture-specific name so trainer format detection ignores it.
+/// Legacy scans remain readable; export migrates the filename without changing its bytes.
+nonisolated enum CaptureMetadata {
+    static let fileName = "capture-meta.json"
+    static let legacyFileName = "meta.json"
+
+    static func existingURL(in directory: URL) -> URL? {
+        for name in [fileName, legacyFileName] {
+            let url = directory.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: url.path) { return url }
+        }
+        return nil
+    }
+
+    static func data(in directory: URL) -> Data? {
+        existingURL(in: directory).flatMap { try? Data(contentsOf: $0) }
+    }
+
+    static func migrateLegacyFile(in directory: URL) throws {
+        let fm = FileManager.default
+        let legacy = directory.appendingPathComponent(legacyFileName)
+        guard fm.fileExists(atPath: legacy.path) else { return }
+        let current = directory.appendingPathComponent(fileName)
+        // Preserve both versions on collision; the current name always takes precedence.
+        let destination = fm.fileExists(atPath: current.path)
+            ? directory.appendingPathComponent("capture-meta-legacy-\(UUID().uuidString).json") : current
+        try fm.moveItem(at: legacy, to: destination)
+    }
+}
+
+/// capture-meta.json：一次掃描的全域資訊，Python 端據此判斷座標慣例與深度格式
 nonisolated struct SessionMeta: Codable, Sendable {
     var app = "fable-gs-capture"
     var version = 1

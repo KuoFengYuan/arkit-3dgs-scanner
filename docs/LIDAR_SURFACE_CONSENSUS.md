@@ -53,8 +53,8 @@
 
 ```sh
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
-  fable/Capture/{Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,ExportManager,TrainingFrameSelector}.swift \
-  fable/History/ScanLibrary.swift tools/refuse_dataset.swift -o /tmp/refuse_dataset
+  arkit-3dgs-scanner/Capture/{Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,ExportManager,TrainingFrameSelector}.swift \
+  arkit-3dgs-scanner/History/ScanLibrary.swift tools/refuse_dataset.swift -o /tmp/refuse_dataset
 /tmp/refuse_dataset SOURCE NEW_OUTPUT
 /tmp/refuse_dataset SOURCE LEGACY_OUTPUT --legacy-depth
 python tools/compare_surface_thickness.py LEGACY_OUTPUT/review.ply NEW_OUTPUT/review.ply REPORT_DIR

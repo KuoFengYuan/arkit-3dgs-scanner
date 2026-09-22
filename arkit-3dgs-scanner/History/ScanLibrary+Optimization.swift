@@ -65,12 +65,11 @@ extension ScanLibrary {
             }
             let raw = source.appendingPathComponent("poses.jsonl")
             if fm.fileExists(atPath: raw.path) { try fm.copyItem(at: raw, to: staging.appendingPathComponent("poses.jsonl")) }
-            let metaURL = source.appendingPathComponent("meta.json")
-            if let data = try? Data(contentsOf: metaURL),
+            if let data = CaptureMetadata.data(in: source),
                var meta = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
                 meta["startedAt"] = ISO8601DateFormatter().string(from: Date())
                 meta["optimizedFrom"] = entry.id
-                try JSONSerialization.data(withJSONObject: meta, options: [.sortedKeys]).write(to: staging.appendingPathComponent("meta.json"))
+                try JSONSerialization.data(withJSONObject: meta, options: [.sortedKeys]).write(to: staging.appendingPathComponent(CaptureMetadata.fileName))
             }
             try ExportManager.writePLY(points, to: staging.appendingPathComponent("review.ply"))
             try ExportManager.writeRefinedPoses(outputRecords, to: staging.appendingPathComponent("review-poses.jsonl"))

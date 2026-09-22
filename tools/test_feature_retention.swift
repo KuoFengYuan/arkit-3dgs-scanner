@@ -1,6 +1,6 @@
 // Regression: eviction releases descriptors while preserving older BA observations.
 // swiftc -O -module-cache-path /tmp/fable-swift-cache \
-//   fable/Capture/{FeatureTracker,BundleAdjuster,PoseRefiner}.swift \
+//   arkit-3dgs-scanner/Capture/{FeatureTracker,BundleAdjuster,PoseRefiner}.swift \
 //   tools/{test_stubs_core,test_feature_retention}.swift -o /tmp/fable-feature-retention-test
 import Foundation
 import CoreVideo

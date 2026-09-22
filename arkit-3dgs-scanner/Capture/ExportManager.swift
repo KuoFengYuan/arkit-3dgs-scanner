@@ -84,6 +84,7 @@ nonisolated enum ExportManager {
         guard points.allSatisfy({ $0.x.isFinite && $0.y.isFinite && $0.z.isFinite }) else {
             throw TrainingExportError.invalidPoints
         }
+        try CaptureMetadata.migrateLegacyFile(in: directory)
         try writeColmapSparse(records: records, points: points, to: directory, flipWorldUp: flipWorldUp)
         // Always replace even an empty cloud: a previous export must not leave stale seed points.
         try writePLY(points, to: directory.appendingPathComponent("points.ply"))
@@ -244,6 +245,7 @@ nonisolated enum ExportManager {
     /// 系統會在協調讀取時自動把目錄壓成 zip 暫存檔（AirDrop / Files 同款機制），
     /// 免任何第三方相依。同步阻塞，請在背景 Task 呼叫。
     static func zipDirectory(_ dir: URL, to dest: URL) throws {
+        try CaptureMetadata.migrateLegacyFile(in: dir)
         var coordinatorError: NSError?
         var innerError: Error?
         NSFileCoordinator().coordinate(readingItemAt: dir, options: [.forUploading],

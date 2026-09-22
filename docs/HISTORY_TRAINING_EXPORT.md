@@ -14,8 +14,8 @@
 
 ```sh
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
-  fable/Capture/{Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,ExportManager}.swift \
-  fable/History/ScanLibrary.swift tools/test_history_training_export.swift \
+  arkit-3dgs-scanner/Capture/{Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,ExportManager}.swift \
+  arkit-3dgs-scanner/History/ScanLibrary.swift tools/test_history_training_export.swift \
   -o /tmp/fable-history-export-test
 /tmp/fable-history-export-test
 ```
@@ -28,8 +28,14 @@ swiftc -O -module-cache-path /tmp/fable-swift-cache \
 
 ```sh
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
-  fable/Capture/{Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,ExportManager}.swift \
-  fable/History/ScanLibrary.swift tools/prepare_training_export.swift \
+  arkit-3dgs-scanner/Capture/{Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,ExportManager}.swift \
+  arkit-3dgs-scanner/History/ScanLibrary.swift tools/prepare_training_export.swift \
   -o /tmp/fable-prepare-training-export
 /tmp/fable-prepare-training-export /path/to/scan_directory
 ```
+
+## 掃描中繼資料檔名
+
+新掃描使用 `capture-meta.json`，避免外部訓練器將 `meta.json` 誤判為其他資料格式。舊掃描仍可從 `meta.json` 讀取日期與 LiDAR 設定；準備訓練資料或重新打包時會改名，保留原始 JSON bytes 與未知欄位。新舊檔並存時使用 `capture-meta.json`，舊檔另存為 `capture-meta-legacy-UUID.json`，不覆寫任何版本。
+
+已分享出去的舊 ZIP 不會自動變更，請用新版重新匯出，或將解壓後的 `meta.json` 改成 `capture-meta.json`。`tools/arkit2gs.py` 同時支援新舊檔名。

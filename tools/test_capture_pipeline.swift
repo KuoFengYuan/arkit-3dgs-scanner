@@ -1,7 +1,7 @@
 // Regression: successful writes, failed writes, closed writers and atomic archive retries.
-// swiftc -module-cache-path /tmp/fable-swift-cache fable/Capture/Models.swift \
-//   fable/Capture/BlurFilter.swift fable/Capture/FrameWriter.swift \
-//   fable/Capture/ExportManager.swift tools/test_capture_pipeline.swift -o /tmp/test_capture_pipeline
+// swiftc -module-cache-path /tmp/fable-swift-cache arkit-3dgs-scanner/Capture/Models.swift \
+//   arkit-3dgs-scanner/Capture/BlurFilter.swift arkit-3dgs-scanner/Capture/FrameWriter.swift \
+//   arkit-3dgs-scanner/Capture/ExportManager.swift tools/test_capture_pipeline.swift -o /tmp/test_capture_pipeline
 import Foundation
 import CoreVideo
 import simd

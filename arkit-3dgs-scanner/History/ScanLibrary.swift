@@ -80,7 +80,7 @@ actor ScanLibrary {
                   values.isDirectory == true else { continue }
             let summary = (try? Data(contentsOf: url.appendingPathComponent("scan-summary.json")))
                 .flatMap { try? JSONDecoder().decode(Summary.self, from: $0) }
-            let meta = (try? Data(contentsOf: url.appendingPathComponent("meta.json")))
+            let meta = CaptureMetadata.data(in: url)
                 .flatMap { try? JSONDecoder().decode(SessionMeta.self, from: $0) }
             let date = meta.flatMap { ISO8601DateFormatter().date(from: $0.startedAt) }
                 ?? values.creationDate ?? .distantPast

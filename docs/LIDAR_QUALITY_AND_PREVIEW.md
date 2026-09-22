@@ -68,12 +68,12 @@ HUD 區分「追蹤恢復」「紋理不足」「移動過快」「等待清晰�
 
 ```sh
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
-  fable/Capture/{Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,PointCloudFusion}.swift \
+  arkit-3dgs-scanner/Capture/{Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,PointCloudFusion}.swift \
   tools/test_lidar_consistency.swift -o /tmp/fable-lidar-test
 /tmp/fable-lidar-test
 
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
-  fable/Capture/{Models,BlurFilter,CaptureConfig,Utils,SmartShutter,CaptureQualityPolicy}.swift \
+  arkit-3dgs-scanner/Capture/{Models,BlurFilter,CaptureConfig,Utils,SmartShutter,CaptureQualityPolicy}.swift \
   tools/test_capture_quality_policy.swift -o /tmp/fable-quality-test
 /tmp/fable-quality-test
 ```
@@ -103,7 +103,7 @@ swiftc -O -module-cache-path /tmp/fable-swift-cache \
 
 ```sh
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
-  fable/Capture/{Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,PointCloudFusion}.swift \
+  arkit-3dgs-scanner/Capture/{Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,PointCloudFusion}.swift \
   tools/test_stop_processing.swift -o /tmp/fable-stop-test
 /tmp/fable-stop-test
 ```

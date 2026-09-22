@@ -19,7 +19,7 @@
 //
 //    python3 - <<'EOF'
 //    import pathlib
-//    s = pathlib.Path("fable/Capture/RefusionEngine.swift").read_text()
+//    s = pathlib.Path("arkit-3dgs-scanner/Capture/RefusionEngine.swift").read_text()
 //    i, j = s.index("nonisolated enum PointCloudMath"), s.index("// MARK: - 重融合引擎")
 //    pathlib.Path("/tmp/grid.swift").write_text(
 //        "import Foundation\nimport Dispatch\nimport simd\n"

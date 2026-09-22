@@ -5,8 +5,8 @@
 //  製圖層（FloorPlanData.swift + FloorPlanDrawing.swift）刻意不依賴 RoomPlan，
 //  所以可以在桌機上編譯執行 —— 改了畫法之後不必上機就能看到結果。
 //
-//      swiftc -o /tmp/render fable/Capture/FloorPlanData.swift \
-//              fable/Capture/FloorPlanDrawing.swift tools/render_floorplan.swift
+//      swiftc -o /tmp/render arkit-3dgs-scanner/Capture/FloorPlanData.swift \
+//              arkit-3dgs-scanner/Capture/FloorPlanDrawing.swift tools/render_floorplan.swift
 //      /tmp/render out.svg                       # 合成的兩房格局
 //      /tmp/render out.svg scan/floorplan.json   # 實機匯出的資料
 //

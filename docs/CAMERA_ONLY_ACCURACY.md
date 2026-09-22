@@ -41,7 +41,7 @@
 
 影像重建結果直接進入 `review.ply`、既有歷史預覽、同步照片路線、COLMAP／PLY 匯出與 3DGS 初始化；不建立假 LiDAR 深度檔，不啟用依賴實測深度的 BA。刪除歷史仍刪除整個掃描資料夾，包含照片、模型及新增報告。
 
-`meta.json` 新增可選 `rgbReconstructionEnabled`（舊檔無此欄位仍可讀）。`rgb-reconstruction.json` 保存方法識別、可用影格數、嘗試／成功參考視角數、讀檔失敗數、接受觀測數、RGB 點數、含稀疏點的預覽總數、參考幀 ID、取樣設定及耗時。狀態包含 `insufficientViews`、`insufficientBaseline`、`noReliableMatches`、`reconstructed`。`decodedImages` 是解碼次數，重複用到同張照片也計入。報告會隨整份掃描一起封裝。
+`capture-meta.json` 新增可選 `rgbReconstructionEnabled`（舊檔無此欄位仍可讀）。`rgb-reconstruction.json` 保存方法識別、可用影格數、嘗試／成功參考視角數、讀檔失敗數、接受觀測數、RGB 點數、含稀疏點的預覽總數、參考幀 ID、取樣設定及耗時。狀態包含 `insufficientViews`、`insufficientBaseline`、`noReliableMatches`、`reconstructed`。`decodedImages` 是解碼次數，重複用到同張照片也計入。報告會隨整份掃描一起封裝。
 
 ### 限制
 
@@ -51,10 +51,10 @@
 
 ```sh
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
-  fable/Capture/Models.swift fable/Capture/BlurFilter.swift \
-  fable/Capture/CaptureConfig.swift fable/Capture/Utils.swift \
-  fable/Capture/SmartShutter.swift fable/Capture/DepthSampleFilter.swift \
-  fable/Capture/CameraOnlyGeometry.swift fable/Capture/SparseLandmarkFilter.swift \
+  arkit-3dgs-scanner/Capture/Models.swift arkit-3dgs-scanner/Capture/BlurFilter.swift \
+  arkit-3dgs-scanner/Capture/CaptureConfig.swift arkit-3dgs-scanner/Capture/Utils.swift \
+  arkit-3dgs-scanner/Capture/SmartShutter.swift arkit-3dgs-scanner/Capture/DepthSampleFilter.swift \
+  arkit-3dgs-scanner/Capture/CameraOnlyGeometry.swift arkit-3dgs-scanner/Capture/SparseLandmarkFilter.swift \
   tools/test_camera_only_accuracy.swift -o /tmp/fable-camera-only-test
 /tmp/fable-camera-only-test
 ```
@@ -63,7 +63,7 @@ RGB 重建回歸指令：
 
 ```sh
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
-  fable/Capture/{Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,RGBStereoMatcher,RGBReconstructionEngine}.swift \
+  arkit-3dgs-scanner/Capture/{Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,RGBStereoMatcher,RGBReconstructionEngine}.swift \
   tools/test_rgb_reconstruction.swift -o /tmp/fable-rgb-test
 /tmp/fable-rgb-test
 ```

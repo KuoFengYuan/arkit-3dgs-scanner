@@ -11,8 +11,8 @@
 //
 //  編譯（test_stubs_*.swift 提供最小型別定義，不必把整個 app module 拉進來）：
 //
-//    swiftc -O -o /tmp/batest fable/Capture/PoseRefiner.swift \
-//           fable/Capture/BundleAdjuster.swift tools/test_bundle_adjust.swift \
+//    swiftc -O -o /tmp/batest arkit-3dgs-scanner/Capture/PoseRefiner.swift \
+//           arkit-3dgs-scanner/Capture/BundleAdjuster.swift tools/test_bundle_adjust.swift \
 //           tools/test_stubs_core.swift tools/test_stubs_ba.swift && /tmp/batest
 //
 //  這支測試抓到的兩個 bug（都不是打錯字，是概念錯）：

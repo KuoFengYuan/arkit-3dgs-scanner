@@ -973,7 +973,7 @@ final class CaptureController: NSObject, ObservableObject {
                                lidarAvailable: supportsLiDAR,
                                lidarEnabled: hasLiDAR,
                                rgbReconstructionEnabled: !hasLiDAR && config.reconstructFromImages)
-        try ExportManager.writeMeta(meta, to: dir.appendingPathComponent("meta.json"))
+        try ExportManager.writeMeta(meta, to: dir.appendingPathComponent(CaptureMetadata.fileName))
     }
 
     /// 相機三鎖：對焦（內參穩定、AF 不拉風箱）、曝光（ISO/快門固定 → 亮度一致、

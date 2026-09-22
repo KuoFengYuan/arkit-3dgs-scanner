@@ -8,7 +8,7 @@
     │        frame_00001_conf.bin      # uint8 raw（選用）
     ├── poses.jsonl                    # 每行一幀：c2w(row-major)、內參、時間戳、曝光
     ├── points.ply                     # LiDAR 彩色點雲（ARKit 世界座標）
-    └── meta.json
+    └── capture-meta.json
 
 輸出（--format 可選其一或 both）：
     nerfstudio/  transforms.json + images/ + sparse_pc.ply     → ns-train splatfacto
@@ -58,7 +58,9 @@ def load_scan(scan_dir: Path):
             except json.JSONDecodeError:
                 print(f"⚠️  poses.jsonl 第 {line_no} 行毀損，略過（可能是中斷時的殘行）")
     meta = {}
-    meta_path = scan_dir / "meta.json"
+    meta_path = scan_dir / "capture-meta.json"
+    if not meta_path.exists():
+        meta_path = scan_dir / "meta.json"  # Legacy captures
     if meta_path.exists():
         meta = json.loads(meta_path.read_text())
     records.sort(key=lambda r: r["id"])

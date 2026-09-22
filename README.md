@@ -42,16 +42,16 @@ Scan history → Photo / point-cloud / route preview → Refine a copy, export, 
 ```sh
 git clone https://github.com/KuoFengYuan/arkit-3dgs-scanner.git
 cd arkit-3dgs-scanner
-open fable.xcodeproj
+open arkit-3dgs-scanner.xcodeproj
 ```
 
-1. Select the `fable` scheme, your signing team, and a physical device in Xcode.
+1. Select the `arkit-3dgs-scanner` scheme, your signing team, and a physical device in Xcode.
 2. Build and run. Allow camera access and wait for tracking to become ready.
 3. Choose LiDAR and refinement options before starting. Move around the scene so surfaces are visible from multiple positions.
 4. Stop the scan, wait for processing, and inspect the point cloud. Continue the active scan if more coverage is needed.
 5. Select **「匯出 3DGS 訓練資料」** to share the dataset ZIP. Unzip it on your computer and load it into a trainer that accepts COLMAP datasets.
 
-The interface currently uses Traditional Chinese. The Xcode project, scheme, and app identifier retain the original `fable` naming; the GitHub repository is now `arkit-3dgs-scanner`.
+The interface currently uses Traditional Chinese. The repository, Xcode project, and scheme are named `arkit-3dgs-scanner`. The app identifier remains `itri.fable` to preserve existing installations and scan data.
 
 ## Capture modes
 
@@ -98,7 +98,7 @@ scan_…/
 ├── points.ply                 # Point cloud in ARKit world coordinates
 ├── poses.jsonl                # Original capture poses
 ├── poses_refined.jsonl        # Selected, processed poses
-├── meta.json                  # Device and capture mode
+├── capture-meta.json          # Device and capture mode
 ├── review.ply                 # Saved preview point cloud
 ├── review-poses.jsonl          # Preview and playback poses
 ├── scan-summary.json          # Frame and point counts
@@ -106,6 +106,8 @@ scan_…/
 ├── pose-refinement.json       # Pose validation report, when refinement runs
 └── refusion-progress.json     # Fusion timing and resource report, when fusion runs
 ```
+
+New captures use `capture-meta.json`. Legacy `meta.json` files remain readable and are renamed when exporting; if both names exist, the current file wins and the legacy content is retained under a separate capture-specific filename. This avoids exposing `meta.json` to trainer format detection.
 
 Additional floor-plan, world-map, reconstruction, and performance files depend on the enabled features. New scans do not generate `gaussians.ply`; existing models in older scans remain part of those scans for sharing and deletion.
 
@@ -116,15 +118,15 @@ The exported sparse model provides calibrated cameras and seed points, without c
 ## Development
 
 ```sh
-xcodebuild -project fable.xcodeproj -scheme fable \
+xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner \
   -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build
-xcodebuild -project fable.xcodeproj -scheme fable \
+xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner \
   -sdk iphonesimulator -configuration Debug CODE_SIGNING_ALLOWED=NO build
 ```
 
 ```text
-fable/Capture/    AR session, keyframes, fusion, pose refinement, image selection, export
-fable/History/    Scan storage, playback, refinement, and deletion
+arkit-3dgs-scanner/Capture/    AR session, keyframes, fusion, pose refinement, image selection, export
+arkit-3dgs-scanner/History/    Scan storage, playback, refinement, and deletion
 tools/          Dataset conversion, analysis, and regression tests
 docs/           Architecture, coordinate conventions, quality, and performance
 ```

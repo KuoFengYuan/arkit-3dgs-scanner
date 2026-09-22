@@ -11,8 +11,8 @@
 //  這個檔案已經有四個「症狀是沒效果而非壞掉」的前例，所以逐點對照暴力搜尋。
 //
 //  編譯：
-//    swiftc -O -o /tmp/fitest fable/Capture/FeatureTracker.swift \
-//           fable/Capture/BundleAdjuster.swift fable/Capture/PoseRefiner.swift \
+//    swiftc -O -o /tmp/fitest arkit-3dgs-scanner/Capture/FeatureTracker.swift \
+//           arkit-3dgs-scanner/Capture/BundleAdjuster.swift arkit-3dgs-scanner/Capture/PoseRefiner.swift \
 //           tools/test_feature_index.swift tools/test_stubs_core.swift && /tmp/fitest
 //
 

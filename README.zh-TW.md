@@ -4,7 +4,7 @@
 
 使用 ARKit 擷取照片、相機姿態與點雲，在手機完成品質檢查、姿態精修、深度融合和預覽，再匯出標準 COLMAP 資料集供外部 3D Gaussian Splatting（3DGS）訓練使用。
 
-**目前 App 專注於掃描與資料準備，已移除手機端 3DGS 訓練及訓練結果檢視器。** 照片篩選、相機精修、點雲重融合仍在手機執行，不需要上傳。GitHub 專案已更名為 `arkit-3dgs-scanner`；Xcode 專案、scheme 與 App 識別碼暫時保留原有 `fable`，便於既有安裝延續。
+**目前 App 專注於掃描與資料準備，已移除手機端 3DGS 訓練及訓練結果檢視器。** 照片篩選、相機精修、點雲重融合仍在手機執行，不需要上傳。GitHub、本機專案及 scheme 均為 `arkit-3dgs-scanner`；App 識別碼保留 `itri.fable`，讓既有安裝與掃描資料延續。
 
 ```text
 開始掃描 → 自動擷取影像 → 停止與資料優化 → 檢查點雲
@@ -28,7 +28,7 @@
 
 ## 快速開始
 
-1. 使用 Xcode 26 或更新版本開啟 `fable.xcodeproj`，選取 `fable` scheme 與自己的簽章 Team。
+1. 使用 Xcode 26 或更新版本開啟 `arkit-3dgs-scanner.xcodeproj`，選取 `arkit-3dgs-scanner` scheme 與自己的簽章 Team。
 2. 安裝至支援 ARKit 的 iPhone／iPad；專案最低部署版本為 iOS 17。LiDAR 深度與 RoomPlan 功能需對應硬體支援。
 3. 按「開始掃描」，允許相機存取，等待追蹤就緒；開拍前選擇 LiDAR、精細掃描等設定。
 4. 沿著空間移動，從不同角度拍到同一表面。停止後等待資料優化，檢查點雲與缺漏，必要時「續掃」。
@@ -45,7 +45,7 @@ Simulator 可驗證一般介面與資料流程，不能代替真機 ARKit／LiDA
 | LiDAR 開啟 | RGB、相機姿態、感測深度與可信度；可使用 mesh 補洞、RoomPlan 與 LiDAR 輔助姿態精修 |
 | LiDAR 關閉 | RGB、相機姿態、經驗證的稀疏特徵點；可在停止後用多視角照片估算幾何，不保存 LiDAR 深度 |
 
-模式只能在開拍前切換。`meta.json` 分別記錄硬體能力 `lidarAvailable` 與本次選擇 `lidarEnabled`。開關控制 App 請求與使用的深度功能，不是感測器電源控制，也無法保證 ARKit 內部完全不用 LiDAR。
+模式只能在開拍前切換。`capture-meta.json` 分別記錄硬體能力 `lidarAvailable` 與本次選擇 `lidarEnabled`。開關控制 App 請求與使用的深度功能，不是感測器電源控制，也無法保證 ARKit 內部完全不用 LiDAR。
 
 相機模式依賴紋理、清晰度與視差，不能把影像推估深度視為感測器量測。詳見 [相機模式精度](docs/CAMERA_ONLY_ACCURACY.md)。
 
@@ -90,7 +90,7 @@ scan_…/
 ├── points.ply                 # ARKit 世界座標點雲
 ├── poses.jsonl                # 原始採集姿態
 ├── poses_refined.jsonl        # 匯出所選影像的處理後姿態
-├── meta.json                  # 裝置與掃描模式
+├── capture-meta.json          # 裝置與掃描模式
 ├── review.ply                 # 歷史預覽點雲
 ├── review-poses.jsonl          # 預覽／回放姿態
 ├── scan-summary.json          # 影格數與點數
@@ -98,6 +98,8 @@ scan_…/
 ├── pose-refinement.json       # 若有執行相機精修，其驗證結果
 └── refusion-progress.json     # 若有重融合，其耗時與資源資訊
 ```
+
+新掃描使用 `capture-meta.json`；舊 `meta.json` 仍可讀取，匯出時自動改名，避免與外部訓練器的格式判斷衝突。兩者同時存在時優先使用新檔，舊檔另存為不衝突的 capture 中繼資料檔。
 
 依啟用功能及成功結果，可能另有平面圖、世界地圖、影像重建及採集效能報告。新版不產生 `gaussians.ply`；舊版掃描既有模型仍隨原資料保留與分享。
 
@@ -108,8 +110,8 @@ COLMAP 相機與 `points3D.bin` 預設一起繞世界 X 軸旋轉 180°；`point
 ## 程式結構
 
 ```text
-fable.xcodeproj/               # Xcode 專案
-fable/
+arkit-3dgs-scanner.xcodeproj/               # Xcode 專案
+arkit-3dgs-scanner/
 ├── ContentView.swift          # 首頁與入口
 ├── Capture/
 │   ├── CaptureController.swift
@@ -131,9 +133,9 @@ docs/                          # 架構、座標、品質與效能說明
 ## 開發與驗證
 
 ```sh
-xcodebuild -project fable.xcodeproj -scheme fable \
+xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner \
   -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build
-xcodebuild -project fable.xcodeproj -scheme fable \
+xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner \
   -sdk iphonesimulator -configuration Debug CODE_SIGNING_ALLOWED=NO build
 ```
 

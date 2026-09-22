@@ -24,7 +24,10 @@ import Foundation
                 catch { try fm.copyItem(at: url, to: destination.appendingPathComponent(url.lastPathComponent)) }
             }
         }
-        for name in ["meta.json", "poses.jsonl", "pose-refinement.json"] {
+        if let meta = CaptureMetadata.existingURL(in: source) {
+            try fm.copyItem(at: meta, to: output.appendingPathComponent(CaptureMetadata.fileName))
+        }
+        for name in ["poses.jsonl", "pose-refinement.json"] {
             let url = source.appendingPathComponent(name)
             if fm.fileExists(atPath: url.path) { try fm.copyItem(at: url, to: output.appendingPathComponent(name)) }
         }

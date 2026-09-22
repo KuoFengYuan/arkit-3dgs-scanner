@@ -81,7 +81,7 @@
 
 - **開啟**：使用深度與 mesh，並依設定提供 RoomPlan、深度融合與精細姿態校正。
 - **關閉**：不請求 sceneDepth、smoothedSceneDepth、sceneReconstruction，也不啟動 RoomPlan 或儲存深度；保留 RGB、ARKit 姿態及稀疏特徵點雲。這條路徑尚未加入純 RGB 稠密重建。
-- `meta.json` 分別記錄硬體能力 `lidarAvailable` 與本次模式 `lidarEnabled`，歷史列表顯示開／關。舊資料若無新欄位，沿用原有硬體標記。
+- `capture-meta.json` 分別記錄硬體能力 `lidarAvailable` 與本次模式 `lidarEnabled`，歷史列表顯示開／關。舊資料若無新欄位，沿用原有硬體標記。
 
 此開關控制 App 請求與使用的深度功能，不能保證 ARKit 內部追蹤完全不使用 LiDAR，亦非感測器電源控制；若需要嚴格的無 LiDAR 硬體對照，須另用不具 LiDAR 的裝置。
 
@@ -92,7 +92,7 @@
 iPhone 目標不簽章建置：
 
 ```sh
-xcodebuild -project fable.xcodeproj -scheme fable -configuration Debug \
+xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner -configuration Debug \
   -sdk iphoneos -derivedDataPath /tmp/fable-build CODE_SIGNING_ALLOWED=NO build
 ```
 
@@ -100,8 +100,8 @@ macOS 上的實際 I/O 回歸測試（需允許 CoreVideo / IOSurface 存取）�
 
 ```sh
 swiftc -module-cache-path /tmp/fable-swift-cache \
-  fable/Capture/Models.swift fable/Capture/BlurFilter.swift \
-  fable/Capture/FrameWriter.swift fable/Capture/ExportManager.swift \
+  arkit-3dgs-scanner/Capture/Models.swift arkit-3dgs-scanner/Capture/BlurFilter.swift \
+  arkit-3dgs-scanner/Capture/FrameWriter.swift arkit-3dgs-scanner/Capture/ExportManager.swift \
   tools/test_capture_pipeline.swift -o /tmp/test_capture_pipeline
 /tmp/test_capture_pipeline
 ```
@@ -141,7 +141,7 @@ API 行為依據：[Apple 相機權限文件](https://developer.apple.com/docume
 
 ```sh
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
-  fable/History/PlaybackCameraPose.swift tools/test_playback_camera.swift \
+  arkit-3dgs-scanner/History/PlaybackCameraPose.swift tools/test_playback_camera.swift \
   -o /tmp/fable-follow-camera-test
 /tmp/fable-follow-camera-test
 ```

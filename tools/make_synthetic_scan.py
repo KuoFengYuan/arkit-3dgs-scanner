@@ -97,7 +97,7 @@ def main():
         for r in records:
             f.write(json.dumps(r, sort_keys=True) + "\n")
 
-    (out / "meta.json").write_text(json.dumps({
+    (out / "capture-meta.json").write_text(json.dumps({
         "app": "fable-gs-capture", "version": 1,
         "device": "synthetic", "osVersion": "-",
         "startedAt": "2026-07-21T00:00:00Z", "mode": "object",

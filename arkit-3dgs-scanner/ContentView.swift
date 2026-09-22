@@ -13,8 +13,9 @@ struct ContentView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 HStack {
-                    Label("fable", systemImage: "viewfinder")
-                        .font(.title2.bold())
+                    Label("ARKit 3DGS Scanner", systemImage: "viewfinder")
+                        .font(.headline)
+                        .lineLimit(2)
                     Spacer()
                     Label(hasLiDAR ? "LiDAR" : "標準相機",
                           systemImage: hasLiDAR ? "sensor.tag.radiowaves.forward" : "camera")

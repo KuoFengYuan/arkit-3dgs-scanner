@@ -47,17 +47,17 @@
 
 ```sh
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
-  fable/Capture/CaptureWorkScheduling.swift tools/test_capture_work_scheduling.swift \
+  arkit-3dgs-scanner/Capture/CaptureWorkScheduling.swift tools/test_capture_work_scheduling.swift \
   -o /tmp/fable-scheduling-test
 /tmp/fable-scheduling-test
 
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
-  fable/Capture/{FeatureTracker,BundleAdjuster,PoseRefiner}.swift \
+  arkit-3dgs-scanner/Capture/{FeatureTracker,BundleAdjuster,PoseRefiner}.swift \
   tools/{test_stubs_core,test_feature_retention}.swift -o /tmp/fable-feature-retention-test
 /tmp/fable-feature-retention-test
 
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
-  fable/Capture/{Models,BlurFilter,FrameWriter,ExportManager}.swift \
+  arkit-3dgs-scanner/Capture/{Models,BlurFilter,FrameWriter,ExportManager}.swift \
   tools/test_capture_pipeline.swift -o /tmp/fable-capture-pipeline-test
 /tmp/fable-capture-pipeline-test
 ```
