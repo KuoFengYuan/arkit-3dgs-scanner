@@ -176,6 +176,7 @@ private struct ScanHistoryDetail: View {
     let entry: ScanEntry
     @State private var optimizedEntry: ScanEntry?
     @State private var showMeasurements = false
+    @State private var showDetails = false
     private var currentEntry: ScanEntry { optimizedEntry ?? entry }
     @State private var selection: TrainingFrameSelector.Report?
     @State private var poseNotice: String?
@@ -202,30 +203,15 @@ private struct ScanHistoryDetail: View {
             if optimizedEntry != nil {
                 Text(L10n.text("已另存優化版本，原始掃描仍保留")).font(.caption).foregroundStyle(.secondary)
             }
-            if let poseNotice {
-                Text(poseNotice).font(.caption2).foregroundStyle(.secondary).padding(.horizontal)
-            }
-            if let selection {
-                Text(L10n.text("訓練選用 \(selection.selectedIDs.count) / \(selection.inputFrames) 張影像"))
-                    .font(.caption).foregroundStyle(.secondary).padding(.top, 4)
-                if let notice = selection.notice {
-                    Text(notice).font(.caption2).foregroundStyle(.orange)
-                        .lineLimit(3).padding(.horizontal)
-                }
-                if let information = selection.diagnosticSummary {
-                    DisclosureGroup(L10n.text("拍攝品質資訊")) {
-                        Text(information).font(.caption2)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .font(.caption).foregroundStyle(.secondary).padding(.horizontal)
-                }
+            Button { showDetails = true } label: {
+                Label(selection?.notice != nil ? L10n.text("拍攝品質需要檢查") : L10n.text("掃描品質資訊"),
+                      systemImage: selection?.notice != nil ? "exclamationmark.circle" : "info.circle")
+                    .font(.subheadline).frame(minHeight: 44)
+                    .foregroundStyle(selection?.notice != nil ? Color.orange : Color.accentColor)
             }
             if optimizationTask != nil {
                 ProgressView(optimizationText, value: optimizationProgress).padding()
             }
-            Button { showMeasurements = true } label: {
-                Label(L10n.text("空間尺度與驗證"), systemImage: "ruler")
-            }.disabled(busy || preview?.points.isEmpty != false).padding(.top, 8)
             Picker(L10n.text("預覽內容"), selection: $selectedTab) {
                 Text(L10n.text("3D 點雲")).tag(0)
                 Text(L10n.text("拍攝影像")).tag(1)
@@ -250,9 +236,6 @@ private struct ScanHistoryDetail: View {
                 } else {
                     ScanRoutePlaybackView(preview: preview, currentIndex: $photoIndex, playbackFPS: $playbackFPS)
                 }
-                if let note = preview.note, !preview.points.isEmpty {
-                    Text(note).font(.caption).foregroundStyle(.secondary).padding()
-                }
             } else {
                 Spacer()
                 ProgressView(L10n.text("準備預覽…"))
@@ -266,11 +249,64 @@ private struct ScanHistoryDetail: View {
                 if optimizationTask != nil {
                     Button(L10n.text("取消")) { optimizationTask?.cancel() }
                 } else {
-                    Button(L10n.text("優化訓練資料")) {
-                        optimizationTask = Task { await optimize() }
-                    }.disabled(busy || preview == nil)
+                    Menu {
+                        Button { showMeasurements = true } label: {
+                            Label(L10n.text("空間尺度與驗證"), systemImage: "ruler")
+                        }.disabled(busy || preview?.points.isEmpty != false)
+                        Button {
+                            optimizationTask = Task { await optimize() }
+                        } label: {
+                            Label(L10n.text("優化訓練資料"), systemImage: "wand.and.stars")
+                        }.disabled(busy || preview == nil)
+                        Divider()
+                        Button(role: .destructive) { showDelete = true } label: {
+                            Label(L10n.text("刪除"), systemImage: "trash")
+                        }.disabled(busy)
+                    } label: {
+                        Label(L10n.text("更多操作"), systemImage: "ellipsis.circle")
+                            .frame(minWidth: 44, minHeight: 44)
+                    }
+                    .accessibilityIdentifier("scanActions")
                 }
             }
+        }
+        .sheet(isPresented: $showDetails) {
+            NavigationStack {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        Label(L10n.text("\(currentEntry.frameCount) 張影像"), systemImage: "photo.stack")
+                        if let poseNotice {
+                            Text(poseNotice).font(.subheadline).foregroundStyle(.secondary)
+                        }
+                        if let selection {
+                            Text(L10n.text("訓練選用 \(selection.selectedIDs.count) / \(selection.inputFrames) 張影像"))
+                                .font(.subheadline).foregroundStyle(.secondary)
+                            if let notice = selection.notice {
+                                Label(notice, systemImage: "exclamationmark.circle")
+                                    .font(.subheadline).foregroundStyle(.orange)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            if let information = selection.diagnosticSummary {
+                                DisclosureGroup(L10n.text("拍攝品質資訊")) {
+                                    Text(information).font(.subheadline)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }.font(.subheadline).foregroundStyle(.secondary)
+                            }
+                        }
+                        if let note = preview?.note {
+                            Text(note).font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding()
+                }
+                .navigationTitle(L10n.text("掃描品質資訊"))
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) {
+                    Button(L10n.text("完成")) { showDetails = false }
+                } }
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationBackground(Color(uiColor: .systemGroupedBackground))
         }
         .sheet(isPresented: $showMeasurements) {
             if let preview { SceneMeasurementView(entry: currentEntry, preview: preview) }
@@ -279,20 +315,23 @@ private struct ScanHistoryDetail: View {
         .navigationTitle(currentEntry.date.formatted(.dateTime.locale(L10n.locale).year().month().day().hour().minute()))
         .navigationBarTitleDisplayMode(.inline)
         .safeAreaInset(edge: .bottom) {
-            HStack {
-                if busy { ProgressView(L10n.text("處理中…")) }
-                else if let archive {
-                    ShareLink(item: archive) { Label(L10n.text("分享掃描"), systemImage: "square.and.arrow.up") }
+            Group {
+                if busy {
+                    ProgressView(L10n.text("處理中…"))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                } else if let archive {
+                    ShareLink(item: archive) {
+                        Label(L10n.text("分享掃描"), systemImage: "square.and.arrow.up")
+                            .frame(maxWidth: .infinity, minHeight: 32)
+                    }
                 } else {
                     Button { Task { await makeArchive() } } label: {
                         Label(L10n.text("匯出 3DGS 訓練資料"), systemImage: "square.and.arrow.up")
+                            .frame(maxWidth: .infinity, minHeight: 32)
                     }
                 }
-                Spacer()
-                Button(role: .destructive) { showDelete = true } label: {
-                    Label(L10n.text("刪除"), systemImage: "trash")
-                }
             }
+            .buttonStyle(.borderedProminent)
             .disabled(busy || preview == nil)
             .padding().background(.bar)
         }
@@ -320,6 +359,7 @@ private struct ScanHistoryDetail: View {
                     catch { self.error = error.localizedDescription }
                 }
             }
+            Button(L10n.text("取消"), role: .cancel) { showDelete = false }
         } message: { Text(L10n.text("此掃描的所有照片、模型、點雲、深度與姿態資料、平面圖及同名 ZIP 都會刪除，無法復原。")) }
         .alert(L10n.text("無法完成操作"), isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
             Button(L10n.text("好")) { error = nil }

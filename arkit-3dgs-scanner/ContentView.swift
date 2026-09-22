@@ -43,14 +43,6 @@ struct ContentView: View {
                 }
                 .padding(.top, 16)
 
-                VStack(alignment: .leading, spacing: 24) {
-                    step("01", L10n.text("緩慢掃描"), L10n.text("沿著空間移動，手機會自動擷取影像。"), "viewfinder")
-                    step("02", L10n.text("檢查與補掃"), L10n.text("旋轉點雲檢查缺漏，隨時回到原處補拍。"), "cube.transparent")
-                    step("03", L10n.text("匯出與分享"), L10n.text("匯出影像、相機姿態與點雲，供外部 3DGS 訓練使用。"), "square.and.arrow.up")
-                }
-                .padding(22)
-                .background(.background, in: RoundedRectangle(cornerRadius: 24))
-
                 Button { showHistory = true } label: {
                     HStack(spacing: 14) {
                         Image(systemName: "clock.arrow.circlepath").font(.title2)
@@ -65,6 +57,19 @@ struct ContentView: View {
                     .background(.background, in: RoundedRectangle(cornerRadius: 20))
                 }
                 .buttonStyle(.plain)
+
+                DisclosureGroup {
+                    VStack(alignment: .leading, spacing: 24) {
+                        step("01", L10n.text("緩慢掃描"), L10n.text("沿著空間移動，手機會自動擷取影像。"), "viewfinder")
+                        step("02", L10n.text("檢查與補掃"), L10n.text("旋轉點雲檢查缺漏，隨時回到原處補拍。"), "cube.transparent")
+                        step("03", L10n.text("匯出與分享"), L10n.text("匯出影像、相機姿態與點雲，供外部 3DGS 訓練使用。"), "square.and.arrow.up")
+                    }.padding(.top, 18)
+                } label: {
+                    Label(L10n.text("第一次掃描？查看操作指南"), systemImage: "questionmark.circle")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .padding(20)
+                .background(.background, in: RoundedRectangle(cornerRadius: 24))
 
                 Label(L10n.text("多走動、少原地旋轉，讓同一個表面被不同角度看見。"),
                       systemImage: "figure.walk")

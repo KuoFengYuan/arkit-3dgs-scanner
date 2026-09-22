@@ -17,6 +17,8 @@ struct ARKit3DGSScannerApp: App {
             FusionProcessingView(progress: 0.67, stage: .fusing,
                 detail: L10n.text("融合點雲… 176 / 399 幀"), frameCount: 399,
                 startedAt: Date().addingTimeInterval(-42))
+        } else if ProcessInfo.processInfo.arguments.contains("--preview-capture-controls") {
+            CaptureControlsPreview()
         } else { ContentView() }
         #else
         ContentView()
@@ -30,3 +32,15 @@ struct ARKit3DGSScannerApp: App {
         }
     }
 }
+
+#if DEBUG
+/// UI-only inspection without starting an AR session or writing scan files.
+private struct CaptureControlsPreview: View {
+    @StateObject private var controller = CaptureController()
+    var body: some View {
+        HUDOverlay(controller: controller)
+            .background(Color.black)
+            .preferredColorScheme(.dark)
+    }
+}
+#endif

@@ -475,3 +475,27 @@
 "驗證局部表面對齊…" = "Validating local surface alignment…";
 
 "表面重建未達容量或涵蓋要求，已使用完整原融合結果。" = "Surface reconstruction did not meet resource or coverage requirements; the complete original fusion was used.";
+
+"掃描模式" = "Capture mode";
+
+"品質與處理" = "Quality and processing";
+
+"座標系" = "Coordinate system";
+
+"表面重建已包含姿態精修" = "Included in surface reconstruction";
+
+"設定只影響接下來的掃描。完成後的處理時間依照片數量與場景而異。" = "Settings apply to the next scan. Processing time depends on the number of photos and the scene.";
+
+"掃描品質資訊" = "Scan quality details";
+
+"查看掃描品質資訊" = "Review scan quality details";
+
+"顯示空間結構" = "Show room structure";
+
+"更多操作" = "More actions";
+
+"第一次掃描？查看操作指南" = "First scan? View the guide";
+
+"重設相機參數" = "Reset camera settings";
+
+"拍攝品質需要檢查" = "Review capture quality";

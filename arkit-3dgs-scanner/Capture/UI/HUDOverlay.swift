@@ -24,18 +24,14 @@ struct HUDOverlay: View {
                 guidanceBanner
                 fusionLegend
                 speedGauge
-                if controller.phase == .idle && controller.trackingReady && showAdvanced {
-                    HStack {
-                        Spacer()
-                        CameraControlBar(controls: controller.cameraControls, enabled: true)
-                    }
-                }
                 Spacer()
                 statusLine
                 bottomControls
             }
             .padding()
         }
+        .sheet(isPresented: $showAdvanced) { scanSettings }
+        .sheet(isPresented: $summaryExpanded) { scanDetails }
         .confirmationDialog(L10n.text("離開掃描檢視？"), isPresented: $showExitConfirm, titleVisibility: .visible) {
             Button(L10n.text("離開並保留檔案")) { dismiss() }
             Button(L10n.text("留在這裡"), role: .cancel) {}
@@ -251,10 +247,12 @@ struct HUDOverlay: View {
                               ? "square.split.bottomrightquarter.fill"
                               : "square.split.bottomrightquarter")
                             .font(.system(size: 17, weight: .regular))
-                            .padding(10)
+                            .frame(width: 44, height: 44)
                             .hudGlass(Circle())
                     }
                     .foregroundStyle(controller.showRoomPlan ? .white : .secondary)
+                    .accessibilityLabel(L10n.text("顯示空間結構"))
+                    .accessibilityValue(controller.showRoomPlan ? L10n.text("已開啟") : L10n.text("已關閉"))
                     }
 
                     Button {
@@ -263,7 +261,7 @@ struct HUDOverlay: View {
                         Image(systemName: controller.showPointCloud
                               ? "circle.grid.3x3.fill" : "circle.grid.3x3")
                             .font(.system(size: 17, weight: .regular))
-                            .padding(10)
+                            .frame(width: 44, height: 44)
                             .hudGlass(Circle())
                     }
                     .foregroundStyle(controller.showPointCloud ? .cyan : .white)
@@ -278,7 +276,7 @@ struct HUDOverlay: View {
                             Image(systemName: controller.colorMode == .fusionQuality
                                   ? "thermometer.medium" : "paintpalette")
                                 .font(.system(size: 17, weight: .regular))
-                                .padding(10)
+                                .frame(width: 44, height: 44)
                                 .hudGlass(Circle())
                         }
                         .foregroundStyle(controller.colorMode == .fusionQuality ? .orange : .white)
@@ -374,10 +372,10 @@ struct HUDOverlay: View {
 
     private var statusHint: String? {
         if controller.phase == .idle && !controller.trackingReady { return controller.sessionState.message }
-        if let s = controller.statusText { return s }
+        if controller.phase != .review, let s = controller.statusText { return s }
         switch controller.phase {
         case .idle:
-            return controller.refineCameraPoses && controller.hasLiDAR
+            return (controller.refineCameraPoses || controller.reconstructSurfaces) && controller.hasLiDAR
                 ? L10n.text("精細掃描已開啟・沿著空間緩慢移動")
                 : L10n.text("沿著空間緩慢移動，影像會自動儲存")
         case .scanning:
@@ -400,100 +398,22 @@ struct HUDOverlay: View {
         VStack(spacing: 14) {
             if controller.phase == .idle {
                 sessionRecoveryControls
-                if controller.supportsLiDAR {
-                    Toggle(isOn: Binding(get: { controller.useLiDAR }, set: { controller.setLiDAREnabled($0) })) {
+                Button { showAdvanced = true } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "slider.horizontal.3")
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(L10n.text("LiDAR 深度掃描")).font(.subheadline.weight(.medium))
-                            Text(controller.hasLiDAR ? L10n.text("深度量測與彩色點雲") : L10n.text("僅相機追蹤，保留影像與稀疏點雲"))
-                                .font(.caption2)
+                            Text(L10n.text("掃描設定")).font(.subheadline.weight(.semibold))
+                            Text(controller.hasLiDAR ? L10n.text("LiDAR 深度掃描") : L10n.text("相機模式・未使用 LiDAR 深度"))
+                                .font(.caption).foregroundStyle(.white.opacity(0.75))
                         }
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.caption)
                     }
-                    .tint(.cyan).padding(14)
+                    .padding(14)
                     .hudGlass(RoundedRectangle(cornerRadius: 16))
                     .foregroundStyle(.white)
                 }
-                if controller.trackingReady {
-                    Button {
-                        withAnimation { showAdvanced.toggle() }
-                    } label: {
-                        Label(showAdvanced ? L10n.text("收合掃描設定") : L10n.text("掃描設定"),
-                              systemImage: "slider.horizontal.3")
-                            .font(.subheadline)
-                            .padding(.horizontal, 16).padding(.vertical, 12)
-                            .hudGlass(Capsule())
-                            .foregroundStyle(.white)
-                    }
-                }
-            }
-            if controller.phase == .idle && showAdvanced && controller.trackingReady {
-                // 延續上次座標系：跨 session 掃下一個房間時，兩份資料才拼得起來。
-                // 同一次 session 內的續掃 ARKit 會自動重定位，不需要這個。
-                if let info = WorldMapStore.latestInfo() {
-                    Toggle(isOn: Binding(
-                        get: { controller.continueFromLastMap },
-                        set: { controller.setContinueFromLastMap($0) })) {
-                        Label(String(format: L10n.text("延續上次座標系（%.1f MB · %@）"),
-                                     Double(info.bytes) / 1_048_576,
-                                     Self.ago(info.modified)),
-                              systemImage: "point.3.filled.connected.trianglepath.dotted")
-                            .font(.caption.weight(.medium))
-                    }
-                    .tint(.blue)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 7)
-                    .hudGlass(Capsule())
-                    .foregroundStyle(.white)
-                }
-
-                if controller.hasLiDAR {
-                    Toggle(isOn: $controller.refineCameraPoses) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(L10n.text("精細掃描")).font(.subheadline)
-                            Text(L10n.text("校正相機位置，完成後需較多處理時間")).font(.caption2)
-                        }
-                    }
-                    .tint(.cyan).padding(14)
-                    .hudGlass(RoundedRectangle(cornerRadius: 16))
-                    .foregroundStyle(.white)
-                }
-
-                if controller.hasLiDAR {
-                    Toggle(isOn: $controller.reconstructSurfaces) {
-                        VStack(alignment:.leading,spacing:3) {
-                            Text(L10n.text("表面重建（實驗）")).font(.subheadline)
-                            Text(L10n.text("包含姿態精修；容量或涵蓋不足時使用原融合")).font(.caption2)
-                        }
-                    }
-                    .tint(.cyan).padding(14)
-                    .hudGlass(RoundedRectangle(cornerRadius:16))
-                    .foregroundStyle(.white)
-                }
-
-                if !controller.hasLiDAR {
-                    Toggle(isOn: $controller.reconstructFromImages) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(L10n.text("影像深度重建")).font(.subheadline)
-                            Text(L10n.text("停止後以重疊照片重建點雲，需較多處理時間")).font(.caption2)
-                        }
-                    }
-                    .tint(.cyan).padding(14)
-                    .hudGlass(RoundedRectangle(cornerRadius: 16))
-                    .foregroundStyle(.white)
-                }
-
-                // 相機參數鎖定開關（預設開啟）：按快門當下鎖定曝光/白平衡。
-                // 對焦刻意不在此列 —— 鎖對焦＝凍結景深，離開起始距離就糊。
-                Toggle(isOn: $controller.lockCameraParams) {
-                    Label(L10n.text("鎖定曝光 / 白平衡"),
-                          systemImage: controller.lockCameraParams ? "lock.fill" : "lock.open")
-                        .font(.caption.weight(.medium))
-                }
-                .tint(.green)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 7)
-                .frame(maxWidth: 350)
-                .hudGlass(Capsule())
-                .foregroundStyle(.white)
+                .accessibilityIdentifier("scanSettings")
             }
 
             switch controller.phase {
@@ -527,40 +447,107 @@ struct HUDOverlay: View {
         }
     }
 
-    /// 掃描品質摘要。這些數字原本只印在 log 裡，使用者看不到 ——
-    /// 而「漂移多少、迴環有沒有閉合」正是判斷這份資料能不能用的依據。
-    /// 只顯示需要注意的項目：一切正常時整張卡不出現，不佔版面。
-    /// 品質摘要。**預設收成一行**，點一下才展開 ——
-    /// review 階段的主體是可旋轉的 3D 點雲，資訊不該佔住畫面也不該擋住手勢。
-    @ViewBuilder
-    private var scanSummaryCard: some View {
-        if let s = controller.scanSummary {
-            let rows = summaryRows(s)
-            if !rows.isEmpty {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { summaryExpanded.toggle() }
-                } label: {
-                    if summaryExpanded {
-                        VStack(alignment: .leading, spacing: 4) {
-                            ForEach(rows, id: \.text) { row in
-                                Label(row.text, systemImage: row.symbol)
-                                    .font(.caption)
-                                    .foregroundStyle(row.tint)
-                                    .multilineTextAlignment(.leading)
-                            }
+    private var scanSettings: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    if controller.supportsLiDAR {
+                        Toggle(L10n.text("LiDAR 深度掃描"), isOn: Binding(
+                            get: { controller.useLiDAR }, set: { controller.setLiDAREnabled($0) }))
+                    }
+                    Text(controller.hasLiDAR ? L10n.text("深度量測與彩色點雲") : L10n.text("僅相機追蹤，保留影像與稀疏點雲"))
+                        .font(.subheadline).foregroundStyle(.secondary)
+                } header: { Text(L10n.text("掃描模式")) }
+
+                Section {
+                    if controller.hasLiDAR {
+                        Toggle(isOn: $controller.reconstructSurfaces) {
+                            settingLabel(L10n.text("表面重建（實驗）"), L10n.text("包含姿態精修；容量或涵蓋不足時使用原融合"))
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 14).padding(.vertical, 9)
-                        .hudGlass(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        Toggle(isOn: Binding(get: {
+                            controller.refineCameraPoses || controller.reconstructSurfaces
+                        }, set: { controller.refineCameraPoses = $0 })) {
+                            settingLabel(L10n.text("精細掃描"), controller.reconstructSurfaces
+                                ? L10n.text("表面重建已包含姿態精修")
+                                : L10n.text("校正相機位置，完成後需較多處理時間"))
+                        }
+                        .disabled(controller.reconstructSurfaces)
                     } else {
-                        // 收合態：只留「有 N 項要注意」＋最嚴重那項的顏色
-                        Label(L10n.text("\(rows.count) 項掃描提醒"), systemImage: "exclamationmark.circle")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(rows.first?.tint ?? .secondary)
-                            .padding(.horizontal, 12).padding(.vertical, 6)
-                            .hudGlass(Capsule())
+                        Toggle(isOn: $controller.reconstructFromImages) {
+                            settingLabel(L10n.text("影像深度重建"), L10n.text("停止後以重疊照片重建點雲，需較多處理時間"))
+                        }
+                    }
+                } header: { Text(L10n.text("品質與處理")) }
+                  footer: { Text(L10n.text("設定只影響接下來的掃描。完成後的處理時間依照片數量與場景而異。")) }
+
+                Section {
+                    Toggle(L10n.text("鎖定曝光 / 白平衡"), isOn: $controller.lockCameraParams)
+                    CameraControlBar(controls: controller.cameraControls, enabled: controller.trackingReady)
+                } header: { Text(L10n.text("相機進階控制")) }
+                if let info = WorldMapStore.latestInfo() {
+                    Section {
+                        Toggle(isOn: Binding(get: { controller.continueFromLastMap },
+                                             set: { controller.setContinueFromLastMap($0) })) {
+                            Text(String(format: L10n.text("延續上次座標系（%.1f MB · %@）"),
+                                        Double(info.bytes) / 1_048_576, Self.ago(info.modified)))
+                        }
+                    } header: { Text(L10n.text("座標系")) }
+                }
+            }
+            .navigationTitle(L10n.text("掃描設定"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) {
+                Button(L10n.text("完成")) { showAdvanced = false }
+            } }
+        }
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(Color(uiColor: .systemGroupedBackground))
+        .preferredColorScheme(.dark)
+    }
+
+    private func settingLabel(_ title: String, _ detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+            Text(detail).font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }.padding(.vertical, 3)
+    }
+
+    private var scanDetails: some View {
+        NavigationStack {
+            List {
+                if let notice = controller.statusText {
+                    Section { Text(notice).font(.subheadline) }
+                }
+                if let summary = controller.scanSummary {
+                    ForEach(summaryRows(summary), id: \.text) { row in
+                        Label(row.text, systemImage: row.symbol)
+                            .font(.subheadline).foregroundStyle(row.tint)
                     }
                 }
+            }
+            .navigationTitle(L10n.text("掃描品質資訊"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) {
+                Button(L10n.text("完成")) { summaryExpanded = false }
+            } }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(Color(uiColor: .systemGroupedBackground))
+        .preferredColorScheme(.dark)
+    }
+
+    @ViewBuilder
+    private var scanSummaryCard: some View {
+        if controller.statusText != nil || controller.scanSummary.map({ !summaryRows($0).isEmpty }) == true {
+            Button { summaryExpanded = true } label: {
+                Label(L10n.text("查看掃描品質資訊"), systemImage: "info.circle")
+                    .font(.subheadline)
+                    .padding(.horizontal, 16).frame(minHeight: 44)
+                    .hudGlass(Capsule())
+                    .foregroundStyle(controller.statusText != nil ? Color.orange : .white)
             }
         }
     }

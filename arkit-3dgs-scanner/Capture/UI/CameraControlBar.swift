@@ -1,6 +1,6 @@
 //
 //  CameraControlBar.swift
-//  fable — 相機手動調整列（右側直立膠囊 + 展開滑桿）
+//  fable — 相機設定：具名控制項與自適應滑桿
 //
 
 import SwiftUI
@@ -11,88 +11,32 @@ struct CameraControlBar: View {
     let enabled: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            if controls.railExpanded, let item = controls.expanded { slider(for: item) }
-            if controls.railExpanded { iconRail } else { collapsedBadge }
-        }
-        .disabled(!enabled)
-        .opacity(enabled ? 1 : 0.4)
-        .animation(.easeInOut(duration: 0.2), value: controls.expanded)
-        .animation(.easeInOut(duration: 0.2), value: controls.railExpanded)
-    }
-
-    /// 收合狀態：一顆徽章。字母本身就是狀態 —— A ＝ 全自動、M ＝ 有手動覆寫，
-    /// 所以收起來也還看得出相機是不是被改過。
-    private var collapsedBadge: some View {
-        Button {
-            controls.syncFromDevice()
-            controls.railExpanded = true
-        } label: {
-            Text(controls.hasManualOverride ? "M" : "A")
-                .font(.system(size: 17, weight: .medium, design: .rounded))
-                .frame(width: 44, height: 44)
-                .hudGlass(Circle())
-        }
-        .foregroundStyle(controls.hasManualOverride ? .yellow : .white)
-        .accessibilityLabel(L10n.text("相機進階控制"))
-        .accessibilityValue(controls.hasManualOverride ? L10n.text("手動") : L10n.text("自動"))
-    }
-
-    // MARK: - 圖示列
-
-    private var iconRail: some View {
-        VStack(spacing: 6) {
-            // 頂端同一顆徽章 → 點一下收合（與展開是同一個位置，手指不用移動）
-            Button {
-                controls.expanded = nil
-                controls.railExpanded = false
-            } label: {
-                Text(controls.hasManualOverride ? "M" : "A")
-                    .font(.system(size: 16, weight: .medium, design: .rounded))
-                    .frame(width: 40, height: 40)
-            }
-            .foregroundStyle(controls.hasManualOverride ? .yellow : .white)
-            Divider().frame(width: 24).overlay(.white.opacity(0.3))
-
+        VStack(alignment: .leading, spacing: 16) {
             ForEach(CameraControls.Item.allCases) { item in
-                Button {
-                    controls.syncFromDevice()
-                    controls.expanded = (controls.expanded == item) ? nil : item
+                DisclosureGroup(isExpanded: Binding(
+                    get: { controls.expanded == item },
+                    set: { expanded in
+                        if expanded { controls.syncFromDevice() }
+                        controls.expanded = expanded ? item : nil
+                    })) {
+                    slider(for: item)
                 } label: {
-                    Image(systemName: item.symbol)
-                        .font(.system(size: 16, weight: .regular))
-                        .frame(width: 40, height: 40)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label(item.label, systemImage: item.symbol)
+                        Text(valueText(item)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    }
                 }
-                .foregroundStyle(tint(for: item))
-                .accessibilityLabel(item.label)
             }
-            Divider().frame(width: 24).overlay(.white.opacity(0.3))
             Button {
                 controls.resetAll()
                 controls.expanded = nil
             } label: {
-                Image(systemName: "arrow.uturn.backward")
-                    .font(.system(size: 15, weight: .regular))
-                    .frame(width: 40, height: 36)
+                Label(L10n.text("重設相機參數"), systemImage: "arrow.uturn.backward")
+                    .frame(minHeight: 44)
             }
-            .foregroundStyle(controls.hasManualOverride ? .white : .white.opacity(0.45))
+            .disabled(!controls.hasManualOverride)
         }
-        .padding(.vertical, 6)
-        .hudGlass(RoundedRectangle(cornerRadius: 22, style: .continuous))
-    }
-
-    /// 黃色 = 該項已被手動指定（一眼看出哪些脫離自動）
-    private func tint(for item: CameraControls.Item) -> Color {
-        let manual: Bool
-        switch item {
-        case .ev:      manual = controls.ev != 0
-        case .shutter: manual = controls.shutterManual
-        case .iso:     manual = controls.isoManual
-        case .wb:      manual = controls.wbManual
-        case .focus:   manual = controls.focusManual
-        }
-        if controls.expanded == item { return .cyan }
-        return manual ? .yellow : .white
+        .disabled(!enabled)
     }
 
     // MARK: - 展開的滑桿
@@ -100,11 +44,6 @@ struct CameraControlBar: View {
     @ViewBuilder
     private func slider(for item: CameraControls.Item) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(item.label).font(.caption.weight(.medium))
-                Spacer()
-                Text(valueText(item)).font(.caption.monospacedDigit())
-            }
             switch item {
             case .ev:
                 Slider(value: $controls.ev, in: controls.evRange) { _ in controls.applyEV() }
@@ -148,10 +87,9 @@ struct CameraControlBar: View {
             }
         }
         .tint(.cyan)
-        .hudText()
-        .frame(width: 190)
-        .padding(.horizontal, 12).padding(.vertical, 10)
-        .hudGlass(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(item.label)
+        .padding(.vertical, 10)
     }
 
     private func valueText(_ item: CameraControls.Item) -> String {
