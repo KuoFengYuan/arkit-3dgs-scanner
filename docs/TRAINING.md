@@ -1,136 +1,46 @@
-# COLMAP-free 3DGS 訓練管線設定
+# External 3DGS training
 
-手機 zip 解壓後**本身就是 COLMAP 資料集**（`images/ + sparse/0/*.bin`），
-LichtFeld-Studio 與 Inria 3DGS 零轉換直讀；nerfstudio 路線用 `arkit2gs.py` 轉出。
+**English** | [繁體中文](TRAINING.zh-TW.md)
 
-## 0. LichtFeld-Studio（高效能 C++/CUDA 實作，主要目標框架）
+The app prepares datasets on the phone; Gaussian training runs externally. Unzip the exported scan and use `images/ + sparse/0`. The sparse model contains selected image poses, per-image PINHOLE calibration, and initialization points. It does not contain complete SfM observations or tracks.
 
-```bash
-git clone https://github.com/MrNeRF/LichtFeld-Studio    # 依其 README 以 CMake/CUDA 建置
+## LichtFeld Studio / MrNeRF
 
-# 手機 zip 解壓後直接指向資料夾（COLMAP 格式自動辨識）
-LichtFeld-Studio -d scan_20260721_103000 -o output/scan_20260721_103000
-# 或啟動 GUI 後直接開啟該資料夾
+Open the extracted COLMAP dataset with [LichtFeld Studio](https://github.com/MrNeRF/LichtFeld-Studio). Follow that project's build/install guide and your installed version's help for CLI options. Record the trainer version and settings when comparing scans; this repository does not pin a trainer release.
+
+Use `sparse/0/images.bin` as the training-image list. The images directory preserves all captured originals, including photos excluded by selection. A workflow that independently enumerates that directory must also apply `training-selection.json`'s selected IDs.
+
+`points3D.bin` is the initialization point cloud, not a trained Gaussian model. Mobile output is currently capped at 250,000 points. New scans do not include `gaussians.ply`; that is a potential training result, not a missing input file.
+
+## Other trainers
+
+The optional converter can write COLMAP and Nerfstudio layouts:
+
+```sh
+python tools/arkit2gs.py /path/to/scan -o /path/to/dataset --format both
 ```
 
-對應關係：`sparse/0/cameras.bin`（單一 PINHOLE 相機）、`images.bin`（w2c 姿態，
-名稱對應 `images/` 內檔案）、`points3D.bin`（擇優下採樣後的 LiDAR 點雲，作為
-Gaussians 初始化）。點雲上限由 App 端 `CaptureConfig.exportMaxPoints`（預設 25 萬）
-控制 —— LichtFeld 的 densification 會自行增生，初始點過多只會拖慢前期迭代。
+Check conversion options and selected-frame handling for your input rather than assuming a re-converted dataset is identical to the app export. Follow the installed trainer's documentation for dataset import, image scaling, evaluation views, initialization, and camera optimization.
 
-注意：App 匯出的姿態已做過兩層優化 —— 每個關鍵幀掛 ARAnchor，ARKit 地圖優化
-（迴環/重定位）的修正會回寫到錨點，停止掃描時讀回「修正後姿態」寫入 images.bin；
-points3D.bin 則是以同一組修正後姿態對全部關鍵幀深度做**多視角加權重融合**的結果
-（深度雜訊 ~1/√N 收斂），兩者幾何完全一致。LichtFeld 若有姿態優化選項（版本演進中，
-見其 `--help`）仍建議打開吸收殘差；大場景可再做第 4 節的 point_triangulator 精修。
+[Nerfstudio Splatfacto](https://docs.nerf.studio/nerfology/methods/splat.html) documents its training and export workflow. Other potential consumers include the [original 3DGS implementation](https://github.com/graphdeco-inria/gaussian-splatting) and [gsplat](https://github.com/nerfstudio-project/gsplat). Supported loaders, hardware requirements, and flags depend on their versions; no cross-trainer PSNR gain or runtime is guaranteed here.
 
-## 1. Nerfstudio splatfacto（想要姿態微調時的首選）
+## Pose refinement and missing tracks
 
-```bash
-pip install nerfstudio            # 需要 CUDA；gsplat 後端
+The app uses corrected anchors and, when validation passes, LiDAR-guided local BA. Failed validation retains prior poses. Refusion uses the matching pose set; changing cameras independently from the initialization cloud can create inconsistency.
 
-# 基本訓練 —— transforms.json 內含 ply_file_path，
-# nerfstudio dataparser 會自動載入點雲作為 Gaussians 初始化種子
-ns-train splatfacto --data dataset/nerfstudio
+Empty image observations and point tracks are valid for this exported seed model, but a bundle adjuster cannot reconstruct missing correspondences by itself. A desktop refinement pipeline would need feature extraction, matching, consistent camera/image IDs, triangulation, and validation before BA. See COLMAP's [known-camera-pose reconstruction discussion](https://colmap.github.io/faq.html#reconstruct-sparse-dense-model-from-known-camera-poses). Pose changes require corresponding cloud realignment or refusion. The phone pipeline does not require running desktop COLMAP.
 
-# 建議的完整參數（ARKit 資料實戰配置）
-ns-train splatfacto \
-  --data dataset/nerfstudio \
-  --pipeline.model.camera-optimizer.mode SO3xR3 \
-  --pipeline.model.rasterize-mode antialiased \
-  nerfstudio-data \
-  --orientation-method up \
-  --center-method poses \
-  --auto-scale-poses True
-```
+## Optional depth supervision
 
-關鍵參數解讀：
+Saved LiDAR depth is float32 in meters, with dimensions recorded in scan metadata/frames. Never assume all files are 256×192. Conversion to millimeter PNG or another trainer-specific format needs valid-depth masking, unit scaling, image/depth resolution and orientation handling, and the trainer's expected camera convention. Merely adding a `depth_file_path` does not enable a depth loss in every trainer.
 
-| 參數 | 為什麼 |
-|---|---|
-| `camera-optimizer.mode SO3xR3` | **最重要**。ARKit VIO 姿態很好但非 BA 級精度（典型殘差 0.1–0.5°/數 mm 漂移），讓訓練同時微調姿態可吸收殘差，PSNR 通常 +1~2dB |
-| `orientation-method up` | 用姿態平均 up 向量歸一世界（我們是 gravity 對齊，等於免費午餐） |
-| `auto-scale-poses` | nerfstudio 內部歸一到單位尺度；匯出 splat 時會轉回公制 |
-| 無 `ply_file_path` 時 | 加 `--pipeline.model.random-init True` 退回隨機初始化 |
+## Diagnosing blur and double edges
 
-檢視與匯出：
+1. Run `tools/validate_dataset.py` on the scan; inspect pose jumps, intervals, and calibration consistency.
+2. Compare the original and optimized copy with identical trainer settings, image scaling, and held-out views.
+3. Inspect photos at useful resolution. Motion estimates are risks, while low texture can prevent reliable sharpness measurement. Capture clearer overlapping views if actual details are weak.
+4. Check double edges and local surface thickness. Additional points and lower optimization residuals do not prove absolute accuracy.
+5. Keep coordinate frames consistent: COLMAP cameras/points receive the configured paired world rotation; raw JSONL and PLY previews retain ARKit coordinates. See [coordinates](COORDINATES.md).
+6. Inspect incomplete coverage, reflections, moving objects, exposure changes, and long-range drift before attributing every artifact to trainer settings.
 
-```bash
-ns-viewer --load-config outputs/.../config.yml
-ns-export gaussian-splat --load-config outputs/.../config.yml --output-dir exports/
-```
-
-## 2. Inria 官方 3DGS（graphdeco）
-
-```bash
-git clone https://github.com/graphdeco-inria/gaussian-splatting --recursive
-cd gaussian-splatting
-
-python train.py -s /path/to/dataset/colmap --eval
-python render.py -m output/<model_id>
-```
-
-我們產出的 `dataset/colmap/` 結構與其 loader 期望完全一致，**不需要跑任何 COLMAP 指令**：
-
-```
-colmap/
-├── images/
-└── sparse/0/
-    ├── cameras.bin     # 1 台 PINHOLE 相機（fx fy cx cy）
-    ├── images.bin      # w2c 四元數(wxyz)+平移，空 2D 觀測
-    └── points3D.bin    # LiDAR 彩色點雲，空 track
-```
-
-原理：Inria 的 `dataset_readers.readColmapSceneInfo()` 只讀取這三個檔案的姿態/內參/點雲，
-不依賴 SfM 的匹配資訊（track 為空完全合法；首次載入時它會自行把 points3D 轉成內部 ply）。
-
-注意：Inria 版假設影像未畸變（我們是 ISP 校正後的 PINHOLE，符合），且**沒有**姿態微調功能 ——
-若對品質敏感，優先用 splatfacto，或先做下方的「選配 BA 精修」。
-
-## 3. gsplat / 其他框架
-
-```bash
-# gsplat 官方範例 trainer（讀 COLMAP 格式）
-cd gsplat/examples
-python simple_trainer.py default --data-dir dataset/colmap --data-factor 1
-
-# OpenSplat（CPU/Metal 亦可跑，直接吃 nerfstudio 格式）
-opensplat dataset/nerfstudio -n 30000
-
-# Postshot / Brush 等 GUI 工具：匯入 COLMAP 資料夾即可
-```
-
-## 4. 選配：以 COLMAP point_triangulator 精修（仍不跑 SfM）
-
-想要「ARKit 姿態 + SfM 級三角化點雲」的折衷方案：固定我們的姿態，只讓 COLMAP 做特徵三角化（幾秒鐘，不是幾小時的 mapper）：
-
-```bash
-# 需先把 sparse/0 轉成 txt（arkit2gs.py 加 --txt），COLMAP 以其為固定姿態先驗
-colmap feature_extractor  --database_path db.db --image_path colmap/images
-colmap exhaustive_matcher --database_path db.db
-colmap point_triangulator --database_path db.db --image_path colmap/images \
-    --input_path colmap/sparse/0 --output_path colmap/sparse/0_refined
-```
-
-得到帶 track 的高品質 points3D，姿態不變。對大場景 / 反光材質特別有感。
-
-## 5. 深度監督（選配）
-
-zip 內的 `depth/*.bin` 是 256×192 float32 公尺值。轉成 nerfstudio 深度格式（16-bit PNG，毫米）後可用 depth loss：
-
-```python
-import numpy as np; from PIL import Image
-d = np.fromfile("frame_00001_depth.bin", np.float32).reshape(192, 256)
-Image.fromarray((d * 1000).astype(np.uint16)).save("frame_00001_depth.png")
-# transforms.json 每幀加 "depth_file_path"，nerfstudio 預設 depth_unit_scale_factor=1e-3
-```
-
-`ns-train depth-nerfacto` 直接支援；splatfacto 的深度正則化見 nerfstudio 文件 `--pipeline.model.use-depth-loss`（版本演進中，依安裝版本查 `ns-train splatfacto --help`）。
-
-## 6. 品質預期與除錯順序
-
-ARKit 姿態 vs COLMAP 姿態的訓練品質：室內小場景通常相差 < 1dB PSNR（開 camera-optimizer 後幾乎抹平）；長走廊 / 大迴圈場景 VIO 漂移會顯現 —— 這時候：
-
-1. 先跑 `validate_dataset.py`（追蹤跳變、幀間隔異常一眼看出）
-2. 掃描時避免快速甩動與長時間遮擋（跳變的來源是 ARKit relocalization）
-3. 分段掃描、分段訓練，或用第 4 節的 point_triangulator + `colmap bundle_adjuster`（固定內參）做輕量 BA
+New exports use `capture-meta.json`. If an old package is misdetected because it contains `meta.json`, re-export with the updated app or rename the extracted capture metadata. Existing archives do not update automatically. No claim is made that selection or local refinement will remove all 3DGS ghosts without retraining and comparison.

@@ -43,8 +43,8 @@ struct FloorPlanView: View {
                     Spacer()
                     VStack(spacing: 8) {
                         Image(systemName: "square.dashed").font(.largeTitle)
-                        Text("沒有偵測到牆面").font(.subheadline)
-                        Text("RoomPlan 需要沿著牆面掃過去；\n只繞著物件拍不會產生牆")
+                        Text(L10n.text("沒有偵測到牆面")).font(.subheadline)
+                        Text(L10n.text("RoomPlan 需要沿著牆面掃過去；\n只繞著物件拍不會產生牆"))
                             .font(.caption)
                             .multilineTextAlignment(.center)
                             .foregroundStyle(.white.opacity(0.5))
@@ -57,21 +57,21 @@ struct FloorPlanView: View {
                 legend
             }
         }
-        .alert("房間名稱", isPresented: Binding(
+        .alert(L10n.text("房間名稱"), isPresented: Binding(
             get: { renamingIndex != nil },
             set: { if !$0 { renamingIndex = nil } })) {
-            TextField("例如：客廳、主臥、書房", text: $draftName)
-            Button("清除") {
+            TextField(L10n.text("例如：客廳、主臥、書房"), text: $draftName)
+            Button(L10n.text("清除")) {
                 if let i = renamingIndex { onRename(i, "") }
                 renamingIndex = nil
             }
-            Button("取消", role: .cancel) { renamingIndex = nil }
-            Button("儲存") {
+            Button(L10n.text("取消"), role: .cancel) { renamingIndex = nil }
+            Button(L10n.text("儲存")) {
                 if let i = renamingIndex { onRename(i, draftName) }
                 renamingIndex = nil
             }
         } message: {
-            Text("會一併寫進匯出的 floorplan.json 與 .svg")
+            Text(L10n.text("會一併寫進匯出的 floorplan.json 與 .svg"))
         }
     }
 
@@ -87,7 +87,7 @@ struct FloorPlanView: View {
             }
             .foregroundStyle(.white)
             Spacer()
-            Text("平面圖").font(.headline).foregroundStyle(.white)
+            Text(L10n.text("平面圖")).font(.headline).foregroundStyle(.white)
             Spacer()
             Button { showFurniture.toggle() } label: {
                 Image(systemName: showFurniture ? "chair.lounge.fill" : "chair.lounge")
@@ -108,19 +108,19 @@ struct FloorPlanView: View {
             // 點雲版不列門窗：它是**刻意**不推論門窗的（牆上的缺口跟「沒掃到」
             // 在點雲裡長得一樣），列一個永遠是 0 的欄位只會讓人以為掃壞了。
             Text(data.isFromPointCloud
-                 ? "\(data.walls.count) 牆 · 由點雲抽出"
-                 : "\(data.roomCount) 房 · \(data.walls.count) 牆 · "
-                   + "\(data.doors.count) 門 · \(data.windows.count) 窗")
+                 ? L10n.text("\(data.walls.count) 牆 · 由點雲抽出")
+                 : L10n.text("\(data.roomCount) 房 · \(data.walls.count) 牆 · ")
+                   + L10n.text("\(data.doors.count) 門 · \(data.windows.count) 窗"))
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.white)
             // 拿雷射測距儀對照時看的就是這三個數
             // 外接尺寸用 drawnSizeM（外緣到外緣）而非 sizeM（牆中心線）——
             // 圖上的尺寸標註標的就是前者，用後者會出現「標頭 4.48 / 圖上 4.71」的矛盾
             Text(data.floorAreaM2 > 0.5
-                 ? String(format: "地板 %.1f m²　·　外接 %.2f × %.2f m　·　樓高 %.2f m",
+                 ? String(format: L10n.text("地板 %.1f m²　·　外接 %.2f × %.2f m　·　樓高 %.2f m"),
                           data.floorAreaM2, data.drawnSizeM.x, data.drawnSizeM.y,
                           data.medianWallHeightM)
-                 : String(format: "外接 %.2f × %.2f m　·　最長牆 %.2f m　·　樓高 %.2f m",
+                 : String(format: L10n.text("外接 %.2f × %.2f m　·　最長牆 %.2f m　·　樓高 %.2f m"),
                           data.drawnSizeM.x, data.drawnSizeM.y, data.longestWallM,
                           data.medianWallHeightM))
                 .font(.caption.monospacedDigit())
@@ -134,9 +134,9 @@ struct FloorPlanView: View {
             // 是保證誤導的建議，使用者照著做也不會變好。
             if let reason = data.incompleteReason {
                 warn(reason + (data.isFromPointCloud
-                     ? "（3DGS 那種繞著物件拍的路徑產生不出完整的牆）"
-                     : "（RoomPlan 需要沿牆掃一圈，"
-                       + "3DGS 那種繞著物件拍的路徑產生不出完整的牆）"))
+                     ? L10n.text("（3DGS 那種繞著物件拍的路徑產生不出完整的牆）")
+                     : L10n.text("（RoomPlan 需要沿牆掃一圈，")
+                       + L10n.text("3DGS 那種繞著物件拍的路徑產生不出完整的牆）")))
             }
         }
         .padding(.horizontal, 16)
@@ -287,10 +287,10 @@ struct FloorPlanView: View {
 
     private var legend: some View {
         HStack(spacing: 14) {
-            key(Self.color(.wall), "牆"); key(Self.color(.door), "門")
-            key(Self.color(.window), "窗"); key(Self.color(.opening), "開口")
+            key(Self.color(.wall), L10n.text("牆")); key(Self.color(.door), L10n.text("門"))
+            key(Self.color(.window), L10n.text("窗")); key(Self.color(.opening), L10n.text("開口"))
             Spacer()
-            Text("點房間可命名 · 雙擊置中").foregroundStyle(.white.opacity(0.45))
+            Text(L10n.text("點房間可命名 · 雙擊置中")).foregroundStyle(.white.opacity(0.45))
         }
         .font(.caption2)
         .foregroundStyle(.white.opacity(0.8))

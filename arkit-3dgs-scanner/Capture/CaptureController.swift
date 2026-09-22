@@ -307,7 +307,7 @@ final class CaptureController: NSObject, ObservableObject {
         let cur = arView?.session.configuration?.videoFormat
         for f in ARWorldTrackingConfiguration.supportedVideoFormats {
             let r = f.imageResolution
-            let mark = (f == cur) ? "  ← 目前使用" : ""
+            let mark = (f == cur) ? L10n.text("  ← 目前使用") : ""
             print(String(format: "[VideoFormat] %.0f×%.0f @ %dfps  %@%@",
                          r.width, r.height, f.framesPerSecond,
                          f.captureDeviceType.rawValue, mark))
@@ -350,7 +350,7 @@ final class CaptureController: NSObject, ObservableObject {
         do {
             try beginSessionStorage()
         } catch {
-            statusText = "無法建立掃描資料夾：\(error.localizedDescription)"
+            statusText = L10n.text("無法建立掃描資料夾：\(error.localizedDescription)")
             return
         }
         scanGeneration = UUID()
@@ -412,7 +412,7 @@ final class CaptureController: NSObject, ObservableObject {
         phase = .processing
         previewRenderTask?.cancel()
         exportProgress = 0
-        statusText = "正在儲存最後的影像…"
+        statusText = L10n.text("正在儲存最後的影像…")
         UIApplication.shared.isIdleTimerDisabled = true
         releaseCameraLocks()
         let generation = scanGeneration
@@ -423,7 +423,7 @@ final class CaptureController: NSObject, ObservableObject {
             await Task.yield()
             for task in Array(writeTasks.values) { await task.value }
             guard isAttached, generation == scanGeneration else { return }
-            statusText = "正在完成最後的特徵處理…"
+            statusText = L10n.text("正在完成最後的特徵處理…")
             await featureProcessor?.drain()
             guard isAttached, generation == scanGeneration else { return }
             let featureWork = await featureProcessor?.report()
@@ -453,7 +453,7 @@ final class CaptureController: NSObject, ObservableObject {
 
             // Persist a bounded fallback before optional map/mesh processing. A failed later
             // stage must not leave a long scan with only an unfinished in-memory preview.
-            statusText = "正在保存掃描預覽…"
+            statusText = L10n.text("正在保存掃描預覽…")
             await saveProcessingCheckpoint()
             guard isAttached, generation == scanGeneration else { return }
             // Keep a bounded anchor-local fallback for resume, rather than holding the entire
@@ -461,12 +461,12 @@ final class CaptureController: NSObject, ObservableObject {
             await accumulator?.prepareForOfflineFusion(limit: min(config.exportMaxPoints, 100_000))
             guard isAttached, generation == scanGeneration else { return }
             let refined = snapshotRefinedTransforms()
-            statusText = "正在整理場景網格…"
+            statusText = L10n.text("正在整理場景網格…")
             let meshVerts = await snapshotMeshVertices()
             guard isAttached, generation == scanGeneration else { return }
-            statusText = "正在保存世界地圖…"
+            statusText = L10n.text("正在保存世界地圖…")
             await saveWorldMapBeforeProcessing()
-            statusText = "正在完成空間擷取…"
+            statusText = L10n.text("正在完成空間擷取…")
             await floorPlan.waitForSegment(timeout: 12)
             guard isAttached, generation == scanGeneration else { return }
             arView?.session.pause()
@@ -494,7 +494,7 @@ final class CaptureController: NSObject, ObservableObject {
 
     private func saveWorldMapBeforeProcessing() async {
         guard RefusionEngine.hasOptionalProcessingHeadroom else {
-            scanNotice = "記憶體不足以安全保存世界地圖，已略過；掃描照片與預覽已保留。"
+            scanNotice = L10n.text("記憶體不足以安全保存世界地圖，已略過；掃描照片與預覽已保留。")
             return
         }
         if let box = await captureWorldMap() { await persistWorldMap(box) }
@@ -527,7 +527,7 @@ final class CaptureController: NSObject, ObservableObject {
             exportProgress = base
         }
 
-        stage("讀取關鍵幀…", 0)
+        stage(L10n.text("讀取關鍵幀…"), 0)
         let raw = await writer.snapshotRecords()
         guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
         if !raw.isEmpty {
@@ -563,7 +563,7 @@ final class CaptureController: NSObject, ObservableObject {
         mark("停止收尾與讀取關鍵幀")
         let anchorCorrectedRecords = refinedRecords
         if config.baRounds > 0 {
-            stage("逐張匹配拍攝影像…", 0.10)
+            stage(L10n.text("逐張匹配拍攝影像…"), 0.10)
             let records = BlurFilter.annotate(refinedRecords)
             let rounds = config.baRounds
             // The live worker is best-effort; release it and rebuild tracks from ALL saved
@@ -573,7 +573,7 @@ final class CaptureController: NSObject, ObservableObject {
                 Task { @MainActor [weak self] in
                     guard let self, self.phase == .processing, self.scanGeneration == generation else { return }
                     self.exportProgress = 0.10 + p * 0.24
-                    self.statusText = p < 0.85 ? "逐張匹配拍攝影像… \(Int(p / 0.85 * 100))%" : "驗證相機位置修正…"
+                    self.statusText = p < 0.85 ? L10n.text("逐張匹配拍攝影像… \(Int(p / 0.85 * 100))%") : L10n.text("驗證相機位置修正…")
                 }
             }
             let result = await Task.detached(priority: .userInitiated) {
@@ -595,7 +595,7 @@ final class CaptureController: NSObject, ObservableObject {
         // 的鄰居，用未修正的姿態會找錯鄰居。判定寫回紀錄而非直接刪除，
         // poses_refined.jsonl 與 images/ 都保留完整，可回頭檢查判定對不對。
         mark("位姿校正")
-        stage("複核模糊幀…", 0.35)
+        stage(L10n.text("複核模糊幀…"), 0.35)
         let recordsToCheck = refinedRecords
         let annotated = await Task.detached(priority: .userInitiated) {
             BlurFilter.annotate(recordsToCheck)
@@ -611,7 +611,7 @@ final class CaptureController: NSObject, ObservableObject {
 
         mark("模糊複核")
         if hasLiDAR, config.captureFloorPlan, FloorPlanCapture.isSupported {
-            stage("建立空間結構…", 0.40)
+            stage(L10n.text("建立空間結構…"), 0.40)
             let plan = await floorPlan.build()
             guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
             if let plan, !plan.walls.isEmpty {
@@ -624,7 +624,7 @@ final class CaptureController: NSObject, ObservableObject {
         var points: [CloudPoint] = []
         var fusionInterrupted = false
         if hasLiDAR && config.saveDepth && !refinedRecords.isEmpty {
-            stage("融合點雲…", 0.45)
+            stage(L10n.text("融合點雲…"), 0.45)
             let records = refinedRecords
             let cfg = config
             // 重融合佔進度條的後 55%（前面三段各自佔一段，見 stage）
@@ -651,13 +651,13 @@ final class CaptureController: NSObject, ObservableObject {
                 // Fallback live points were built with anchor poses, not the newly refined poses.
                 refinedRecords = BlurFilter.annotate(anchorCorrectedRecords)
                 baResult?.poses = [:]
-                scanNotice = "融合時記憶體不足，已停止精細融合並保留即時點雲預覽；照片與深度資料仍完整保留。"
+                scanNotice = L10n.text("融合時記憶體不足，已停止精細融合並保留即時點雲預覽；照片與深度資料仍完整保留。")
                 points = await accumulator.checkpointPoints(limit: min(cfg.exportMaxPoints, 100_000),
                                                             anchorTransforms: latestTileTransforms)
             } else {
                 let dense = result.points
                 if needsDensePlan, RefusionEngine.hasOptionalProcessingHeadroom {
-                    stage("建立平面圖…", 0.96)
+                    stage(L10n.text("建立平面圖…"), 0.96)
                     await usePointCloudPlan(dense)
                 }
                 guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
@@ -665,7 +665,7 @@ final class CaptureController: NSObject, ObservableObject {
             }
         }
         if !hasLiDAR && config.reconstructFromImages {
-            stage("影像多視角重建…", 0.45)
+            stage(L10n.text("影像多視角重建…"), 0.45)
             let records = refinedRecords, cfg = config
             let onProgress: @Sendable (Double) -> Void = { p in
                 Task { @MainActor [weak self] in
@@ -688,12 +688,12 @@ final class CaptureController: NSObject, ObservableObject {
                 encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                 try encoder.encode(report).write(to: dir.appendingPathComponent("rgb-reconstruction.json"), options: .atomic)
             } catch {
-                scanNotice = "影像重建報告儲存失敗：\(error.localizedDescription)"
+                scanNotice = L10n.text("影像重建報告儲存失敗：\(error.localizedDescription)")
             }
             if result.points.isEmpty, scanNotice == nil {
                 scanNotice = points.isEmpty
-                    ? "照片已保留，但尚無可靠點雲。請對準有紋理的表面側向補拍至少三張重疊照片。"
-                    : "影像重建未取得可靠匹配，目前顯示已驗證的稀疏特徵點。請側向補拍至少三張重疊照片。"
+                    ? L10n.text("照片已保留，但尚無可靠點雲。請對準有紋理的表面側向補拍至少三張重疊照片。")
+                    : L10n.text("影像重建未取得可靠匹配，目前顯示已驗證的稀疏特徵點。請側向補拍至少三張重疊照片。")
             }
         }
         if points.isEmpty, !fusionInterrupted {      // 無 LiDAR / 無深度時退回即時累積雲
@@ -708,7 +708,7 @@ final class CaptureController: NSObject, ObservableObject {
               + seg.map { String(format: "%@ %.2fs", $0.0, $0.1) }.joined(separator: " + ")
               + "（含停止收尾；重融合段含已執行的平面圖，尚未計入最後歷史存檔）")
 
-        stage("挑選訓練影像…", 0.98)
+        stage(L10n.text("挑選訓練影像…"), 0.98)
         let selectionRecords = refinedRecords
         let selection = await Task.detached(priority: .utility) {
             TrainingFrameSelector.select(selectionRecords,
@@ -723,7 +723,7 @@ final class CaptureController: NSObject, ObservableObject {
 
         reviewPoints = points
         if !hasLiDAR, points.isEmpty, scanNotice == nil {
-            scanNotice = "照片已保留，但尚無通過多視角驗證的特徵點。請對準有紋理的表面緩慢側向補拍。"
+            scanNotice = L10n.text("照片已保留，但尚無通過多視角驗證的特徵點。請對準有紋理的表面緩慢側向補拍。")
         }
         // RoomPlan 沒開（或機型不支援）→ 平面圖直接用點雲版。
         // 不這樣做的話 floorPlanData 永遠是 nil，review 的平面圖按鈕不會出現，
@@ -748,9 +748,9 @@ final class CaptureController: NSObject, ObservableObject {
         do {
             try await ScanLibrary.shared.saveReview(directory: dir, points: points, records: refinedRecords)
         } catch {
-            scanNotice = "掃描原始資料已保留，但歷史點雲預覽儲存失敗：\(error.localizedDescription)"
+            scanNotice = L10n.text("掃描原始資料已保留，但歷史點雲預覽儲存失敗：\(error.localizedDescription)")
         }
-        statusText = corrected > 0 ? "姿態已修正 \(corrected) 幀（ARKit 地圖優化）" : nil
+        statusText = corrected > 0 ? L10n.text("姿態已修正 \(corrected) 幀（ARKit 地圖優化）") : nil
     }
 
     /// 驗收後寫入 COLMAP、PLY 與修正後姿態，打包成外部 3DGS 訓練資料。
@@ -758,13 +758,13 @@ final class CaptureController: NSObject, ObservableObject {
         guard phase == .review,
               let dir = sessionDir else { return }
         guard canUseScan else {
-            statusText = "尚無可用影像，請繼續掃描後再匯出"
+            statusText = L10n.text("尚無可用影像，請繼續掃描後再匯出")
             return
         }
         let returnPhase = phase
         phase = .exporting
         exportedZip = nil
-        statusText = "正在整理影像與點雲…"
+        statusText = L10n.text("正在整理影像與點雲…")
         UIApplication.shared.isIdleTimerDisabled = true
         let records = refinedRecords
         let points = reviewPoints
@@ -777,19 +777,19 @@ final class CaptureController: NSObject, ObservableObject {
                                                            flipWorldUp: flipWorldUp)
                 }.value
                 try await writeFloorPlan(to: dir)
-                statusText = "正在壓縮檔案，完成後即可分享…"
+                statusText = L10n.text("正在壓縮檔案，完成後即可分享…")
                 let zip = try await Task.detached(priority: .userInitiated) {
                     try ExportManager.makeArchive(of: dir)
                 }.value
                 _ = await writer?.finish()
                 exportedZip = zip
-                statusText = "已完成：\(records.count) 張影像・\(points.count) 個點"
+                statusText = L10n.text("已完成：\(records.count) 張影像・\(points.count) 個點")
                 phase = .done
                 writer = nil
                 accumulator = nil
             } catch {
                 // 保留 writer 與驗收資料，允許重試及續掃；失敗不能顯示完成。
-                statusText = "匯出失敗：\(error.localizedDescription)。資料已保留，可重新匯出。"
+                statusText = L10n.text("匯出失敗：\(error.localizedDescription)。資料已保留，可重新匯出。")
                 phase = returnPhase
             }
         }
@@ -799,7 +799,7 @@ final class CaptureController: NSObject, ObservableObject {
     func resumeScan() {
         guard phase == .review, arView != nil, writer != nil, !isInBackground else { return }
         if case .failed = sessionState {
-            statusText = "相機追蹤已失效。請先匯出目前資料，再開始新掃描。"
+            statusText = L10n.text("相機追蹤已失效。請先匯出目前資料，再開始新掃描。")
             return
         }
         scanGeneration = UUID()
@@ -1137,7 +1137,7 @@ final class CaptureController: NSObject, ObservableObject {
             }
             loopHint = nil
         } else if !loopClosed, traveledM >= config.loopHintTravelM {
-            loopHint = String(format: "已走 %.0f m —— 走回起點閉環，讓 ARKit 修正累積漂移",
+            loopHint = String(format: L10n.text("已走 %.0f m —— 走回起點閉環，讓 ARKit 修正累積漂移"),
                               traveledM)
         }
         // RoomPlan 的引導與牆高檢查。
@@ -1272,7 +1272,7 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
         assessedScanFrames += 1
         if a.captureBlocked || !sessionState.canCapture { blockedScanFrames += 1 }
         if ProcessInfo.processInfo.thermalState == .critical {
-            scanNotice = "裝置過熱，已停止掃描並保留資料。請等手機降溫後再繼續。"
+            scanNotice = L10n.text("裝置過熱，已停止掃描並保留資料。請等手機降溫後再繼續。")
             stopScan()
             return
         }
@@ -1464,7 +1464,7 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
     func session(_ session: ARSession, didFailWithError error: Error) {
         sessionState = .failed(error.localizedDescription)
         if phase == .scanning {
-            scanNotice = "相機追蹤中斷，已停止掃描並保留資料。匯出後請開始新掃描。"
+            scanNotice = L10n.text("相機追蹤中斷，已停止掃描並保留資料。匯出後請開始新掃描。")
             stopScan()
         }
     }
@@ -1568,7 +1568,7 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
                    let anchor = arView?.session.currentFrame?.anchors.first(where: { $0.identifier == id }) {
                     arView?.session.remove(anchor: anchor)
                 }
-                scanNotice = "影像儲存失敗：\(error.localizedDescription)。已停止掃描，先前成功儲存的資料仍保留。"
+                scanNotice = L10n.text("影像儲存失敗：\(error.localizedDescription)。已停止掃描，先前成功儲存的資料仍保留。")
                 stopScan()
                 return
             }

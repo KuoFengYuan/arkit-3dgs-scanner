@@ -1,49 +1,51 @@
-# 拍攝吞吐量與預覽工作預算
+# Capture throughput and live-preview budgets
 
-## 依據與目標
+**English** | [繁體中文](CAPTURE_THROUGHPUT.zh-TW.md)
 
-`scan_20260920_134924_542C66` 有 45 張照片、約 83.24 秒，照片間隔中位數 2.026 秒、P90 2.179 秒；品質判定拒絕 32 / 5,005 幀。834 次即時融合平均約 66.1 ms、最大 409.8 ms，主執行緒幾何套用平均約 0.15 ms。這表示不能只靠放寬品質門檻解決拍攝稀疏。
+## Evidence and goal
 
-程式原先在照片寫完後仍等待 `FeatureTracker.add`，才釋放 `pendingWrites` 名額。特徵處理過慢時，照片即使已寫完也持續佔用三個寫入名額。本輪移除這個耦合；舊資料沒有 JPEG／特徵分段計時，尚不能量化它佔兩秒間隔的多少比例。
+A historical 45-photo scan lasting about 83.24 seconds had median/P90 photo intervals of 2.026/2.179 seconds, while quality checks rejected only 32 of 5,005 frames. Its 834 preview fusions averaged about 66.1 ms (maximum 409.8 ms); main-thread geometry application averaged about 0.15 ms. Relaxing quality thresholds alone would not address the sparse capture.
 
-## 照片與可選特徵工作
+The writer previously held a `pendingWrites` slot until `FeatureTracker.add` finished, even after the photo had been saved. Optional matching could occupy all three write slots. This coupling was removed; the old report lacks enough timing detail to attribute an exact fraction of its two-second interval.
 
-`FrameWriter` 仍序列化 JPEG、深度、信心圖及 JSONL 寫入，最多三個待完成照片工作。每次寫入使用 `autoreleasepool` 釋放編碼暫存，回傳排隊／編碼／I/O 耗時。只有成功寫入才增加保存張數。
+## Photo and optional feature work
 
-成功後呼叫 `LatestFrameProcessor.submit` 即返回，不等待特徵匹配。該 actor 最多保留一個執行中工作及一個最新待處理工作，新的提交取代舊的待處理影格，使用 utility 優先序。影像是應用程式自己的 buffer 複本，不保留 `ARFrame`；讀取期間不修改內容。這不是整個 App 最多五張 buffer 的保證，ARKit、預覽、編碼與 pool 另有用量。
+`FrameWriter` serializes JPEG, depth, confidence, and JSONL writes, with at most three pending photo jobs. An autorelease pool releases encoding scratch per write. Only successful writes increase the saved count; queue, encoding, and I/O durations are recorded separately.
 
-停止時先等待所有照片工作，再 `drain` 特徵工作，完成後才讀取 BA 觀測。續掃沿用已排空的工作佇列；離開或重建掃描時關閉舊佇列、丟棄待處理工作，以掃描 generation 防止舊回呼修改新掃描。執行中的舊工作可完成，但只持有舊 tracker。
+After writing, `LatestFrameProcessor.submit` returns without waiting for matching. The actor retains one running and one newest pending job; newer submissions replace the pending job. Utility-priority processing uses owned image-buffer copies, never retained ARFrames. ARKit, preview, encoders, and pools have additional buffers, so this is not an app-wide buffer-count bound.
 
-`FeatureTracker` 只保留最近四幀描述子，因為匹配原本只回看四幀。淘汰前把已有 track 的特徵轉為不含影像 patch 的觀測；舊觀測仍可與新觀測組成至少三幀的 track 供 BA 使用。歷史區最多 200,000 筆，另加最近四幀觀測；超過時淘汰最舊部分並記錄數量。這是 BA 的記憶體／歷史範圍折衷，不會刪除磁碟照片或改掉其原始姿態。高負載時只有部分照片參與特徵匹配，並非所有保存照片都會有 BA 觀測。
+Stopping awaits photo jobs, drains feature work, then reads BA observations. Resuming uses the drained queue. Closing/resetting drops pending work and rejects stale callbacks by scan generation; any already-running task only holds the old tracker.
 
-## 即時深度取樣
+The live `FeatureTracker` retains four recent descriptor frames. Evicted tracked features become compact observations without image patches. Historical observations can still form tracks spanning at least three frames for BA. History is capped at 200,000 observations plus the recent frames; oldest excess observations are discarded and counted. This does not delete photos or change raw poses. Under load, not every saved photo receives live BA observations; the offline pass can process saved frames later.
 
-`PreviewSamplingBudget` 將一次候選深度位置限制為 6,000 個；256 × 192 深度圖起始實際步長為 3，而原先步長 2 會遍歷 12,288 個位置。不同更新輪替 x/y 起點，固定步長時可遍歷所有像素；相機移動、過濾或步長改變仍可能造成局部細節缺失，不能保證每個表面都被觀測。
+## Live depth sampling
 
-整次擷取、時間一致性檢查與格插入超過 35 ms，下一次增大步長；連續 12 次低於 17.5 ms 才減小一步。時間回饋步長範圍為設定下限至 6；若深度圖特別大，候選數上限可要求更大的實際步長。融合格粗化等操作仍可能出現超時，這不是硬即時截止時間。
+`PreviewSamplingBudget` limits each update to 6,000 candidate positions. A 256×192 depth map starts at stride 3 rather than the previous stride 2 / 12,288 positions. Rotating x/y offsets cover all pixels at a fixed stride, but camera motion, filtering, and stride changes can still leave gaps.
 
-原始照片、深度保存解析度、深度一致性門檻、voxel 尺寸與離線重融合取樣不因這個預覽預算而改變。低記憶體時若退回即時預覽，回退結果也會反映較稀的即時取樣。無 LiDAR 的稀疏點路徑不套用深度預算。
+Work exceeding 35 ms increases the next stride. Twelve consecutive updates below 17.5 ms reduce it by one. Feedback ranges from the configured minimum to 6, but unusually large maps can require a larger effective stride to enforce the candidate cap. Coarsening and other operations can exceed the budget; this is not a hard real-time guarantee.
 
-## 診斷檔案
+Original RGB/depth resolution, consistency thresholds, voxel size, and offline sampling are unchanged. A memory-pressure fallback to live preview can inherit its sparser sampling. Camera-only sparse features do not use this depth budget.
 
-停止後、進入重融合前保存 `capture-performance.json`，掃描資料打包時一起匯出：
+## Diagnostic files
 
-| 欄位 | 意義 |
+`capture-performance.json` is saved before refusion and included in scan exports:
+
+| Field | Meaning |
 | --- | --- |
-| `photoCandidates` | 通過品質與視角／時間條件的相機影格次數，含背壓重試，不等於獨立照片數 |
-| `writerBackpressureFrames` | 合格但寫入名額已滿的影格次數 |
-| `imageCopyFailures`, `savedPhotos`, `maximumPendingWrites` | 複製失敗、成功保存、同時待完成寫入峰值 |
-| `writeQueueTotalMS`, `writeQueueMaxMS` | 從建立寫入任務到 writer 開始處理的等待時間 |
-| `jpegTotalMS`, `jpegMaxMS` | 影像準備、可選降噪與 JPEG 編碼時間 |
-| `fileWriteTotalMS`, `fileWriteMaxMS` | JPEG／深度／信心檔案及姿態紀錄寫入時間 |
-| `savedIntervalTotalS`, `savedIntervalMaxS` | 成功照片按拍攝 timestamp 排序後的間隔總和／最大值；包含續掃中間停頓 |
-| `configuredMinimumIntervalS`, `poseRefinementEnabled` | 本次最低快門間隔與姿態精修設定 |
-| `featureWork` | 提交、完成、被新幀取代數，最大保留工作數，以及匹配工作總／最大耗時 |
-| `retainedFeatureFrames`, `archivedFeatureObservations`, `discardedFeatureObservations` | 描述子幀數、歷史觀測數、超容量淘汰數 |
+| `photoCandidates` | Frames passing quality and viewpoint/time checks, including backpressure retries; not unique photos |
+| `writerBackpressureFrames` | Eligible frames encountered while all write slots were occupied |
+| `imageCopyFailures`, `savedPhotos`, `maximumPendingWrites` | Copy failures, saved count, peak concurrent pending writes |
+| `writeQueueTotalMS`, `writeQueueMaxMS` | Waiting from task creation until writer processing |
+| `jpegTotalMS`, `jpegMaxMS` | Preparation, optional denoising, JPEG encoding |
+| `fileWriteTotalMS`, `fileWriteMaxMS` | Image/depth/confidence/pose I/O |
+| `savedIntervalTotalS`, `savedIntervalMaxS` | Intervals between sorted capture timestamps, including pauses before resumed scanning |
+| `configuredMinimumIntervalS`, `poseRefinementEnabled` | Capture settings |
+| `featureWork` | Submitted, completed, replaced, peak retained jobs, total/maximum matching time |
+| `retainedFeatureFrames`, `archivedFeatureObservations`, `discardedFeatureObservations` | Descriptor/history budget diagnostics |
 
-`preview-performance.json` 第 2 版增加 `extractionTotalMS`、`consistencyTotalMS`、`gridInsertTotalMS`、`maximumSampleStride`、`overBudgetFrames`。它們量測 CPU 工作，不是螢幕顯示 FPS。舊掃描沒有新欄位，也不會自動補算。
+Preview report v2 adds `extractionTotalMS`, `consistencyTotalMS`, `gridInsertTotalMS`, `maximumSampleStride`, and `overBudgetFrames`. These measure CPU work, not screen FPS. Older scans do not acquire these fields retroactively.
 
-## 驗證與實機比較
+## Validation
 
 ```sh
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
@@ -56,14 +58,14 @@ swiftc -O -module-cache-path /tmp/fable-swift-cache \
   tools/{test_stubs_core,test_feature_retention}.swift -o /tmp/fable-feature-retention-test
 /tmp/fable-feature-retention-test
 
-swiftc -O -module-cache-path /tmp/fable-swift-cache \
-  arkit-3dgs-scanner/Capture/{Models,BlurFilter,FrameWriter,ExportManager}.swift \
+swiftc arkit-3dgs-scanner/Capture/TrainingFrameSelector.swift -O -module-cache-path /tmp/fable-swift-cache \
+  arkit-3dgs-scanner/Capture/{Localization,Models,BlurFilter,FrameWriter,ExportManager}.swift \
   tools/test_capture_pipeline.swift -o /tmp/fable-capture-pipeline-test
 /tmp/fable-capture-pipeline-test
 ```
 
-排程測試刻意卡住第一個特徵工作，確認後續 99 次提交仍返回、只保留最新待處理工作、停止會排空、續掃與關閉互不污染；另驗證每次候選上限、起點輪替及時間回饋遲滯。特徵記憶體測試以十二張合成紋理影像驗證描述子淘汰後，舊 track、像素座標與深度仍可供 BA 使用，並檢查歷史上限與重設。寫入測試驗證有限分段計時及既有成功／失敗／重試行為。
+Scheduling tests block the first feature job while 99 later submissions return, retain only the newest pending job, and verify draining, resume/close isolation, sampling caps, offset rotation, and feedback hysteresis. Twelve synthetic textured images exercise descriptor eviction with retained tracks, pixel coordinates, depth, history limits, and reset. Writer tests cover timings plus success/failure/retry behavior.
 
-本輪通過 17 項排程／取樣、5 項特徵保留、5 項寫入／匯出及 39 項既有 LiDAR 一致性檢查；既有特徵索引回歸也通過，包含 28,000 次與暴力搜尋比對。iPhone 與 Simulator 未簽章 Debug 建置成功。既有 `RefusionEngine` 的 `UnsafeMutableBufferPointer` Sendable 警告仍存在。
+Historical checks passed: 17 scheduling/sampling, five feature-retention, five capture/export, 39 depth-consistency, and spatial-index regression with 28,000 brute-force comparisons; iPhone/Simulator unsigned Debug builds also passed. The pre-existing parallel refusion Sendable warning remains.
 
-真機需使用相同裝置、光線、路徑與建置模式，比較拍攝間隔中位數／P90、寫入背壓、特徵替換比例、融合平均／最大耗時與超預算比例。再比較同一實體平面的厚度和已知尺寸誤差；照片更密或候選點更多都不能單獨證明精度提高。此輪尚無更新後真機數據。
+For device comparisons, keep hardware, light, path, and build mode fixed. Record median/P90 capture intervals, backpressure, feature replacements, mean/max fusion time, and over-budget fraction; then compare physical surface thickness and known dimensions. Denser photos or more candidate points alone do not establish accuracy. Updated device performance remains to be measured.

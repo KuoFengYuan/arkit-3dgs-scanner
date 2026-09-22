@@ -1,5 +1,5 @@
 // Regression: successful writes, failed writes, closed writers and atomic archive retries.
-// swiftc -module-cache-path /tmp/fable-swift-cache arkit-3dgs-scanner/Capture/Models.swift \
+// swiftc arkit-3dgs-scanner/Capture/Localization.swift arkit-3dgs-scanner/Capture/TrainingFrameSelector.swift -module-cache-path /tmp/fable-swift-cache arkit-3dgs-scanner/Capture/Models.swift \
 //   arkit-3dgs-scanner/Capture/BlurFilter.swift arkit-3dgs-scanner/Capture/FrameWriter.swift \
 //   arkit-3dgs-scanner/Capture/ExportManager.swift tools/test_capture_pipeline.swift -o /tmp/test_capture_pipeline
 import Foundation

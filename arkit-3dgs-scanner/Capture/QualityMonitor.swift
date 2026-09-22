@@ -28,15 +28,15 @@ nonisolated enum QualityIssue: Int, CaseIterable, Identifiable, Sendable, Compar
 
     var message: String {
         switch self {
-        case .trackingLost: "追蹤不穩，請放慢並對準紋理豐富的區域"
-        case .insufficientFeatures: "可追蹤紋理不足，請對準有細節的區域並緩慢側向移動"
-        case .tooFast:      "移動太快會產生動態模糊，請放慢"
-        case .notSharp:     "畫面不夠清晰，請稍停讓對焦穩定"
-        case .deviceHot:    "裝置過熱，建議暫停散熱"
-        case .tooDark:      "光線不足，請補光或移至較亮處"
-        case .tooBright:    "光線過強，注意過曝"
-        case .tooClose:     "距離太近，請後退一點"
-        case .tooFar:       "距離太遠，請靠近目標"
+        case .trackingLost: L10n.text("追蹤不穩，請放慢並對準紋理豐富的區域")
+        case .insufficientFeatures: L10n.text("可追蹤紋理不足，請對準有細節的區域並緩慢側向移動")
+        case .tooFast:      L10n.text("移動太快會產生動態模糊，請放慢")
+        case .notSharp:     L10n.text("畫面不夠清晰，請稍停讓對焦穩定")
+        case .deviceHot:    L10n.text("裝置過熱，建議暫停散熱")
+        case .tooDark:      L10n.text("光線不足，請補光或移至較亮處")
+        case .tooBright:    L10n.text("光線過強，注意過曝")
+        case .tooClose:     L10n.text("距離太近，請後退一點")
+        case .tooFar:       L10n.text("距離太遠，請靠近目標")
         }
     }
 

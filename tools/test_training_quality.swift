@@ -28,15 +28,40 @@ import simd
         let evidence = Dictionary(uniqueKeysWithValues: burst.map { ($0.id, E(detail: Double($0.id), signature: flat)) })
         let selected = TrainingFrameSelector.select(burst, evidence: evidence)
         check(selected.selectedIDs == [10], "clearest equivalent view wins without a 30% RGB rejection cap")
-        check(selected.recaptureIDs == [10] && selected.notice != nil, "risky unique view remains and carries a recapture warning")
-        check(selected.motionRiskIDs == [10] && selected.weakDetailIDs == [] && selected.notice!.contains("尚未判定為模糊"),
-              "motion-only risk is not presented as confirmed image blur")
+        check(selected.recaptureIDs.isEmpty && selected.notice == nil, "motion estimate alone does not request recapture or raise a banner")
+        check(selected.motionRiskIDs == [10] && selected.weakDetailIDs == [] && selected.diagnosticSummary != nil,
+              "motion-only risk remains available as optional diagnostic information")
+        var weak = record(20, x: 1, risk: 15); weak.sharpnessRatio = 0.2
+        let weakReport = TrainingFrameSelector.select([weak], evidence: [20: E(detail: 0.3, signature: flat)])
+        check(weakReport.recaptureIDs == [20] && weakReport.notice?.contains("細節偏弱") == true,
+              "measured weak detail still raises an actionable recapture warning")
+        let unknown = TrainingFrameSelector.select([weak], evidence: [20: E(detail: 0, signature: flat)])
+        check(unknown.notice == nil && unknown.recaptureIDs.isEmpty && unknown.uncertainDetailIDs == [20],
+              "textureless measurements are unknown quality instead of false weak-detail warnings")
+        let mixed = TrainingFrameSelector.select(burst + [weak], evidence: evidence.merging([20: E(detail: 0.3, signature: flat)]) { _, new in new })
+        check(mixed.selectedIDs == [10,20] && mixed.recaptureIDs == [20] && mixed.motionRiskIDs == [10],
+              "mixed scans warn only for measured weak views while preserving distinct coverage")
+        let oldV2 = TrainingFrameSelector.Report(version: 2, inputFrames: 10, selectedIDs: [10], recaptureIDs: [10],
+            decisions: selected.decisions, motionRiskIDs: [10], weakDetailIDs: [], uncertainDetailIDs: [])
+        check(oldV2.notice == nil && oldV2.diagnosticSummary != nil,
+              "existing version-two motion-only reports no longer raise a warning banner")
         var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(selected)) as! [String: Any]
+        legacy["version"] = 1; legacy["recaptureIDs"] = [10]
         legacy.removeValue(forKey: "motionRiskIDs"); legacy.removeValue(forKey: "weakDetailIDs")
         legacy.removeValue(forKey: "uncertainDetailIDs")
         let legacyReport = try JSONDecoder().decode(TrainingFrameSelector.Report.self,
             from: JSONSerialization.data(withJSONObject: legacy))
-        check(legacyReport.selectedIDs == selected.selectedIDs && legacyReport.notice != nil, "legacy selection reports remain readable")
+        check(legacyReport.selectedIDs == selected.selectedIDs && legacyReport.notice == nil && legacyReport.diagnosticSummary != nil, "legacy selection reports remain readable")
+        let stableEncoder = JSONEncoder()
+        stableEncoder.outputFormatting = [.sortedKeys]
+        let originalReportBytes = try stableEncoder.encode(mixed)
+        let defaults = UserDefaults.standard
+        let priorLanguage = defaults.object(forKey: AppLanguage.preferenceKey)
+        defaults.set("en", forKey: AppLanguage.preferenceKey)
+        let englishReportBytes = try stableEncoder.encode(mixed)
+        if let priorLanguage { defaults.set(priorLanguage, forKey: AppLanguage.preferenceKey) }
+        else { defaults.removeObject(forKey: AppLanguage.preferenceKey) }
+        check(originalReportBytes == englishReportBytes, "language preference does not change serialized selection IDs or reasons")
         check(burst.allSatisfy { $0.blurVerdict == .keep }, "RGB de-duplication leaves depth fusion decisions unchanged")
         var novel = record(11, x: 0.2)
         var allEvidence = evidence; allEvidence[11] = E(detail: 1, signature: flat)

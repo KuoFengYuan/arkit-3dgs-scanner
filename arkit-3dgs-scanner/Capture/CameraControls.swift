@@ -36,11 +36,11 @@ final class CameraControls: ObservableObject {
         }
         var label: String {
             switch self {
-            case .ev:      "曝光補償"
-            case .shutter: "快門"
+            case .ev:      L10n.text("曝光補償")
+            case .shutter: L10n.text("快門")
             case .iso:     "ISO"
-            case .wb:      "白平衡"
-            case .focus:   "對焦"
+            case .wb:      L10n.text("白平衡")
+            case .focus:   L10n.text("對焦")
             }
         }
     }

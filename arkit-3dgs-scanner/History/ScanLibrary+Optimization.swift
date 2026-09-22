@@ -20,24 +20,24 @@ extension ScanLibrary {
             defer { try? fm.removeItem(at: staging) }
             let source = entry.directory
             let annotated = BlurFilter.annotate(records)
-            progress("逐張匹配拍攝影像…", 0)
+            progress(L10n.text("逐張匹配拍攝影像…"), 0)
             let refined = await OfflinePoseRefinement.run(records: annotated, directory: source, rounds: 6,
-                isCancelled: { Task.isCancelled }, progress: { progress("逐張匹配與驗證相機位置…", $0 * 0.45) })
+                isCancelled: { Task.isCancelled }, progress: { progress(L10n.text("逐張匹配與驗證相機位置…"), $0 * 0.45) })
             try Task.checkCancellation()
             if ["memoryPressure", "observationBudgetExceeded"].contains(refined.report.status) {
-                throw OptimizationError(message: "目前資源不足以完成相機精修，原始掃描未變更。請關閉其他工作後重試。")
+                throw OptimizationError(message: L10n.text("目前資源不足以完成相機精修，原始掃描未變更。請關閉其他工作後重試。"))
             }
             let outputRecords = refined.records
             var points: [CloudPoint] = []
             if outputRecords.contains(where: { $0.depthFile != nil }) {
-                progress("用修正後位置重融合深度…", 0.45)
+                progress(L10n.text("用修正後位置重融合深度…"), 0.45)
                 let cfg = CaptureConfig()
                 let fusion = RefusionEngine.refuseWithReport(records: outputRecords, sessionDir: source, config: cfg,
                     meshVertices: [], target: cfg.exportMaxPoints, isCancelled: { Task.isCancelled },
-                    progress: { progress("用修正後位置重融合深度…", 0.45 + $0 * 0.4) })
+                    progress: { progress(L10n.text("用修正後位置重融合深度…"), 0.45 + $0 * 0.4) })
                 try Task.checkCancellation()
                 guard fusion.report.status != "memoryPressure", !fusion.points.isEmpty else {
-                    throw OptimizationError(message: "深度不足或記憶體不足，未發布新的優化版本；原始掃描仍保留。")
+                    throw OptimizationError(message: L10n.text("深度不足或記憶體不足，未發布新的優化版本；原始掃描仍保留。"))
                 }
                 points = fusion.points
                 try JSONEncoder().encode(fusion.report).write(to: staging.appendingPathComponent("refusion-progress.json"))
@@ -49,7 +49,7 @@ extension ScanLibrary {
                     }
                 }
             }
-            progress("挑選清晰照片並準備訓練資料…", 0.86)
+            progress(L10n.text("挑選清晰照片並準備訓練資料…"), 0.86)
             for name in ["images", "depth"] {
                 let folder = source.appendingPathComponent(name)
                 guard fm.fileExists(atPath: folder.path) else { continue }
@@ -81,7 +81,7 @@ extension ScanLibrary {
             guard fm.fileExists(atPath: source.path) else { throw LibraryError.invalidDirectory }
             let target = root.appendingPathComponent("scan_optimized_" + UUID().uuidString)
             try fm.moveItem(at: staging, to: target) // same-volume publish after all artifacts succeed
-            progress("優化版本已儲存", 1)
+            progress(L10n.text("優化版本已儲存"), 1)
             return target
         }
         let destination = try await withTaskCancellationHandler(operation: { try await worker.value },

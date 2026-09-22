@@ -49,9 +49,9 @@ open arkit-3dgs-scanner.xcodeproj
 2. Build and run. Allow camera access and wait for tracking to become ready.
 3. Choose LiDAR and refinement options before starting. Move around the scene so surfaces are visible from multiple positions.
 4. Stop the scan, wait for processing, and inspect the point cloud. Continue the active scan if more coverage is needed.
-5. Select **「匯出 3DGS 訓練資料」** to share the dataset ZIP. Unzip it on your computer and load it into a trainer that accepts COLMAP datasets.
+5. Select **Export 3DGS dataset** to share the dataset ZIP. Unzip it on your computer and load it into a trainer that accepts COLMAP datasets.
 
-The interface currently uses Traditional Chinese. The repository, Xcode project, and scheme are named `arkit-3dgs-scanner`. The app identifier remains `itri.fable` to preserve existing installations and scan data.
+The interface supports Traditional Chinese (default) and English; switch languages on the home screen. Documentation is English first with a Traditional Chinese version of every page. The repository, Xcode project, and scheme are named `arkit-3dgs-scanner`. The app identifier remains `itri.fable` to preserve existing installations and scan data.
 
 ## Capture modes
 
@@ -72,13 +72,15 @@ Processing streams frames instead of retaining all decoded images and depth maps
 
 Pose refinement is guided local optimization, not a complete global SfM pipeline. Failed validation keeps the existing poses. Image selection and depth fusion are separate, so a photo excluded from training can still contribute reliable depth.
 
+Motion estimates alone no longer trigger a post-fusion recapture warning. Weak measured detail still receives a frame-specific review message; motion-only and unknown evidence remain in collapsed capture-quality information. This changes reporting, not the original photos or depth eligibility.
+
 ## History and playback
 
 Stopped scans are saved automatically for later review, even before export.
 
 - Replay captured photos with a synchronized 3D camera marker and route. Playback supports 0.5, 1, 2, 5, 10, 15, and 30 fps. These are saved keyframes, not a real-time video recording.
 - Preview photos are oriented for viewing; original JPEG pixels and calibration remain unchanged.
-- **「優化訓練資料」** refines a copy of the scan on the phone. It prepares training data; it does not train Gaussians.
+- **Optimize training data** refines a copy of the scan on the phone. It prepares training data; it does not train Gaussians.
 - Deletion removes the selected scan's photos, depth, poses, point clouds, models, and matching ZIP. Unselected scans and copies shared to other apps are unaffected.
 
 An active scan can be resumed from its review screen. Opening a historical scan does not restore the original live AR session.
@@ -117,6 +119,14 @@ The exported sparse model provides calibrated cameras and seed points, without c
 
 ## Development
 
+Follow [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md). Changes go through a task branch and PR; merge only after required checks/reviews, then remove the task branch locally and remotely.
+
+```sh
+python3 tools/check_project.py
+bash tools/test_localization.sh
+bash tools/test_training_quality.sh
+```
+
 ```sh
 xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner \
   -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build
@@ -153,5 +163,11 @@ Swift regression tools cover capture writes, geometry, bounded depth caching, la
 - [Camera-only reconstruction](docs/CAMERA_ONLY_ACCURACY.md)
 - [History export](docs/HISTORY_TRAINING_EXPORT.md)
 - [External training notes](docs/TRAINING.md)
+- [Capture throughput](docs/CAPTURE_THROUGHPUT.md)
+- [Live preview and quality gates](docs/LIDAR_QUALITY_AND_PREVIEW.md)
+- [Large-scan memory](docs/LARGE_SCAN_MEMORY.md)
+- [Coordinate conventions](docs/COORDINATES.md)
+- [Device operation](docs/DEVICE_NOTES.md)
+- [Language support](docs/LOCALIZATION.md)
 
-Most detailed documentation is currently in Traditional Chinese. For reproducible issues, include the device, capture mode, build configuration, processing report, and a minimal scan sample when available.
+Every guide above has a Traditional Chinese counterpart linked at the top. See the [contribution workflow](CONTRIBUTING.md) for `Feature/`, `Bugfix/`, and `Enhance/` branches and the PR → merge → branch cleanup process. For reproducible issues, include the device, capture mode, build configuration, processing report, and a minimal scan sample when available.

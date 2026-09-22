@@ -69,7 +69,7 @@ final class FloorPlanCapture: NSObject, ObservableObject {
         // 一面牆都還沒偵測到時不催 —— 剛開始掃本來就沒有
         guard wallCount > 0 else { return nil }
         if maxWallHeightM < Self.kMinWallHeightM {
-            return String(format: "牆只掃到 %.1fm 高 —— 請把鏡頭往上帶到牆與天花板的交界",
+            return String(format: L10n.text("牆只掃到 %.1fm 高 —— 請把鏡頭往上帶到牆與天花板的交界"),
                           maxWallHeightM)
         }
         return nil
@@ -311,12 +311,12 @@ extension FloorPlanCapture: @preconcurrency RoomCaptureSessionDelegate {
 
     private static func text(for i: RoomCaptureSession.Instruction) -> String? {
         switch i {
-        case .moveCloseToWall:   "靠近牆面一點"
-        case .moveAwayFromWall:  "離牆面遠一點"
-        case .slowDown:          "放慢一點"
-        case .turnOnLight:       "光線不足，請開燈"
+        case .moveCloseToWall:   L10n.text("靠近牆面一點")
+        case .moveAwayFromWall:  L10n.text("離牆面遠一點")
+        case .slowDown:          L10n.text("放慢一點")
+        case .turnOnLight:       L10n.text("光線不足，請開燈")
         case .normal:            nil
-        case .lowTexture:        "此處紋理不足，請對準有特徵的區域"
+        case .lowTexture:        L10n.text("此處紋理不足，請對準有特徵的區域")
         @unknown default:        nil
         }
     }

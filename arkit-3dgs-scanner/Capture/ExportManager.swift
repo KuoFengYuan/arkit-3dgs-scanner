@@ -44,10 +44,10 @@ nonisolated enum ExportManager {
         case noUsableFrames, invalidFrame(Int), missingImage(String), invalidPoints
         var errorDescription: String? {
             switch self {
-            case .noUsableFrames: return "沒有可用的相機姿態與清晰影像，無法產生 3DGS 訓練資料"
-            case .invalidFrame(let id): return "第 \(id) 張影像的相機參數不完整，無法產生訓練資料"
-            case .missingImage(let name): return "找不到訓練影像：\(name)"
-            case .invalidPoints: return "點雲含有無效座標，無法產生訓練資料"
+            case .noUsableFrames: return L10n.text("沒有可用的相機姿態與清晰影像，無法產生 3DGS 訓練資料")
+            case .invalidFrame(let id): return L10n.text("第 \(id) 張影像的相機參數不完整，無法產生訓練資料")
+            case .missingImage(let name): return L10n.text("找不到訓練影像：\(name)")
+            case .invalidPoints: return L10n.text("點雲含有無效座標，無法產生訓練資料")
             }
         }
     }

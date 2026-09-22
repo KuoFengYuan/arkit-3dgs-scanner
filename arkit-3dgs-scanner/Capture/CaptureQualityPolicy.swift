@@ -6,10 +6,10 @@ nonisolated enum CaptureBlockReason: Sendable {
     case tracking, features, motion, focus
     var message: String {
         switch self {
-        case .tracking: "追蹤恢復中・請保持畫面穩定"
-        case .features: "紋理不足・請對準有細節的表面"
-        case .motion: "移動過快・放慢後自動繼續"
-        case .focus: "等待畫面清晰・請稍停讓對焦穩定"
+        case .tracking: L10n.text("追蹤恢復中・請保持畫面穩定")
+        case .features: L10n.text("紋理不足・請對準有細節的表面")
+        case .motion: L10n.text("移動過快・放慢後自動繼續")
+        case .focus: L10n.text("等待畫面清晰・請稍停讓對焦穩定")
         }
     }
 }

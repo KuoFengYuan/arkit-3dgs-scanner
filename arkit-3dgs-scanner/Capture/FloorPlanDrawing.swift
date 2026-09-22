@@ -166,9 +166,9 @@ extension FloorPlanData {
         }
 
         // 5. 門窗符號
-        for d in doors { out += doorSymbol(d) + Self.openingLabel(d, "門") }
+        for d in doors { out += doorSymbol(d) + Self.openingLabel(d, "door") }
         for w in windows {
-            out += Self.windowSymbol(w, thickness: cut) + Self.openingLabel(w, "窗")
+            out += Self.windowSymbol(w, thickness: cut) + Self.openingLabel(w, "window")
         }
         for o in openings {
             // 開口只畫兩側牆端的封口線，不畫符號
@@ -282,8 +282,8 @@ extension FloorPlanData {
         let axis = d / len
         let normal = SIMD2<Float>(-axis.y, axis.x)
         let at = (p0 + p1) / 2 + normal * 0.28
-        return [.text(String(format: "%@ %.2f", kind, len), at: at, sizePx: 10,
-                      color: kind == "門" ? .door : .window, align: .center, bold: false)]
+        return [.text(String(format: "%@ %.2f", kind == "door" ? L10n.text("門") : L10n.text("窗"), len), at: at, sizePx: 10,
+                      color: kind == "door" ? .door : .window, align: .center, bold: false)]
     }
 
     /// 窗：沿窗寬三道平行線（外框兩條 ＋ 中線一條），建築圖慣例畫法。
@@ -339,20 +339,20 @@ extension FloorPlanData {
     /// RoomPlan 的 section label（camelCase 英文）→ 中文
     static func roomName(_ raw: String) -> String {
         switch raw {
-        case "bathroom":    "衛浴"
-        case "bedroom":     "臥室"
-        case "diningRoom":  "餐廳"
-        case "kitchen":     "廚房"
-        case "livingRoom":  "客廳"
-        case "office":      "書房"
-        case "storage":     "儲藏"
-        case "laundryRoom": "洗衣間"
-        case "hallway":     "走廊"
-        case "closet":      "衣櫃間"
+        case "bathroom":    L10n.text("衛浴")
+        case "bedroom":     L10n.text("臥室")
+        case "diningRoom":  L10n.text("餐廳")
+        case "kitchen":     L10n.text("廚房")
+        case "livingRoom":  L10n.text("客廳")
+        case "office":      L10n.text("書房")
+        case "storage":     L10n.text("儲藏")
+        case "laundryRoom": L10n.text("洗衣間")
+        case "hallway":     L10n.text("走廊")
+        case "closet":      L10n.text("衣櫃間")
         // RoomPlan 判不出用途時會回 unidentified；顯示原字串只會讓人困惑，
         // 而「這是哪種房間」對平面圖來說不是必要資訊，退回通稱即可
-        case "unidentified": "房間"
-        default:            raw.isEmpty ? "房間" : raw
+        case "unidentified": L10n.text("房間")
+        default:            raw.isEmpty ? L10n.text("房間") : raw
         }
     }
 }
