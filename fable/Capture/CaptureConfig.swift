@@ -9,22 +9,37 @@ import CoreGraphics
 /// 所有可調參數集中於此。門檻值以 iPhone Pro（LiDAR）室內拍攝為基準。
 nonisolated struct CaptureConfig: Sendable {
 
+    // MARK: - 無 LiDAR 的保守觀測驗證（需實機校準，非精度保證）
+    var cameraOnlyFallbackDepthM: Float = 0.5
+    var cameraOnlyMinBaselineM: Float = 0.04
+    var cameraOnlyMinVisibleFeatures = 12
+    var cameraOnlyMinFeatureCells = 3
+    var sparseSampleIntervalS: Double = 0.2
+    var sparseMinObservations = 3
+    var sparseMinParallaxDeg: Float = 1.5
+    var sparsePositionToleranceM: Float = 0.02
+    var sparseRelativeTolerance: Float = 0.015
+    var sparseTrackMaxGapS: Double = 2
+    var sparseMaxCandidates = 20_000
+
+    // MARK: - 停止後的純 RGB 多視角重建（不產生 LiDAR depth sidecar）
+    var reconstructFromImages = true
+    var rgbMaxImageDimension = 256
+    var rgbMaxReferenceFrames = 24
+    var rgbPixelStride = 5
+    var rgbMinDepthM: Float = 0.25
+
     // MARK: - 智慧快門（基於位移 / 轉角，而非固定時間）
     /// 相對上一關鍵幀平移超過此距離（公尺）即觸發抓幀
-    var keyframeTranslationM: Float = 0.10
+    var keyframeTranslationM: Float = 0.05
     /// 或視角旋轉超過此角度（度）即觸發抓幀
-    var keyframeRotationDeg: Float = 6.0
+    var keyframeRotationDeg: Float = 3.0
     /// 兩關鍵幀最小時間間隔，避免手震造成原地連拍
-    var minKeyframeInterval: TimeInterval = 0.15
-    /// 關鍵幀的相機速度閘門。與即時融合同理但門檻放寬：
-    /// 模糊值受曝光時間影響（亮處曝光短 → 快速移動仍判定為低模糊），無法反映「姿態延遲/誤差」，
-    /// 所以只靠 blockBlurPixels 擋不住「亮處快速移動」的壞姿態。
-    /// 關鍵幀的姿態同時進入 (a) 重融合點雲的反投影 (b) 3DGS 訓練的相機外參，
-    /// 錯了會同時污染幾何與訓練，比即時融合的後果嚴重。
-    /// 門檻刻意比預覽(0.6/0.5)寬：關鍵幀本來就是在移動中觸發的（位移 0.1m 或轉角 6°），
-    /// 太嚴會抓不到幀。1.0 rad/s ≈ 57°/s、0.8 m/s ≈ 快走，正常掃描不會觸及。
-    var keyframeMaxAngularSpeedRadS: Float = 1.0
-    var keyframeMaxLinearSpeedMS: Float = 0.8
+    var minKeyframeInterval: TimeInterval = 0.10
+    /// Hard limits for rapid turns / fast travel, not ordinary walking. Exposure blur and
+    /// measured sharpness remain separate gates; rolling-shutter risk is a warning/weight.
+    var keyframeMaxAngularSpeedRadS: Float = 1.6
+    var keyframeMaxLinearSpeedMS: Float = 1.6
     /// 背景寫入佇列上限（背壓）：滿載時跳過本幀，下一幀條件仍成立會再觸發
     var maxPendingWrites = 3
 
@@ -49,7 +64,7 @@ nonisolated struct CaptureConfig: Sendable {
     /// 否則使用者會在毫無提示的情況下流失大部分資料。
     /// 遮斷維持 24：那是「連姿態都不能信」的層級，與清晰度無關。
     var maxBlurPixels: Float = 10.0
-    /// 遮斷門檻：超過才紅色警告＋暫停抓幀
+    /// 曝光期間的估計模糊遮斷門檻；捲簾讀出風險另作提示及離線權重。
     var blockBlurPixels: Float = 24.0
     /// 關鍵幀的清晰度門檻：本幀清晰度 ÷「近 0.5s 內同場景的最佳清晰度」須達此比例。
     ///
@@ -118,28 +133,11 @@ nonisolated struct CaptureConfig: Sendable {
     var voxelSizeM: Float = 0.01
     /// 記憶體內點數上限：觸頂時 voxel 自動 ×2 粗化後繼續收（長掃描不會停止累積）
     var maxPoints = 600_000
-    /// 匯出點數上限：超過時分層擇優下採樣（每格取最高品質分數的點，密度均勻）。
-    ///
-    /// **這個數字是被 msplat 的訓練記憶體綁住的，不是幾何上的選擇。**
-    /// 初始高斯數 ＝ 種子點數，而每顆高斯連梯度與 Adam 狀態約 1KB
-    /// → 250k ≈ 240MB，已經接近手機端能配置的上限。所以它不能為了幾何品質往上開。
+    /// 匯出點數上限；同時限制手機重融合輸出、平面圖與打包的記憶體尖峰。
+    /// 外部 3DGS 訓練可使用這些初始化點；原始深度保留供後續重處理。
     var exportMaxPoints = 250_000
-    /// 平面圖用的點數上限。**刻意與 exportMaxPoints 分開。**
-    ///
-    /// 平面圖沒有訓練那個記憶體限制，卻一直沿用同一個上限 —— 後果在實機資料上很嚴重：
-    /// scan_20260831_133615 融出 3,285,362 格（2cm），下採樣到 250k 等於丟掉 95%，
-    /// 有效解析度從 2cm 掉到 ~7cm、平均點距 11.5cm。而 PointCloudFloorPlan.pickCell
-    /// 是照實測密度挑格距的，於是它只能挑 12cm 格。
-    ///
-    /// 用同一份掃描實測（tools/refuse_ply.swift ＋ tools/ply_to_floorplan.swift）：
-    ///   250k  → 格距 12cm、牆 82 段／總長 327m、最長 18.48m
-    ///   3.27M → 格距  5cm、牆 88 段／總長 351m、最長 28.15m
-    /// 牆面平面殘差同時由 5.8cm 降到 3.0cm（tools/scan_accuracy.py）——
-    /// 那不是「多了點」而已，是原本的下採樣在挑點時系統性偏向離群樣本。
-    ///
-    /// 2M 點 ≈ 40MB（CloudPoint 20B），只在 processScan 內短暫存在：
-    /// 算完平面圖就下採樣成 exportMaxPoints，訓練尚未配置記憶體。
-    var floorPlanMaxPoints = 2_000_000
+    // 手機平面圖共用 exportMaxPoints 預算，避免另外配置 2M 點及下採樣字典。
+    // 原始深度保留；需更高密度時可於桌機重融合覆寫 target。
     /// COLMAP 輸出對齊世界上方向：ARKit 為 +Y up，多數 3DGS 工具假設 -Y up，
     /// 直接匯入會上下顛倒。true = 繞世界 X 軸翻 180° 對齊 COLMAP 慣例（預設，修正顛倒）。
     /// 若你的 viewer 反而變顛倒，設為 false 即輸出 ARKit 原生 +Y up。
@@ -154,25 +152,16 @@ nonisolated struct CaptureConfig: Sendable {
     /// 而重融合只用 ~120 個關鍵幀 → mesh 會涵蓋關鍵幀沒拍到的表面（天花板/角落黑塊的主因）。
     /// mesh 頂點只填補沒有實測深度的格子；同格取得 LiDAR 觀測後，以實測資料取代。
     var useSceneMesh = true
+    /// Stop-time mesh is optional supplementary geometry; never copy an unbounded scene.
+    var processingMeshMaxVertices = 150_000
     /// mesh 頂點的可見性容差（公尺）：投影到某關鍵幀後，與該幀深度圖差距在此範圍內才採用該幀顏色。
-    /// 太小 → 幾乎上不到色；太大 → 被遮擋的背面也會被錯誤上色。
+    /// 這只是取色上限；幾何仍須通過本幀與鄰幀的更嚴格深度一致性檢查。
     var meshColorDepthTolM: Float = 0.10
-    /// 掃描後重融合的格數上限。**不可**借用 maxPoints（那是即時預覽的記憶體上限）：
-    /// 重融合在停止掃描後才跑、訓練尚未配置記憶體，可用預算大得多。借用 600k 會讓大範圍掃描
-    /// 一路自動粗化（2→4→8→16cm）而且完全靜默 —— 初始點距被放大數倍，
-    /// 而 msplat 的初始高斯尺寸就等於 3-NN 點距，從 15cm 起跳時 24 次 refine 的 LAS 分裂
-    /// （實測每顆平均只切 ~1.2 次、縮小約 2 倍）根本追不回細節。
-    /// Cell 約 40B + Dictionary 開銷 ≈ 70B/格。
-    ///
-    /// **2M → 4M，因為整層掃描會剛好踩線。** 100m² 住家（樓高 2.6m）的表面積
-    /// ≈ 384m²（地板 100 + 天花 100 + 牆 104 + 家具 80）；LiDAR 深度雜訊讓表面
-    /// 不只一格厚，融合後仍約 2 層 ⇒ 2cm 格下約 1.9M 格。
-    /// 也就是說舊的 2M 上限對「整層」剛好會觸頂，然後靜默粗化成 4cm ——
-    /// 而初始點距直接決定 msplat 的初始高斯大小（初始 scale = 3-NN 距離），
-    /// 粗一倍就是初始高斯大一倍，密集化未必追得回來。
-    /// 4M 格 ≈ 280MB，只在 post-scan 尖峰存在（refuse() 回傳後就釋放，訓練尚未配置），
-    /// 而觸頂粗化仍然保底：真的超過就加粗，記憶體有界。
+    /// 重融合格數的設定上限，獨立於即時預覽。
+    /// 手機另受 refuseMemoryBudgetMB 與即時可用記憶體限制；觸頂時粗化並記錄於報告。
     var refuseMaxCells = 4_000_000
+    /// iOS 額外限制融合字典工作集；照片更密時仍逐幀讀取，不隨照片總數配置。
+    var refuseMemoryBudgetMB = 96
     /// 孤立點移除：占據 voxel 的 26 鄰域中占據數少於此值 → 視為飄浮雜點剔除（0 = 關閉）。
     /// 專清空間中不貼表面的白霧；過大會咬掉細線/薄物，3 為保守值。
     var refuseMinNeighbors = 3
@@ -196,6 +185,15 @@ nonisolated struct CaptureConfig: Sendable {
     var pointMaxDepthM: Float = 5.0
     /// 飛點過濾：與相鄰像素深度差超過 depth×此比例 → 視為物體邊緣拖影，剔除
     var depthEdgeRejectRatio: Float = 0.05
+    /// 跨影格深度一致性容差：2m 處為 2.5cm。不能靠 voxel 平均去除不同格中的重影。
+    var depthAgreementAbsoluteM: Float = 0.015
+    var depthAgreementRelative: Float = 0.005
+    var depthConsistencyEnabled = true
+    /// Offline fusion uses separated viewpoints and a bounded ray-depth consensus.
+    /// Live preview retains its cheap single-frame temporal check.
+    var depthDiverseReferences = true
+    var depthConsensusEnabled = true
+    var depthConsensusMaxShiftM: Float = 0.02
     /// 入射角上限（度）。超過就不收這個深度樣本。
     ///
     /// **這是牆面疊影的主要對策。** 掠射時一個深度像素涵蓋牆面上一大片，
@@ -230,55 +228,17 @@ nonisolated struct CaptureConfig: Sendable {
     // MARK: - 即時點雲預覽（AR 疊加，Scaniverse 式）
     /// 每 N 個 ARFrame 融合一次（60fps → 每 0.1s），與智慧快門解耦，點雲連續長出
     var previewFrameInterval = 6
+    /// Preview work budget only; stored depth resolution and refusion sampling stay unchanged.
+    var previewIntegrationBudgetMS: Double = 35
+    var previewMaxCandidates = 6000
+    var previewMaxSampleStride = 6
+    /// 打包／主執行緒換幾何與融合解耦；每批有點數上限，避免大磚佔滿一個 frame。
+    var previewRenderIntervalS: Double = 1.0 / 30
+    var previewRenderPointBudget = 24_000
     /// 空間磚尺寸（公尺）：點雲按磚分塊渲染，每磚掛一個 ARAnchor ——
     /// ARKit 漂移修正 / 重定位時磚跟著移動，點雲不會與實體表面錯位（防殘影核心）
     var previewTileSizeM: Float = 1.2
-    /// 點雲融合的模糊閘門（比抓幀遮斷更嚴）：模糊幀的姿態-深度錯位是殘影另一來源。
-    /// 與 maxBlurPixels/blockBlurPixels 同步隨捲簾項重新校準（18 ≈ 0.68 rad/s）
-    /// 預覽的三個閘門**直接沿用關鍵幀的門檻**，不再各自設一套。
-    ///
-    /// 先前預覽比關鍵幀嚴（模糊 18 vs 24px、角速度 0.6 vs 1.0、線速度 0.5 vs 0.8），
-    /// 理由是「移動快 → 姿態延遲 → 殘影」。但後果是一個幀好到足以被存成關鍵幀、
-    /// 進到匯出的點雲，卻不夠格顯示在預覽上 ——
-    /// 使用者看到「我明明掃過這裡但沒有點」，而掃完之後那裡是有點的。
-    ///
-    /// 預覽的**唯一用途就是回報覆蓋率**。顯示得比實際收到的少是直接的誤導：
-    /// 熱圖會把其實已經夠的區域標成缺點，害使用者回去重掃不需要重掃的地方。
-    /// 殘影本來就另有機制在防（點雲磚掛 ARAnchor，漂移修正時整磚跟著移動）。
-    ///
-    /// 寫成衍生值而不是複製常數 —— 兩份各自維護的門檻遲早會再漂開。
-    var previewMaxBlurPixels: Float { blockBlurPixels }
-    var previewMaxAngularSpeedRadS: Float { keyframeMaxAngularSpeedRadS }
-    var previewMaxLinearSpeedMS: Float { keyframeMaxLinearSpeedMS }
-
-    // MARK: - 手機端 3DGS 訓練（msplat，on-device）
-    /// 訓練迭代數（手機縮規模；桌機版通常 30000）。3–7k 在物件尺度已可觀。
-    /// densify 視窗＝前半段（stopSplitAt=maxSteps/2），故迭代越多、densify 也跑越久 → 點更多。
-    var trainIterations = 6000
-    /// SH degree（0＝僅漫反射、最省記憶體；1＝基本視角相依高光）。手機建議 0–1
-    var trainSHDegree = 3
-    /// gaussian 緩衝容量（固定預配置＝峰值記憶體上限，slot 數）。densify 只在「3×當前數 ≤ 此值」時進行，
-    /// 故最終高斯數約為此值的 1/3～1/2；峰值記憶體恆定＝此值（不再動態倍增/一次暴衝 → 不會 OOM）。
-    /// 記憶體洩漏根治後（RAII + 每步 autorelease pool），峰值有界，iPhone Pro 有大量餘裕，
-    /// 故調高到 600k（活躍高斯上限 ~200k，約 2.5×）換畫質。想更細可再往上（每 +100k slot 約 +40MB）；OOM 就調低。
-    var trainMaxGaussians = 300_000
-    /// 訓練影像額外固定降採樣倍率（1＝不額外降；與 trainMaxImageDim 取較強的縮小）。
-    /// 一般維持 1.0，用 trainMaxImageDim 控制解析度即可。
-    var trainDownscale: Float = 1.0
-    /// 訓練影像最長邊上限（px；0＝不限）。手機端 12MP 光柵化是 O(像素數) → 又慢又爆記憶體；
-    /// 業界標準（Inria 3DGS / gsplat / Scaniverse）皆限 ~1600，對 3DGS 成品畫質實質無損。
-    /// 掃描原圖與匯出的 COLMAP/PLY 全部維持原解析度，只有「訓練當下餵給光柵化的影像」受此上限。
-    /// 影像解碼一次後以 uint8 常駐（1600 全 42 幀約 244MB、有界、不再每輪重解碼）。
-    /// 想更快更省 → 1280/1024；想壓最高細節 → 調高（記憶體與時間相應上升）。
-    var trainMaxImageDim = 1600
-    /// 訓練用關鍵幀數上限（0＝不限）。訓練時每幀以 uint8 常駐（1600px 每張 ~5.8MB）→ 幀數 × 5.8MB
-    /// 是記憶體大宗；長掃描動輒數百幀就會 OOM。超過上限時沿拍攝軌跡「均勻抽樣」到此數（保留視角分佈）。
-    /// 120 幀 ~690MB，room 尺度 3DGS 已足夠；OOM 就調小、想更細節就調大（留意記憶體）。
-    var trainMaxFrames = 120
-    /// 每幾步更新一次即時預覽 render（越小越即時、越吃效能）
-    var trainPreviewEvery = 50
-    /// 熱狀態達 .serious 以上時暫停訓練（散熱保護，避免 thermal shutdown）
-    var trainThermalThrottle = true
+    // 即時點雲與照片共用 CaptureQualityPolicy，避免清晰度／速度門檻分流。
 
     // MARK: - 平面圖（RoomPlan，與 3DGS 採集共用同一個 ARSession）
     /// 掃描時同步擷取 RoomPlan 平面圖，匯出時一併輸出 usdz / json / svg。

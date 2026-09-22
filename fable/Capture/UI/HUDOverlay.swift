@@ -69,7 +69,6 @@ struct HUDOverlay: View {
         case .scanning: return controller.trackingReady ? "正在掃描" : "等待追蹤恢復"
         case .processing: return "正在整理掃描"
         case .review: return "檢查掃描成果"
-        case .training: return controller.trainingComplete ? "3D 模型已完成" : "正在建立 3D 模型"
         case .exporting: return "正在匯出"
         case .done: return "檔案已準備好"
         }
@@ -81,7 +80,6 @@ struct HUDOverlay: View {
         case .scanning: return controller.trackingReady ? "record.circle" : "pause.circle"
         case .processing, .exporting: return "hourglass"
         case .review: return "cube.transparent"
-        case .training: return "sparkles"
         case .done: return "checkmark.circle"
         }
     }
@@ -108,7 +106,7 @@ struct HUDOverlay: View {
 
     @ViewBuilder
     private var severeGlow: some View {
-        if controller.phase == .scanning, controller.assessment.captureBlocked {
+        if controller.phase == .scanning, controller.assessment.showsBlockingWarning {
             RoundedRectangle(cornerRadius: 28)
                 .strokeBorder(Color.red.opacity(0.65), lineWidth: 5)
                 .ignoresSafeArea()
@@ -149,13 +147,13 @@ struct HUDOverlay: View {
         }
         guard controller.phase == .scanning else { return nil }
         let a = controller.assessment
-        if a.captureBlocked, let w = a.worst {
-            return Guidance(text: w.message, symbol: w.symbol,
+        if a.showsBlockingWarning, let w = a.worst {
+            return Guidance(text: a.blockReason?.message ?? w.message, symbol: w.symbol,
                             tint: .red)
         }
         // 正在掉幀：這是實測結果不是推估，優先於所有「可能會怎樣」的提示
         if controller.recentRejectCount >= 4 {
-            return Guidance(text: "畫面不夠清晰，已略過 \(controller.recentRejectCount) 次抓幀 —— 請放慢",
+            return Guidance(text: "畫面不夠清晰，已略過 \(controller.recentRejectCount) 個候選影格・請稍停讓對焦穩定",
                             symbol: "camera.metering.none",
                             tint: .red)
         }
@@ -273,7 +271,7 @@ struct HUDOverlay: View {
 
                     // 融合品質熱圖：直接把「這塊還沒掃夠」畫在表面上，
                     // 比任何數字或文字提示都直觀 —— 使用者看到紅色就知道要再繞一次。
-                    if controller.showPointCloud {
+                    if controller.showPointCloud && controller.hasLiDAR {
                         Button {
                             controller.toggleColorMode()
                         } label: {
@@ -291,13 +289,13 @@ struct HUDOverlay: View {
 
             Spacer()
 
-            if controller.phase != .training && controller.phase != .idle {   // 訓練/檢視時隱藏掃描統計 bar
+            if controller.phase != .idle {   // 掃描與驗收階段顯示統計
             VStack(alignment: .trailing, spacing: 3) {
                 Label("\(controller.keyframeCount) 幀", systemImage: "camera.viewfinder")
                 Label("\(controller.pointCount / 1000)k 點", systemImage: "circle.grid.3x3.fill")
                 // 融合完成度：場景模式沒有涵蓋率圓頂，這是唯一的「掃夠了沒」訊號。
                 // 顏色即結論——紅/橘代表大部分表面觀測不足，別急著停。
-                if controller.phase == .scanning {
+                if controller.phase == .scanning && controller.hasLiDAR {
                     let f = controller.fusionCompleteness
                     Label(String(format: "視角 %.0f%%", f * 100),
                           systemImage: "arrow.triangle.turn.up.right.diamond.fill")
@@ -305,6 +303,8 @@ struct HUDOverlay: View {
                 }
                 Label(storageEstimate, systemImage: "internaldrive")
                 if !controller.hasLiDAR {
+                    Label("側向移動以驗證特徵點", systemImage: "arrow.left.and.right")
+                        .foregroundStyle(.cyan)
                     Label(controller.supportsLiDAR ? "LiDAR 已關閉" : "無 LiDAR", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.yellow)
                 }
@@ -342,7 +342,7 @@ struct HUDOverlay: View {
             HStack(spacing: 8) {
                 Image(systemName: "tortoise.fill").font(.caption2)
                 ProgressView(value: Double(min(1.0, blur / cfg.blockBlurPixels)))
-                    .tint(blur > cfg.blockBlurPixels ? .red
+                    .tint(controller.assessment.blockReason == .motion ? .red
                           : (blur > cfg.maxBlurPixels ? .orange : .green))
                     .frame(width: 130)
                 Image(systemName: "hare.fill").font(.caption2)
@@ -381,15 +381,14 @@ struct HUDOverlay: View {
                 ? "精細掃描已開啟・沿著空間緩慢移動"
                 : "沿著空間緩慢移動，影像會自動儲存"
         case .scanning:
-            return controller.trackingReady && !controller.assessment.captureBlocked
-                ? "自動擷取中・按下方按鈕結束掃描" : "擷取已暫停・恢復穩定後自動繼續"
+            if !controller.trackingReady { return controller.sessionState.message }
+            if let reason = controller.assessment.blockReason { return reason.message }
+            return "沿著空間緩慢移動・新視角會自動存成照片"
         case .processing:
             return "點雲優化中：姿態修正 + 多視角加權融合…"
         case .review:
             if !controller.canUseScan { return "尚未取得可用影像，請繼續掃描並緩慢移動" }
             return "單指旋轉・雙指縮放，檢查是否有遺漏的區域"
-        case .training:
-            return nil
         case .exporting:
             return "打包 COLMAP 資料集…"
         case .done:
@@ -458,6 +457,18 @@ struct HUDOverlay: View {
                     .foregroundStyle(.white)
                 }
 
+                if !controller.hasLiDAR {
+                    Toggle(isOn: $controller.reconstructFromImages) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("影像深度重建").font(.subheadline)
+                            Text("停止後以重疊照片重建點雲，需較多處理時間").font(.caption2)
+                        }
+                    }
+                    .tint(.cyan).padding(14)
+                    .hudGlass(RoundedRectangle(cornerRadius: 16))
+                    .foregroundStyle(.white)
+                }
+
                 // 相機參數鎖定開關（預設開啟）：按快門當下鎖定曝光/白平衡。
                 // 對焦刻意不在此列 —— 鎖對焦＝凍結景深，離開起始距離就糊。
                 Toggle(isOn: $controller.lockCameraParams) {
@@ -493,8 +504,6 @@ struct HUDOverlay: View {
                 .padding(.bottom, 18)
             case .review:
                 reviewControls
-            case .training:
-                trainingControls
             case .exporting:
                 ProgressView()
                     .controlSize(.large)
@@ -591,6 +600,14 @@ struct HUDOverlay: View {
     private var reviewControls: some View {
         VStack(spacing: 12) {
             scanSummaryCard
+            if let report = controller.imageReconstructionReport {
+                Text(report.outputPoints > 0
+                     ? "影像重建 \(report.outputPoints) 點 · \(report.contributingReferences) 個參考視角"
+                     : "影像重建：尚無可靠匹配")
+                    .font(.caption).foregroundStyle(.white)
+                    .padding(.horizontal, 14).padding(.vertical, 7)
+                    .hudGlass(Capsule())
+            }
             // 平面圖預覽（只有 RoomPlan 真的產出東西時才出現）
             if let fp = controller.floorPlanData, !fp.walls.isEmpty {
                 Button {
@@ -609,42 +626,19 @@ struct HUDOverlay: View {
                         .foregroundStyle(.white)
                 }
             }
-            // 訓練時是否即時顯示過程（關＝背景訓練略快，完成後仍可檢視）
-            Toggle(isOn: $controller.showTrainingProcess) {
-                Label("邊訓練邊看過程", systemImage: "eye")
-                    .font(.caption.weight(.medium))
-            }
-            .tint(.green)
-            .padding(.horizontal, 14).padding(.vertical, 6)
-            .frame(width: 220)
-            .hudGlass(Capsule())
-            .foregroundStyle(.white)
-
-            // 主要行動：直接在手機上訓練成 3DGS
             Button {
-                controller.startTraining()
+                controller.exportAndShare()
             } label: {
-                Label("訓練成 3DGS", systemImage: "sparkles")
+                Label("匯出 3DGS 訓練資料", systemImage: "square.and.arrow.up")
                     .font(.headline)
                     .padding(.horizontal, 22)
                     .padding(.vertical, 13)
                     .background(Color.accentColor, in: Capsule())
                     .foregroundStyle(.white)
             }
-            .disabled(!controller.canTrain)
-            .opacity(controller.canTrain ? 1 : 0.45)
+            .disabled(!controller.canUseScan)
+            .opacity(controller.canUseScan ? 1 : 0.45)
             HStack(spacing: 12) {
-                Button {
-                    controller.exportAndShare()
-                } label: {
-                    Label("匯出", systemImage: "square.and.arrow.up")
-                        .font(.subheadline.weight(.medium))
-                        .padding(.horizontal, 16).padding(.vertical, 10)
-                        .hudGlass(Capsule())
-                        .foregroundStyle(.white)
-                }
-                .disabled(!controller.canUseScan)
-                .opacity(controller.canUseScan ? 1 : 0.45)
                 Button {
                     controller.resumeScan()
                 } label: {
@@ -671,60 +665,6 @@ struct HUDOverlay: View {
         .confirmationDialog("捨棄這次掃描？", isPresented: $showDiscardConfirm, titleVisibility: .visible) {
             Button("刪除掃描資料", role: .destructive) { controller.discardScan() }
             Button("取消", role: .cancel) {}
-        }
-    }
-
-    // MARK: - 訓練控制（進行中：進度＋停止；完成：匯出／重訓／回檢視）
-
-    @ViewBuilder
-    private var trainingControls: some View {
-        if controller.trainingComplete {
-            HStack(spacing: 12) {
-                Button {
-                    controller.exportAndShare()
-                } label: {
-                    Label("匯出並分享", systemImage: "square.and.arrow.up")
-                        .font(.headline)
-                        .padding(.horizontal, 18).padding(.vertical, 12)
-                        .background(Color.accentColor, in: Capsule())
-                        .foregroundStyle(.white)
-                }
-                Button {
-                    controller.startTraining()
-                } label: {
-                    Label("重訓", systemImage: "arrow.clockwise")
-                        .font(.subheadline.weight(.medium))
-                        .padding(.horizontal, 14).padding(.vertical, 11)
-                        .hudGlass(Capsule())
-                        .foregroundStyle(.white)
-                }
-                Button {
-                    controller.backToReviewFromTraining()
-                } label: {
-                    Image(systemName: "cube.transparent")
-                        .font(.system(size: 17, weight: .regular))
-                        .padding(11)
-                        .hudGlass(Circle())
-                        .foregroundStyle(.white)
-                }
-            }
-        } else {
-            VStack(spacing: 10) {
-                ProgressView(value: Double(controller.trainingIteration),
-                             total: Double(max(1, controller.trainingTotal)))
-                    .tint(.white)
-                    .frame(width: 240)
-                Button {
-                    controller.cancelTraining()
-                } label: {
-                    Label("停止", systemImage: "stop.fill")
-                        .font(.subheadline.weight(.medium))
-                        .padding(.horizontal, 18).padding(.vertical, 10)
-                        .hudGlass(Capsule())
-                        .foregroundStyle(.white)
-                }
-            }
-            .padding(.bottom, 6)
         }
     }
 

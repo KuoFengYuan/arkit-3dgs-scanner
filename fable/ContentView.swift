@@ -27,7 +27,7 @@ struct ContentView: View {
                     Text("把眼前的空間，\n留下來。")
                         .font(.system(.largeTitle, design: .rounded, weight: .bold))
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("走一圈、檢查成果，再把掃描轉成 3D 模型或平面圖。")
+                    Text("走一圈、檢查點雲與拍攝路線，再匯出空間掃描資料。")
                         .font(.body)
                         .foregroundStyle(.secondary)
                 }
@@ -36,7 +36,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     step("01", "緩慢掃描", "沿著空間移動，手機會自動擷取影像。", "viewfinder")
                     step("02", "檢查與補掃", "旋轉點雲檢查缺漏，隨時回到原處補拍。", "cube.transparent")
-                    step("03", "建立與分享", "在手機上建立 3D 模型，或匯出掃描資料。", "square.and.arrow.up")
+                    step("03", "匯出與分享", "匯出影像、相機姿態與點雲，供外部 3DGS 訓練使用。", "square.and.arrow.up")
                 }
                 .padding(22)
                 .background(.background, in: RoundedRectangle(cornerRadius: 24))
@@ -86,7 +86,7 @@ struct ContentView: View {
                 .controlSize(.large)
                 .disabled(!ARWorldTrackingConfiguration.isSupported)
                 Text(ARWorldTrackingConfiguration.isSupported
-                     ? "掃描與模型訓練都在裝置上進行" : "此裝置不支援 AR 掃描")
+                     ? "掃描與資料優化都在裝置上進行" : "此裝置不支援 AR 掃描")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

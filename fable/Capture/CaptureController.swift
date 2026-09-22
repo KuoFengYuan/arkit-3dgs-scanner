@@ -24,8 +24,7 @@ final class CaptureController: NSObject, ObservableObject {
         case idle          // 相機準備與取景
         case scanning
         case processing    // 掃描後：錨點姿態修正 + 點雲重融合（進度條）
-        case review        // 3D 檢視優化後點雲，決定匯出 / 續掃 / 捨棄 / 訓練
-        case training      // 手機端 3DGS 訓練（msplat）：即時預覽越訓越清晰
+        case review        // 3D 檢視優化後點雲，決定匯出 / 續掃 / 捨棄
         case exporting     // 寫 COLMAP + zip
         case done
     }
@@ -45,21 +44,19 @@ final class CaptureController: NSObject, ObservableObject {
     var trackingReady: Bool { sessionState.canCapture }
     var canStartScan: Bool { phase == .idle && sessionState.canCapture }
     var canUseScan: Bool { refinedRecords.contains { $0.blurVerdict == .keep } }
-    var canTrain: Bool { canUseScan && !reviewPoints.isEmpty }
     var canResumeScan: Bool {
         guard phase == .review, writer != nil else { return false }
         if case .failed = sessionState { return false }
         return true
     }
     var canClose: Bool {
-        phase == .idle || phase == .review || phase == .done || (phase == .training && trainingComplete)
+        phase == .idle || phase == .review || phase == .done
     }
     private var authorizationTask: Task<Void, Never>?
     private var isAttached = false
     private var isInBackground = false
     private var needsSessionResume = false
     private var scanGeneration = UUID()
-    private var trainingGeneration = UUID()
     /// 即時點雲疊加。**預設顯示** —— RoomPlan 的即時線框已經關掉了，
     /// 少了它，點雲就是掃描當下唯一能回答「這裡掃到了沒」的東西。
     @Published var showPointCloud = true
@@ -79,22 +76,6 @@ final class CaptureController: NSObject, ObservableObject {
     @Published var reviewPoints: [CloudPoint] = []
     @Published var reviewTrajectory: [simd_float4x4] = []
 
-    // MARK: - 手機端 3DGS 訓練（msplat）狀態
-    @Published var trainingIteration = 0
-    @Published var trainingTotal = 0
-    @Published var trainingSplatCount = 0
-    @Published var trainingPreview: UIImage?     // 訓練中/完成的即時 render
-    @Published var trainingComplete = false      // .training 階段內：進行中 vs 已完成
-    @Published var trainedPLY: URL?
-    /// 訓練時是否顯示即時預覽：開＝看過程（越訓越清晰），關＝背景訓練、略快。預設開
-    @Published var showTrainingProcess = true
-    private var trainingCancel = CancelFlag()
-    private var trainingTask: Task<Void, Never>?
-    private var session: MsplatSession?
-    // 訓練後互動檢視（trackball）render 節流
-    private var orbitInFlight = false
-    private var orbitPending = false
-
     /// 相機手動調整（曝光補償/快門/ISO/白平衡/對焦）。預設全自動；
     /// 使用者調整後，startScan 只鎖定「還在自動」的項目，手動值原樣帶進整段掃描 ——
     /// 也就是「預設鎖定，但可以調整完再鎖」。
@@ -104,7 +85,10 @@ final class CaptureController: NSObject, ObservableObject {
     /// 特徵追蹤：掃描時同步抽角點並建立跨幀對應，停止後餵給 BundleAdjuster。
     /// 放在掃描期做而非停止後，是因為停止後要重新解碼 120 張 JPEG（~2.4s，比 BA 還貴），
     /// 而此刻影像已經在記憶體裡。
-    private let featureTracker = FeatureTracker()
+    private var featureTracker = FeatureTracker()
+    private var featureProcessor: LatestFrameProcessor<Keyframe>?
+    private var fusionCancel = CancelFlag()
+    private var capturePerformance = CapturePipelineReport()
     /// 建好的平面圖，於 processing 階段產生 → review 可顯示、匯出時寫檔
     @Published private(set) var floorPlanData: FloorPlanData?
     /// 是否以上次的 ARWorldMap 開始 —— 讓這次掃描與上次落在**同一個座標系**。
@@ -132,8 +116,12 @@ final class CaptureController: NSObject, ObservableObject {
     /// 畫面與匯出共用這個旗標 —— 看到的就是匯出的。
     @Published var showPlanFurniture = false
     @Published var refineCameraPoses = true
+    @Published var reconstructFromImages = true
+    @Published private(set) var imageReconstructionReport: RGBReconstructionEngine.Report?
     private(set) var config = CaptureConfig()
     private var trackingStability = TrackingStabilityGate()
+    private var poseContinuity = PoseContinuityGate()
+    private var sparseTrackingEpoch = 0
     let supportsLiDAR = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
     @Published private(set) var useLiDAR = true
     var hasLiDAR: Bool { supportsLiDAR && useLiDAR }
@@ -142,6 +130,7 @@ final class CaptureController: NSObject, ObservableObject {
     func setLiDAREnabled(_ enabled: Bool) {
         guard phase == .idle, supportsLiDAR, useLiDAR != enabled else { return }
         useLiDAR = enabled
+        if !hasLiDAR { colorMode = .rgb }
         continueFromLastMap = false
         sessionState = .initializing
         pixelBufferPool = nil
@@ -179,11 +168,17 @@ final class CaptureController: NSObject, ObservableObject {
     private var pendingWrites = 0
     private var writeTasks: [Int: Task<Void, Never>] = [:]
     private var previewTask: Task<Void, Never>?
+    private var previewRenderTask: Task<Void, Never>?
+    private var previewMainTotalMS = 0.0
+    private var previewMainMaxMS = 0.0
+    private var assessedScanFrames = 0
+    private var blockedScanFrames = 0
     private var previewInFlight = false
     /// 本幀是否已進過預覽融合（關鍵幀路徑與 10Hz 路徑可能落在同一幀，避免 obs 重複累加）
     private var lastPreviewFrame = -1
     private var pixelBufferPool: CVPixelBufferPool?
     private var lastWarningHaptic: TimeInterval = 0
+    private var lastSharpnessRejectTime: TimeInterval = -.infinity
     private var lastSparseIntegration: TimeInterval = 0
     private let captureHaptic = UIImpactFeedbackGenerator(style: .light)
     private let warningHaptic = UINotificationFeedbackGenerator()
@@ -253,6 +248,7 @@ final class CaptureController: NSObject, ObservableObject {
         guard isAttached else { return }
         if !isActive {
             guard phase == .idle || phase == .scanning else { return }
+            previewRenderTask?.cancel()
             needsSessionResume = true
             sessionState = .interrupted
             arView?.session.pause()
@@ -272,24 +268,27 @@ final class CaptureController: NSObject, ObservableObject {
 
     private func resumeTracking() {
         trackingStability.reset()
+        poseContinuity.reset()
+        sparseTrackingEpoch += 1
         sessionState = .relocalizing
         arView?.session.run(CaptureSessionConfiguration.make(config: config, useLiDAR: hasLiDAR), options: [])
         monitor.start()
+        if phase == .scanning { startPreviewRendering() }
         shutter.reset()
         if lockCameraParams { applyCameraLocks() }
         UIApplication.shared.isIdleTimerDisabled = true
     }
 
     func teardown() {
+        fusionCancel.cancel()
+        if let processor = featureProcessor { Task { await processor.close() } }
+        featureProcessor = nil
         isAttached = false
+        previewRenderTask?.cancel()
         authorizationTask?.cancel()
         authorizationTask = nil
-        trainingCancel.cancel()
-        trainingTask?.cancel()
-        trainingGeneration = UUID()
         scanGeneration = UUID()
         arView?.session.delegate = nil
-        session?.close(); session = nil
         releaseCameraLocks()
         arView?.session.pause()
         monitor.stop()
@@ -330,6 +329,8 @@ final class CaptureController: NSObject, ObservableObject {
         guard isAttached, !isInBackground,
               AVCaptureDevice.authorizationStatus(for: .video) == .authorized else { return }
         trackingStability.reset()
+        poseContinuity.reset()
+        sparseTrackingEpoch += 1
         let map = continueFromLastMap ? WorldMapStore.loadLatest() : nil
         sessionState = map == nil ? .initializing : .relocalizing
         arView?.session.run(CaptureSessionConfiguration.make(config: config, useLiDAR: hasLiDAR, initialWorldMap: map),
@@ -345,6 +346,7 @@ final class CaptureController: NSObject, ObservableObject {
     func startScan() {
         guard canStartScan else { return }
         config.baRounds = refineCameraPoses && hasLiDAR ? 6 : 0
+        config.reconstructFromImages = reconstructFromImages
         do {
             try beginSessionStorage()
         } catch {
@@ -365,7 +367,22 @@ final class CaptureController: NSObject, ObservableObject {
         sharpnessRejects = 0
         recentRejects = []
         recentRejectCount = 0
-        Task { await featureTracker.reset() }
+        featureTracker = FeatureTracker()
+        let tracker = featureTracker
+        let cfg = config
+        featureProcessor = config.baRounds > 0 ? LatestFrameProcessor<Keyframe> { frame in
+            guard let depth = frame.depthData, frame.depthWidth > 0, frame.depthHeight > 0 else { return }
+            await tracker.add(frameID: frame.record.id, luma: frame.pixelBuffer, depth: depth,
+                              conf: frame.confidenceData.map { [UInt8]($0) },
+                              dw: frame.depthWidth, dh: frame.depthHeight,
+                              K: frame.record.intrinsics, c2w: frame.c2w,
+                              minDepth: cfg.pointMinDepthM, maxDepth: cfg.pointMaxDepthM)
+        } : nil
+        capturePerformance = CapturePipelineReport()
+        capturePerformance.configuredMinimumIntervalS = config.minKeyframeInterval
+        capturePerformance.poseRefinementEnabled = config.baRounds > 0
+        pendingWrites = 0
+        writeTasks = [:]
         scanStartPosition = nil
         lastTravelPosition = nil
         traveledM = 0
@@ -375,7 +392,13 @@ final class CaptureController: NSObject, ObservableObject {
         lastWorldMapMB = nil
         baResult = nil
         scanSummary = nil
+        previewMainTotalMS = 0
+        previewMainMaxMS = 0
+        assessedScanFrames = 0
+        blockedScanFrames = 0
+        imageReconstructionReport = nil
         phase = .scanning
+        startPreviewRendering()
         statusText = nil
         UIApplication.shared.isIdleTimerDisabled = true   // 掃描中不鎖屏
         captureHaptic.prepare()
@@ -384,55 +407,97 @@ final class CaptureController: NSObject, ObservableObject {
     /// 停止掃描 → 取回錨點修正後姿態 → 暫停 AR → 背景重融合 → review
     func stopScan() {
         guard phase == .scanning else { return }
+        fusionCancel.cancel()
+        fusionCancel = CancelFlag()
         phase = .processing
+        previewRenderTask?.cancel()
         exportProgress = 0
         statusText = "正在儲存最後的影像…"
         UIApplication.shared.isIdleTimerDisabled = true
         releaseCameraLocks()
-        let refined = snapshotRefinedTransforms()   // 必須在 pause 前讀 anchors
-        let meshVerts = snapshotMeshVertices()      // 同上：pause 後 anchors 就讀不到了
-        floorPlan.stopCapture()                     // 只是 stop()，最終資料由 delegate 稍後送達
+        let generation = scanGeneration
+        floorPlan.stopCapture()
         let tStop = Date()
         Task {
-            // 等待已接受的工作真正落盤，也包含可選的特徵追蹤。
+            // Let the processing state render before snapshotting any scene data.
+            await Task.yield()
             for task in Array(writeTasks.values) { await task.value }
+            guard isAttached, generation == scanGeneration else { return }
+            statusText = "正在完成最後的特徵處理…"
+            await featureProcessor?.drain()
+            guard isAttached, generation == scanGeneration else { return }
+            let featureWork = await featureProcessor?.report()
+            let retained = await featureTracker.retainedState()
+            let timestamps = await writer?.snapshotRecords().map(\.timestamp).sorted() ?? []
+            guard isAttached, generation == scanGeneration else { return }
+            if let featureWork { capturePerformance.featureWork = featureWork }
+            capturePerformance.retainedFeatureFrames = retained.descriptorFrames
+            capturePerformance.archivedFeatureObservations = retained.archivedObservations
+            capturePerformance.discardedFeatureObservations = retained.discardedObservations
+            let intervals = zip(timestamps, timestamps.dropFirst()).map { max(0, $1 - $0) }
+            capturePerformance.savedIntervalTotalS = intervals.reduce(0, +)
+            capturePerformance.savedIntervalMaxS = intervals.max() ?? 0
+            if let directory = sessionDir {
+                do {
+                    let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                    try encoder.encode(capturePerformance).write(to: directory.appendingPathComponent("capture-performance.json"), options: .atomic)
+                } catch { print("拍攝效能報告儲存失敗：\(error.localizedDescription)") }
+            }
             await previewTask?.value
-            // 世界地圖：只有「取圖」需要活著的 session，序列化不需要。
-            // 所以取完就把序列化丟到背景並與 processScan 並行 ——
-            // 先前是 await 整個存檔完成才開始後處理，那一整段是使用者的乾等，
-            // 而且序列化跑在 main actor 上，連進度條都動不了。
-            let box = await captureWorldMap()
-            let mapTask = Task { @MainActor [weak self] in
-                if let box { await self?.persistWorldMap(box) }
-            }
+            await previewRenderTask?.value
+            guard isAttached, generation == scanGeneration else { return }
+            visualizer?.releasePointCloudGeometry()
+            pixelBufferPool = nil
+            previewTask = nil
+            previewRenderTask = nil
 
-            // **pause 必須等 RoomPlan 交回 CapturedRoomData** —— session 一停它就收不完。
-            //
-            // 這裡踩過一次坑：先前是「取完地圖立刻 pause」，而註解寫「實測資料照樣送達」。
-            // 那個實測成立是因為當時 pause 之前還夾著 saveWorldMap（序列化 10~40MB
-            // ＋ 兩次寫檔，1~3 秒），剛好給了 RoomPlan 送資料的時間。
-            // 把序列化搬到背景之後那段緩衝消失，平面圖就出不來了 ——
-            // 一個「加速」改動意外拿掉了另一件事賴以成立的前提。
-            //
-            // 與重融合並行等待，並在兩者結束後才開放續掃。
-            let roomTask = Task { @MainActor [weak self] in
-                await self?.floorPlan.waitForSegment(timeout: 12)
-                self?.arView?.session.pause()       // review 期間停止追蹤，省電省熱
-                self?.monitor.stop()
-            }
+            // Persist a bounded fallback before optional map/mesh processing. A failed later
+            // stage must not leave a long scan with only an unfinished in-memory preview.
+            statusText = "正在保存掃描預覽…"
+            await saveProcessingCheckpoint()
+            guard isAttached, generation == scanGeneration else { return }
+            // Keep a bounded anchor-local fallback for resume, rather than holding the entire
+            // live grid alongside a second offline grid and floor-plan workspaces.
+            await accumulator?.prepareForOfflineFusion(limit: min(config.exportMaxPoints, 100_000))
+            guard isAttached, generation == scanGeneration else { return }
+            let refined = snapshotRefinedTransforms()
+            statusText = "正在整理場景網格…"
+            let meshVerts = await snapshotMeshVertices()
+            guard isAttached, generation == scanGeneration else { return }
+            statusText = "正在保存世界地圖…"
+            await saveWorldMapBeforeProcessing()
+            statusText = "正在完成空間擷取…"
+            await floorPlan.waitForSegment(timeout: 12)
+            guard isAttached, generation == scanGeneration else { return }
+            arView?.session.pause()
+            monitor.stop()
 
+            // Map serialization, RoomPlan building and fusion must not overlap their peaks.
             await processScan(refinedTransforms: refined, meshVertices: meshVerts, since: tStop)
-            let reviewStatus = statusText
-            statusText = "正在完成掃描紀錄…"
-            await mapTask.value
-            await roomTask.value
+            guard isAttached, generation == scanGeneration else { return }
             if scanSummary != nil { scanSummary?.worldMapMB = lastWorldMapMB }
-            // RoomPlan 的尾端 pause 完成後才能提供續掃，避免舊任務暫停新的掃描。
-            statusText = scanNotice ?? reviewStatus
+            statusText = scanNotice ?? statusText
             exportProgress = 1
             phase = .review
             UIApplication.shared.isIdleTimerDisabled = false
         }
+    }
+
+    private func saveProcessingCheckpoint() async {
+        guard let writer, let accumulator, let dir = sessionDir else { return }
+        let records = await writer.snapshotRecords()
+        let points = await accumulator.checkpointPoints(limit: min(config.exportMaxPoints, 100_000),
+                                                  anchorTransforms: latestTileTransforms)
+        do { try await ScanLibrary.shared.saveReview(directory: dir, points: points, records: records) }
+        catch { print("掃描中繼預覽儲存失敗：\(error.localizedDescription)") }
+    }
+
+    private func saveWorldMapBeforeProcessing() async {
+        guard RefusionEngine.hasOptionalProcessingHeadroom else {
+            scanNotice = "記憶體不足以安全保存世界地圖，已略過；掃描照片與預覽已保留。"
+            return
+        }
+        if let box = await captureWorldMap() { await persistWorldMap(box) }
     }
 
     private func processScan(refinedTransforms: [Int: [Double]], meshVertices: [SIMD3<Float>],
@@ -441,6 +506,8 @@ final class CaptureController: NSObject, ObservableObject {
             phase = .idle
             return
         }
+        let generation = scanGeneration
+        let cancel = fusionCancel
         // 分段計時從**按下停止**起算。先前 t0 設在重融合前面，於是「總計 1.81s」
         // 完全不含世界地圖、BA、模糊複核 —— 一個叫「總計」卻不是總計的數字，
         // 正是我在這個專案被誤導過三次的同一類錯誤。
@@ -462,6 +529,7 @@ final class CaptureController: NSObject, ObservableObject {
 
         stage("讀取關鍵幀…", 0)
         let raw = await writer.snapshotRecords()
+        guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
         if !raw.isEmpty {
             let sharp = raw.map(\.sharpnessRatio).sorted()
             let blur = raw.map(\.estimatedBlurPx).sorted()
@@ -477,7 +545,9 @@ final class CaptureController: NSObject, ObservableObject {
                 iso[m], iso[raw.count - 1], 1 / expo[m], 1 / expo[raw.count - 1]))
         }
         var corrected = 0
-        defer { reportDrift(raw: raw, refined: refinedRecords) }
+        defer {
+            if isAttached, scanGeneration == generation { reportDrift(raw: raw, refined: refinedRecords) }
+        }
         refinedRecords = raw.map { record in
             var r = record
             if let t = refinedTransforms[r.id] {
@@ -490,32 +560,35 @@ final class CaptureController: NSObject, ObservableObject {
         // 位置在這裡的理由：
         //   · 必須在錨點修正**之後** —— 那是初值，BA 只做微調
         //   · 必須在 BlurFilter 與重融合**之前** —— 它們都吃姿態，晚了就白做
-        mark("讀取關鍵幀")
+        mark("停止收尾與讀取關鍵幀")
+        let anchorCorrectedRecords = refinedRecords
         if config.baRounds > 0 {
-            stage("校正相機位姿…", 0.10)
-            let obs = await featureTracker.observations()
-            print(await featureTracker.stats())
-            let records = refinedRecords
+            stage("逐張匹配拍攝影像…", 0.10)
+            let records = BlurFilter.annotate(refinedRecords)
             let rounds = config.baRounds
-            let ba = await Task.detached(priority: .userInitiated) {
-                BundleAdjuster.refine(records: records, observations: obs, rounds: rounds)
-            }.value
-            // ba.poses 只在保留集通過閘門時才非空（見 BundleAdjuster.kHoldoutGate）——
-            // 也就是「這次掃描的 BA 確實讓沒參與求解的 track 也變準了」。
-            if !ba.poses.isEmpty && config.baApplyPoses {
-                refinedRecords = refinedRecords.map { r in
-                    guard let m = ba.poses[r.id] else { return r }
-                    var out = r
-                    out.transform = RefusionEngine.rowMajor(m)
-                    return out
+            // The live worker is best-effort; release it and rebuild tracks from ALL saved
+            // usable depth frames. Disk reads and descriptor storage have fixed limits.
+            await featureTracker.reset()
+            let onProgress: @Sendable (Double) -> Void = { p in
+                Task { @MainActor [weak self] in
+                    guard let self, self.phase == .processing, self.scanGeneration == generation else { return }
+                    self.exportProgress = 0.10 + p * 0.24
+                    self.statusText = p < 0.85 ? "逐張匹配拍攝影像… \(Int(p / 0.85 * 100))%" : "驗證相機位置修正…"
                 }
-            } else if !ba.poses.isEmpty {
-                // 一定要講出來。BA 的那幾行 log 照樣印，若不說「沒套用」，
-                // 看 log 的人（包括我自己）會以為輸出用的是修正後的位姿。
-                print("  ⚠️ 保留集通過但 config.baApplyPoses = false（硬總開關）"
-                      + " → 輸出仍用 ARKit＋錨點修正的位姿")
             }
-            baResult = ba
+            let result = await Task.detached(priority: .userInitiated) {
+                await OfflinePoseRefinement.run(records: records, directory: dir, rounds: rounds,
+                                                 isCancelled: { cancel.isCancelled }, progress: onProgress)
+            }.value
+            guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
+            if config.baApplyPoses { refinedRecords = result.records }
+            baResult = result.ba
+            do {
+                try JSONEncoder().encode(result.report).write(to: dir.appendingPathComponent("pose-refinement.json"), options: .atomic)
+            } catch { print("位姿精修報告儲存失敗：\(error.localizedDescription)") }
+            if result.report.status != "validated" {
+                scanNotice = result.report.notice
+            }
         }
 
         // 模糊幀全域複核。必須在姿態修正**之後**：BlurFilter 靠位置/朝向找「看同一片表面」
@@ -523,7 +596,12 @@ final class CaptureController: NSObject, ObservableObject {
         // poses_refined.jsonl 與 images/ 都保留完整，可回頭檢查判定對不對。
         mark("位姿校正")
         stage("複核模糊幀…", 0.35)
-        refinedRecords = BlurFilter.annotate(refinedRecords)
+        let recordsToCheck = refinedRecords
+        let annotated = await Task.detached(priority: .userInitiated) {
+            BlurFilter.annotate(recordsToCheck)
+        }.value
+        guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
+        refinedRecords = annotated
         let dropped = refinedRecords.filter { $0.blurVerdict == .drop }.count
         let demoted = refinedRecords.filter { $0.blurVerdict == .demote }.count
         if dropped + demoted > 0 {
@@ -531,56 +609,94 @@ final class CaptureController: NSObject, ObservableObject {
                   + "、\(demoted) 幀（顏色糊，不進訓練但深度仍以降權併入點雲）")
         }
 
-        // RoomPlan 建模可繼續在背景進行，但其回呼只能更新同一輪掃描。
         mark("模糊複核")
         if hasLiDAR, config.captureFloorPlan, FloorPlanCapture.isSupported {
-            let generation = scanGeneration
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                let fp = await self.floorPlan.build()
-                guard self.isAttached, self.scanGeneration == generation else { return }
-                if let fp, !fp.walls.isEmpty {
-                    self.floorPlanData = fp
-                    self.logFloorPlan(fp)
-                } else {
-                    // RoomPlan 建不出東西（場景不是房間、或牆沒掃到）→ 退回點雲版。
-                    // 這比留一個空的平面圖有用：review 的按鈕綁 floorPlanData，
-                    // 沒有它使用者連「有沒有平面圖」都看不到。
-                    print("[FloorPlan] RoomPlan 沒有產出可用結構 → 改用點雲平面圖")
-                    self.usePointCloudPlan()
-                }
+            stage("建立空間結構…", 0.40)
+            let plan = await floorPlan.build()
+            guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
+            if let plan, !plan.walls.isEmpty {
+                floorPlanData = plan
+                logFloorPlan(plan)
             }
         }
+        guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
 
         var points: [CloudPoint] = []
+        var fusionInterrupted = false
         if hasLiDAR && config.saveDepth && !refinedRecords.isEmpty {
             stage("融合點雲…", 0.45)
             let records = refinedRecords
             let cfg = config
             // 重融合佔進度條的後 55%（前面三段各自佔一段，見 stage）
             let onProg: @Sendable (Double) -> Void = { p in
-                Task { @MainActor [weak self] in self?.exportProgress = 0.45 + p * 0.55 }
+                Task { @MainActor [weak self] in
+                    guard let self, self.phase == .processing, self.scanGeneration == generation else { return }
+                    self.exportProgress = 0.45 + p * 0.50
+                }
             }
-            let mesh = meshVertices
-            // 先取平面圖要的密度，算完平面圖再下採樣給訓練／匯出用。
-            // 反過來（先砍到 250k 再畫平面圖）會讓平面圖只剩 ~7cm 的有效解析度 ——
-            // 見 CaptureConfig.floorPlanMaxPoints 的實測對照。
-            let dense = await Task.detached(priority: .userInitiated) {
-                RefusionEngine.refuse(records: records, sessionDir: dir, config: cfg,
+            let mesh = (config.baApplyPoses && !(baResult?.poses.isEmpty ?? true)) ? [] : meshVertices
+            // Mobile output has one hard budget shared by review and floor-plan input.
+            // Do not materialize a 2M-point plan cloud plus a second downsampling dictionary.
+            let needsDensePlan = config.pointCloudFloorPlan && floorPlanData == nil
+            let result = await Task.detached(priority: .userInitiated) {
+                RefusionEngine.refuseWithReport(records: records, sessionDir: dir, config: cfg,
                                       meshVertices: mesh,
-                                      target: max(cfg.exportMaxPoints, cfg.floorPlanMaxPoints),
+                                      target: cfg.exportMaxPoints,
+                                      isCancelled: { cancel.isCancelled },
                                       progress: onProg)
             }.value
-            // 平面圖吃高密度那一份；它只留下 floorPlanData（很小），dense 隨即釋放。
-            if !hasLiDAR || !cfg.captureFloorPlan || !FloorPlanCapture.isSupported {
-                usePointCloudPlan(dense)
+            guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
+            if result.report.status == "memoryPressure" {
+                fusionInterrupted = true
+                // Fallback live points were built with anchor poses, not the newly refined poses.
+                refinedRecords = BlurFilter.annotate(anchorCorrectedRecords)
+                baResult?.poses = [:]
+                scanNotice = "融合時記憶體不足，已停止精細融合並保留即時點雲預覽；照片與深度資料仍完整保留。"
+                points = await accumulator.checkpointPoints(limit: min(cfg.exportMaxPoints, 100_000),
+                                                            anchorTransforms: latestTileTransforms)
+            } else {
+                let dense = result.points
+                if needsDensePlan, RefusionEngine.hasOptionalProcessingHeadroom {
+                    stage("建立平面圖…", 0.96)
+                    await usePointCloudPlan(dense)
+                }
+                guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
+                points = dense
             }
-            points = dense.count > cfg.exportMaxPoints
-                ? PointCloudMath.stratifiedBest(dense, startCell: cfg.refuseVoxelSizeM,
-                                                target: cfg.exportMaxPoints)
-                : dense
         }
-        if points.isEmpty {                          // 無 LiDAR / 無深度時退回即時累積雲
+        if !hasLiDAR && config.reconstructFromImages {
+            stage("影像多視角重建…", 0.45)
+            let records = refinedRecords, cfg = config
+            let onProgress: @Sendable (Double) -> Void = { p in
+                Task { @MainActor [weak self] in
+                    guard let self, self.phase == .processing else { return }
+                    self.exportProgress = 0.45 + p * 0.55
+                }
+            }
+            let result = await Task.detached(priority: .userInitiated) {
+                RGBReconstructionEngine.reconstruct(records: records, sessionDir: dir, config: cfg, progress: onProgress)
+            }.value
+            let sparse = await accumulator.bestPoints(target: cfg.exportMaxPoints, anchorTransforms: latestTileTransforms)
+            points = await Task.detached(priority: .userInitiated) {
+                RGBReconstructionEngine.supplement(rgb: result.points, sparse: sparse, config: cfg)
+            }.value
+            var report = result.report
+            report.reviewPointsIncludingSparse = points.count
+            imageReconstructionReport = report
+            do {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                try encoder.encode(report).write(to: dir.appendingPathComponent("rgb-reconstruction.json"), options: .atomic)
+            } catch {
+                scanNotice = "影像重建報告儲存失敗：\(error.localizedDescription)"
+            }
+            if result.points.isEmpty, scanNotice == nil {
+                scanNotice = points.isEmpty
+                    ? "照片已保留，但尚無可靠點雲。請對準有紋理的表面側向補拍至少三張重疊照片。"
+                    : "影像重建未取得可靠匹配，目前顯示已驗證的稀疏特徵點。請側向補拍至少三張重疊照片。"
+            }
+        }
+        if points.isEmpty, !fusionInterrupted {      // 無 LiDAR / 無深度時退回即時累積雲
             points = await accumulator.bestPoints(target: config.exportMaxPoints,
                                                    anchorTransforms: latestTileTransforms)
         }
@@ -590,16 +706,43 @@ final class CaptureController: NSObject, ObservableObject {
         let total = seg.reduce(0) { $0 + $1.1 }
         print(String(format: "點雲處理耗時: %.2fs = ", total)
               + seg.map { String(format: "%@ %.2fs", $0.0, $0.1) }.joined(separator: " + ")
-              + "（世界地圖與平面圖在背景，不計入）")
+              + "（含停止收尾；重融合段含已執行的平面圖，尚未計入最後歷史存檔）")
+
+        stage("挑選訓練影像…", 0.98)
+        let selectionRecords = refinedRecords
+        let selection = await Task.detached(priority: .utility) {
+            TrainingFrameSelector.select(selectionRecords,
+                evidence: TrainingFrameSelector.evidence(records: selectionRecords, directory: dir,
+                                                         isCancelled: { cancel.isCancelled }))
+        }.value
+        guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
+        if let notice = selection.notice { scanNotice = [scanNotice, notice].compactMap { $0 }.joined(separator: "\n") }
+        do {
+            try JSONEncoder().encode(selection).write(to: dir.appendingPathComponent("training-selection.json"), options: .atomic)
+        } catch { print("訓練選幀報告儲存失敗：\(error.localizedDescription)") }
 
         reviewPoints = points
+        if !hasLiDAR, points.isEmpty, scanNotice == nil {
+            scanNotice = "照片已保留，但尚無通過多視角驗證的特徵點。請對準有紋理的表面緩慢側向補拍。"
+        }
         // RoomPlan 沒開（或機型不支援）→ 平面圖直接用點雲版。
         // 不這樣做的話 floorPlanData 永遠是 nil，review 的平面圖按鈕不會出現，
         // 使用者要等到匯出才知道有沒有平面圖。
         // 有 LiDAR 的路徑上這已經在融合那一段用高密度點雲算完了（見上），
         // 所以這裡只補「沒有深度、退回即時累積雲」那條路。
-        if floorPlanData == nil,
-           !hasLiDAR || !config.captureFloorPlan || !FloorPlanCapture.isSupported { usePointCloudPlan() }
+        if !fusionInterrupted, RefusionEngine.hasOptionalProcessingHeadroom, floorPlanData == nil,
+           !hasLiDAR || !config.captureFloorPlan || !FloorPlanCapture.isSupported { await usePointCloudPlan() }
+        if hasLiDAR {
+            var performance = await accumulator.performanceReport()
+            performance.mainApplyTotalMS = previewMainTotalMS
+            performance.mainApplyMaxMS = previewMainMaxMS
+            performance.assessedFrames = assessedScanFrames
+            performance.qualityBlockedFrames = blockedScanFrames
+            do {
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                try encoder.encode(performance).write(to: dir.appendingPathComponent("preview-performance.json"), options: .atomic)
+            } catch { print("預覽效能報告儲存失敗：\(error.localizedDescription)") }
+        }
         reviewTrajectory = refinedRecords.map { RefusionEngine.float4x4(rowMajor: $0.transform) }
         pointCount = points.count
         do {
@@ -610,10 +753,9 @@ final class CaptureController: NSObject, ObservableObject {
         statusText = corrected > 0 ? "姿態已修正 \(corrected) 幀（ARKit 地圖優化）" : nil
     }
 
-    /// review 通過（或訓練完成）→ 寫 COLMAP sparse + PLY + 修正後姿態 + zip。
-    /// 若已訓練，dir 內的 gaussians.ply 會一併打包進 zip。
+    /// 驗收後寫入 COLMAP、PLY 與修正後姿態，打包成外部 3DGS 訓練資料。
     func exportAndShare() {
-        guard phase == .review || (phase == .training && trainingComplete),
+        guard phase == .review,
               let dir = sessionDir else { return }
         guard canUseScan else {
             statusText = "尚無可用影像，請繼續掃描後再匯出"
@@ -624,20 +766,15 @@ final class CaptureController: NSObject, ObservableObject {
         exportedZip = nil
         statusText = "正在整理影像與點雲…"
         UIApplication.shared.isIdleTimerDisabled = true
-        let records = refinedRecords.filter { $0.blurVerdict == .keep }
+        let records = refinedRecords
         let points = reviewPoints
         let flipWorldUp = config.flipWorldUpForExport
         Task {
             defer { UIApplication.shared.isIdleTimerDisabled = false }
             do {
                 try await Task.detached(priority: .userInitiated) {
-                    try ExportManager.writeColmapSparse(records: records, points: points, to: dir,
-                                                        flipWorldUp: flipWorldUp)
-                    if !points.isEmpty {
-                        try ExportManager.writePLY(points, to: dir.appendingPathComponent("points.ply"))
-                    }
-                    try ExportManager.writeRefinedPoses(records,
-                        to: dir.appendingPathComponent("poses_refined.jsonl"))
+                    try ExportManager.writeTrainingDataset(records: records, points: points, to: dir,
+                                                           flipWorldUp: flipWorldUp)
                 }.value
                 try await writeFloorPlan(to: dir)
                 statusText = "正在壓縮檔案，完成後即可分享…"
@@ -675,200 +812,14 @@ final class CaptureController: NSObject, ObservableObject {
         // 一間一間掃再合併的精度也優於一鏡到底（一鏡到底會在門口累積漂移）。
         startFloorPlan(fresh: false)
         phase = .scanning
+        startPreviewRendering()
         statusText = nil
         UIApplication.shared.isIdleTimerDisabled = true
-    }
-
-    // MARK: - 手機端訓練
-
-    /// review（或訓練完成後重訓）→ 手機端 3DGS 訓練：
-    /// 先寫 COLMAP sparse/0 當訓練輸入（images/ 掃描時已寫），再在 msplat session 逐步訓練。
-    /// 訓練完成後 session 保留 → 可拖曳環繞檢視訓練結果。
-    func startTraining() {
-        guard phase == .review || (phase == .training && trainingComplete),
-              let dir = sessionDir, canTrain else { return }
-        session?.close()                 // 重訓：先關舊 session
-        phase = .training
-        trainingComplete = false
-        trainingPreview = nil
-        trainingIteration = 0
-        trainingTotal = config.trainIterations
-        trainingSplatCount = 0
-        statusText = "準備訓練資料…"
-        UIApplication.shared.isIdleTimerDisabled = true
-
-        let generation = UUID()
-        trainingGeneration = generation
-        orbitInFlight = false
-        orbitPending = false
-        let cancel = CancelFlag()
-        trainingCancel = cancel
-        let records = refinedRecords.filter { $0.blurVerdict == .keep }
-        let points = reviewPoints
-        let cfg = config
-        let wantPreview = showTrainingProcess
-        let metallib = Bundle.main.path(forResource: "default", ofType: "metallib")
-        let plyURL = dir.appendingPathComponent("gaussians.ply")
-        let newSession = MsplatSession()
-        session = newSession
-
-        // 回呼在 MainActor 層定義、各自弱捕獲 self（避免巢狀 Task 的「捕獲 var self」問題）
-        let onProgress: @Sendable (MsplatSession.Progress) -> Void = { p in
-            Task { @MainActor [weak self] in
-                guard let self, self.isAttached, self.trainingGeneration == generation else { return }
-                self.applyTrainingProgress(p)
-            }
-        }
-        let onError: @Sendable (Error) -> Void = { e in
-            Task { @MainActor [weak self] in
-                guard let self, self.isAttached, self.trainingGeneration == generation else { return }
-                self.failTraining(e)
-            }
-        }
-        let onDone: @Sendable (Bool) -> Void = { c in
-            Task { @MainActor [weak self] in
-                guard let self, self.isAttached, self.trainingGeneration == generation else { return }
-                self.finishTraining(ply: plyURL, cancelled: c)
-            }
-        }
-        let thermalPaused: @Sendable () -> Bool = {
-            cfg.trainThermalThrottle &&
-            ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue
-        }
-
-        // trainingTask 本身不捕獲 self：先背景寫 COLMAP 訓練輸入，再啟動 session 訓練
-        trainingTask = Task {
-            do {
-                try await Task.detached(priority: .userInitiated) {
-                    try ExportManager.writeColmapSparse(records: records, points: points, to: dir,
-                                                        flipWorldUp: cfg.flipWorldUpForExport)
-                }.value
-            } catch {
-                onError(error); return
-            }
-            guard !Task.isCancelled else { return }
-            if cancel.isCancelled { onDone(true); return }
-            newSession.start(
-                colmapDir: dir.path, metallib: metallib,
-                iterations: cfg.trainIterations, shDegree: cfg.trainSHDegree,
-                maxGaussians: cfg.trainMaxGaussians, downscale: cfg.trainDownscale,
-                maxImageDim: cfg.trainMaxImageDim, maxTrainFrames: cfg.trainMaxFrames,
-                previewEvery: cfg.trainPreviewEvery, wantPreview: wantPreview,
-                outputPLY: plyURL.path,
-                isCancelled: { cancel.isCancelled },
-                thermalPaused: thermalPaused,
-                onProgress: onProgress, onError: onError, onDone: onDone)
-        }
-    }
-
-    func cancelTraining() {
-        guard phase == .training, !trainingComplete else { return }
-        trainingCancel.cancel()
-        statusText = "停止訓練中…（保留目前結果供檢視）"
-    }
-
-    /// 訓練完成後返回 review（點雲檢視）；zip 匯出已含 gaussians.ply
-    func backToReviewFromTraining() {
-        guard phase == .training, trainingComplete else { return }
-        trainingGeneration = UUID()
-        session?.close(); session = nil
-        trainingComplete = false
-        trainingPreview = nil
-        phase = .review
-        statusText = nil
-    }
-
-    /// 檢視訓練結果：拖曳 → 更新環繞角度並重新 render（節流：一次一張、保留最新請求）
-    func orbitTrainedView(deltaX: Float, deltaY: Float) {
-        guard phase == .training else { return }
-        session?.applyDrag(dx: deltaX, dy: deltaY)   // trackball 自由轉動（訓練中/完成都可）
-        if trainingComplete { requestOrbitRender() } // 完成後：即時 on-demand render（訓練中由迴圈定期 render）
-    }
-
-    /// pinch 縮放檢視（scale>1 拉近）。與拖曳同樣節流；訓練中由訓練迴圈定期 render。
-    func zoomTrainedView(scale: Float) {
-        guard phase == .training else { return }
-        session?.applyZoom(scale)
-        if trainingComplete { requestOrbitRender() }
-    }
-
-    /// 雙指平移檢視（沿螢幕平面移動樞軸）。dx,dy 為螢幕點位移。
-    func panTrainedView(dx: Float, dy: Float) {
-        guard phase == .training else { return }
-        session?.applyPan(dx: dx, dy: dy)
-        if trainingComplete { requestOrbitRender() }
-    }
-
-    private func requestOrbitRender() {
-        guard let session, phase == .training, trainingComplete else { return }
-        if orbitInFlight { orbitPending = true; return }
-        orbitInFlight = true
-        let generation = trainingGeneration
-        session.renderView { img in
-            Task { @MainActor [weak self] in
-                guard let self, self.isAttached, self.trainingGeneration == generation,
-                      self.phase == .training else { return }
-                if let img { self.setPreviewImage(img) }
-                self.orbitInFlight = false
-                if self.orbitPending { self.orbitPending = false; self.requestOrbitRender() }
-            }
-        }
-    }
-
-    /// 由 render 結果建 UIImage（已是直立直式 render，不需再旋轉）。
-    private func setPreviewImage(_ pv: MsplatSession.PreviewImage?) {
-        guard let pv, let cg = pv.cgImage() else { return }
-        trainingPreview = UIImage(cgImage: cg)
-    }
-
-    private func applyTrainingProgress(_ p: MsplatSession.Progress) {
-        guard phase == .training, !trainingComplete else { return }
-        trainingIteration = p.iteration
-        trainingSplatCount = p.splatCount
-        setPreviewImage(p.preview)
-        statusText = "訓練中　\(p.iteration)/\(p.total)　\(p.splatCount / 1000)k splats"
-    }
-
-    private func finishTraining(ply: URL, cancelled: Bool) {
-        guard phase == .training else { return }
-        UIApplication.shared.isIdleTimerDisabled = false
-        if cancelled, trainingIteration == 0 {
-            session?.close(); session = nil
-            trainingComplete = false
-            phase = .review
-            statusText = "已取消建立模型，掃描資料仍保留"
-            return
-        }
-        trainedPLY = FileManager.default.fileExists(atPath: ply.path) ? ply : nil
-        trainingComplete = true
-        if !cancelled { trainingIteration = trainingTotal }
-        statusText = cancelled
-            ? "已停止：\(trainingSplatCount / 1000)k splats — 拖曳可轉動檢視、亦可匯出"
-            : "訓練完成：\(trainingSplatCount / 1000)k splats — 拖曳可轉動檢視"
-        session?.resetView()
-        let generation = trainingGeneration
-        session?.renderView { img in   // 初始 trackball 視角（直立、直式、框住物件）
-            Task { @MainActor [weak self] in
-                guard let self, self.isAttached, self.trainingGeneration == generation,
-                      self.phase == .training else { return }
-                if let img { self.setPreviewImage(img) }
-            }
-        }
-    }
-
-    private func failTraining(_ error: Error) {
-        UIApplication.shared.isIdleTimerDisabled = false
-        statusText = "訓練失敗：\(error.localizedDescription)"
-        trainingComplete = false
-        session?.close(); session = nil
-        phase = .review
     }
 
     /// 捨棄本次掃描：刪除資料、全新開始
     func discardScan() {
-        guard phase == .review || phase == .done || (phase == .training && trainingComplete) else { return }
-        trainingCancel.cancel()
-        session?.close(); session = nil
+        guard phase == .review || phase == .done else { return }
         if let dir = sessionDir { try? FileManager.default.removeItem(at: dir) }
         if let zip = exportedZip { try? FileManager.default.removeItem(at: zip) }
         writer = nil
@@ -901,9 +852,15 @@ final class CaptureController: NSObject, ObservableObject {
     }
 
     private func cleanupToIdle() {
+        fusionCancel.cancel()
+        if let processor = featureProcessor { Task { await processor.close() } }
+        featureProcessor = nil
+        pendingWrites = 0
+        writeTasks = [:]
+        previewInFlight = false
+        previewRenderTask?.cancel()
+        previewRenderTask = nil
         scanGeneration = UUID()
-        trainingGeneration = UUID()
-        trainingTask?.cancel()
         needsSessionResume = false
         exportedZip = nil
         statusText = nil
@@ -912,6 +869,11 @@ final class CaptureController: NSObject, ObservableObject {
         showFloorPlan = false
         fusionCompleteness = 0
         scanSummary = nil
+        previewMainTotalMS = 0
+        previewMainMaxMS = 0
+        assessedScanFrames = 0
+        blockedScanFrames = 0
+        imageReconstructionReport = nil
         loopHint = nil
         floorPlanHint = nil
         recentRejectCount = 0
@@ -919,6 +881,7 @@ final class CaptureController: NSObject, ObservableObject {
         frameCounter = 0
         lastPreviewFrame = -1
         lastSparseIntegration = 0
+        lastSharpnessRejectTime = -.infinity
         pixelBufferPool = nil
         sessionDir = nil
         writer = nil
@@ -929,12 +892,6 @@ final class CaptureController: NSObject, ObservableObject {
         reviewPoints = []
         reviewTrajectory = []
         refinedRecords = []
-        session?.close(); session = nil
-        trainingComplete = false
-        trainingPreview = nil
-        trainedPLY = nil
-        trainingIteration = 0
-        trainingSplatCount = 0
         keyframeAnchors = [:]
         tileAnchorID = [:]
         tileKeyByAnchor = [:]
@@ -961,22 +918,34 @@ final class CaptureController: NSObject, ObservableObject {
     /// 讀取 ARKit 場景重建網格的世界座標頂點（停止前呼叫，與姿態快照同一時機）。
     /// 注意：ARGeometrySource 的頂點是 packed float3（stride 12B），
     /// 不可直接 bind 成 SIMD3<Float>（Swift 的 SIMD3<Float> 佔 16B）—— 必須逐分量讀。
-    private func snapshotMeshVertices() -> [SIMD3<Float>] {
+    private func snapshotMeshVertices() async -> [SIMD3<Float>] {
         guard hasLiDAR, config.useSceneMesh,
               let anchors = arView?.session.currentFrame?.anchors else { return [] }
+        // Hold anchors, never an ARFrame. Sample the full scene with a fixed allocation cap.
+        let meshes = anchors.compactMap { $0 as? ARMeshAnchor }
+        let total = meshes.reduce(0) { $0 + $1.geometry.vertices.count }
+        let limit = max(1, config.processingMeshMaxVertices)
+        let step = RefusionEngine.meshSampleStride(vertexCount: total, limit: limit)
         var out: [SIMD3<Float>] = []
-        for case let mesh as ARMeshAnchor in anchors {
+        out.reserveCapacity(min(total, limit))
+        var offset = 0
+        for mesh in meshes {
+            guard isAttached, phase == .processing else { return [] }
             let src = mesh.geometry.vertices
-            guard src.format == .float3 else { continue }
-            let base = src.buffer.contents()
-            let m = mesh.transform
-            out.reserveCapacity(out.count + src.count)
-            for i in 0..<src.count {
+            defer { offset += src.count }
+            guard src.format == .float3, src.stride >= 12, src.offset >= 0,
+                  src.count == 0 || src.offset + (src.count - 1) * src.stride + 12 <= src.buffer.length else { continue }
+            let base = src.buffer.contents(), transform = mesh.transform
+            let first = (step - offset % step) % step
+            for i in stride(from: first, to: src.count, by: step) {
                 let p = base.advanced(by: src.offset + i * src.stride)
-                              .assumingMemoryBound(to: Float.self)
-                let w = m * SIMD4<Float>(p[0], p[1], p[2], 1)
-                out.append(SIMD3<Float>(w.x, w.y, w.z))
+                let x = p.loadUnaligned(as: Float.self)
+                let y = p.loadUnaligned(fromByteOffset: 4, as: Float.self)
+                let z = p.loadUnaligned(fromByteOffset: 8, as: Float.self)
+                let w = transform * SIMD4<Float>(x, y, z, 1)
+                if w.x.isFinite && w.y.isFinite && w.z.isFinite { out.append(SIMD3(w.x, w.y, w.z)) }
             }
+            await Task.yield()
         }
         return out
     }
@@ -1002,7 +971,8 @@ final class CaptureController: NSObject, ObservableObject {
                                startedAt: ISO8601DateFormatter().string(from: Date()),
                                mode: "scene",   // 物件模式已移除；欄位保留給既有資料集相容
                                lidarAvailable: supportsLiDAR,
-                               lidarEnabled: hasLiDAR)
+                               lidarEnabled: hasLiDAR,
+                               rgbReconstructionEnabled: !hasLiDAR && config.reconstructFromImages)
         try ExportManager.writeMeta(meta, to: dir.appendingPathComponent("meta.json"))
     }
 
@@ -1055,7 +1025,7 @@ final class CaptureController: NSObject, ObservableObject {
         // 使用者拿哪一份由現場決定，而不是由我事先猜。
         // RoomPlan 關掉時 floorPlanData 已經是點雲版（見 processScan / usePointCloudPlan），
         // 這裡不重算；只有它還空著（例如匯出比 review 早）才補一次。
-        if floorPlanData == nil { usePointCloudPlan() }
+        if floorPlanData == nil { await usePointCloudPlan() }
 
         if hasLiDAR, config.captureFloorPlan, FloorPlanCapture.isSupported {
             // 平面圖是背景建的（見 processScan），匯出時若還沒好就在這裡等 ——
@@ -1071,14 +1041,19 @@ final class CaptureController: NSObject, ObservableObject {
     ///
     /// 算一次就存著：review 的預覽、房間命名、匯出都吃同一份，
     /// 不然使用者看到的圖和匯出的圖可能不是同一張（點雲不會變，但重算沒有意義）。
-    /// - source: 要拿哪一份點雲畫。nil ＝ reviewPoints（已下採樣到 exportMaxPoints）。
-    ///   有深度的路徑會明確傳入融合後的高密度點雲 —— 平面圖的格距是由實測密度挑的，
-    ///   拿下採樣後的雲來畫等於自己把解析度先砍掉。
-    private func usePointCloudPlan(_ source: [CloudPoint]? = nil) {
+    /// - source: 要拿哪一份點雲畫。手機共用受 exportMaxPoints 限制的融合結果，
+    ///   不再額外要求數百萬點。大場景平面圖可能較稀疏，優先控制處理峰值。
+    private func usePointCloudPlan(_ source: [CloudPoint]? = nil) async {
         let src = source ?? reviewPoints
         guard config.pointCloudFloorPlan, !src.isEmpty else { return }
-        let pts = src.map { SIMD3<Float>($0.x, $0.y, $0.z) }
-        guard let r = PointCloudFloorPlan.extract(points: pts) else {
+        let generation = scanGeneration
+        let result = await Task.detached(priority: .userInitiated) {
+            autoreleasepool {
+                PointCloudFloorPlan.extract(points: src.map { SIMD3<Float>($0.x, $0.y, $0.z) })
+            }
+        }.value
+        guard isAttached, scanGeneration == generation else { return }
+        guard let r = result else {
             print("點雲平面圖: 抽不出牆（點太少、或沒有垂直跨度足夠的表面）")
             return
         }
@@ -1125,12 +1100,12 @@ final class CaptureController: NSObject, ObservableObject {
     /// 這是「按下停止之後的第一段乾等」的真正來源：ARWorldMap 動輒 10~40MB，
     /// NSKeyedArchiver 是 CPU 密集的同步呼叫，先前直接跑在 main actor 上 ——
     /// 不只擋住畫面，連重融合的進度條都動不了，於是使用者看到的是一段完全靜止的等待。
-    /// 而它跟後處理沒有任何依賴關係，本來就該平行。
+    /// 停止流程會等待它完成才開始重融合，避免大型資料同時佔用記憶體。
     private func persistWorldMap(_ box: MapBox) async {
         let dir = sessionDir
         let anchors = box.map.anchors.count
         let bytes = await Task.detached(priority: .utility) {
-            WorldMapStore.save(box.map, sessionDir: dir)
+            autoreleasepool { WorldMapStore.save(box.map, sessionDir: dir) }
         }.value
         lastWorldMapMB = bytes.map { Double($0) / 1_048_576 }
         if let bytes {
@@ -1264,13 +1239,28 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
         if case .failed = sessionState { return }
         frameCounter += 1
 
-        let a = monitor.assess(frame: frame, config: config)
+        let normalTracking: Bool
+        if case .normal = frame.camera.trackingState { normalTracking = true } else { normalTracking = false }
+        let continuous = normalTracking && poseContinuity.accepts(frame.camera.transform, timestamp: frame.timestamp)
+        if !continuous {
+            trackingStability.reset()
+            if !normalTracking { poseContinuity.reset() }
+            sparseTrackingEpoch += 1
+        }
+        var a = monitor.assess(frame: frame, config: config, useLiDAR: hasLiDAR)
+        if !continuous {
+            if !a.issues.contains(.trackingLost) { a.issues.append(.trackingLost) }
+            a.captureBlocked = true
+            a.blockReason = .tracking
+            // assess 也會保存當前姿態；在其後清除，避免異常姿態污染下一幀速度。
+            monitor.resetTrackingHistory()
+        }
         // UI 每 6 幀（~0.1s）更新一次即可，避免 60Hz 重繪
         if frameCounter % 6 == 0 { assessment = a }
         let nextState: CaptureSessionState
         switch frame.camera.trackingState {
         case .normal:
-            let stable = trackingStability.accepts(isNormal: true, timestamp: frame.timestamp)
+            let stable = trackingStability.accepts(isNormal: continuous, timestamp: frame.timestamp)
             nextState = stable ? .ready : (sessionState == .relocalizing ? .relocalizing : .initializing)
         case .limited(.relocalizing): nextState = .relocalizing
         case .limited(.initializing): nextState = .initializing
@@ -1279,6 +1269,8 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
         if case .normal = frame.camera.trackingState { } else { trackingStability.reset() }
         if sessionState != nextState { sessionState = nextState }
         guard phase == .scanning else { return }
+        assessedScanFrames += 1
+        if a.captureBlocked || !sessionState.canCapture { blockedScanFrames += 1 }
         if ProcessInfo.processInfo.thermalState == .critical {
             scanNotice = "裝置過熱，已停止掃描並保留資料。請等手機降溫後再繼續。"
             stopScan()
@@ -1287,7 +1279,7 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
         guard sessionState.canCapture else { return }
 
         // 遮斷級警告觸覺回饋（限流 1 次 / 1.5 秒）
-        if a.captureBlocked, frame.timestamp - lastWarningHaptic > 1.5 {
+        if a.showsBlockingWarning, frame.timestamp - lastWarningHaptic > 1.5 {
             warningHaptic.notificationOccurred(.warning)
             lastWarningHaptic = frame.timestamp
         }
@@ -1316,10 +1308,7 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
         // **整個 0.1 秒的窗就整個丟掉**，要再等下一個倍數。
         // 改成隔夠久就試，沒過就下一幀再試 —— 一有合格的幀立刻補上。
         if frameCounter - lastPreviewFrame >= config.previewFrameInterval,
-           !a.captureBlocked, a.blurPixels <= config.previewMaxBlurPixels,
-           a.angularSpeedRadS <= config.previewMaxAngularSpeedRadS,
-           a.linearSpeedMS <= config.previewMaxLinearSpeedMS {
-            lastPreviewFrame = frameCounter
+           a.allowCapture {
             integratePreview(frame, blurPixels: a.blurPixels)
         }
 
@@ -1334,78 +1323,102 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
             visualizer?.placeDollhouse(pov: pov.simdWorldTransform)
         }
 
-        guard a.allowCapture else { return }
-        // 速度閘門：blur 擋不住「亮處快速移動」（曝光短 → 模糊低，但 VIO 姿態仍有延遲誤差）。
-        // 關鍵幀姿態會同時進入重融合的反投影與 3DGS 訓練的相機外參，錯了兩邊一起壞。
-        guard a.angularSpeedRadS <= config.keyframeMaxAngularSpeedRadS,
-              a.linearSpeedMS <= config.keyframeMaxLinearSpeedMS else { return }
-        // 清晰度閘門：上面兩道都是「由運動推估模糊」，對失焦與 AF 拉焦完全盲目
-        // （手機靜止、對焦跑掉 → 推估值 0，照樣存檔）。這道直接量影像本身。
-        // 被擋下只是等幾幀：SmartShutter 的觸發條件在拍成之前一直成立。
-        guard a.sharpnessRatio >= config.minSharpnessRatio else {
-            sharpnessRejects += 1
-            recentRejects.append(frame.timestamp)
+        guard a.allowCapture else {
+            if a.blockReason == .focus,
+               frame.timestamp - lastSharpnessRejectTime >= config.minKeyframeInterval,
+               shutter.isDue(pose: frame.camera.transform, time: frame.timestamp, config: config,
+                             cameraOnly: !hasLiDAR, estimatedDepth: a.centerDepthM > 0 ? a.centerDepthM : nil) {
+                lastSharpnessRejectTime = frame.timestamp
+                sharpnessRejects += 1
+                recentRejects.append(frame.timestamp)
+            }
             return
         }
-        guard pendingWrites < config.maxPendingWrites else { return }
-        guard shutter.shouldCapture(pose: frame.camera.transform,
+        guard shutter.isDue(pose: frame.camera.transform,
                                     time: frame.timestamp,
-                                    config: config) else { return }
-        // 關鍵幀一律也進預覽融合 —— 保證「預覽的覆蓋 ⊇ 重融合會用到的」。
-        //
-        // 門檻本身已經對齊了（見 CaptureConfig.previewMax*，現在是關鍵幀門檻的衍生值），
-        // 但取樣仍是 10Hz，兩個關鍵幀之間可能都沒輪到融合。
-        // 這一行補上那個縫：只要成為關鍵幀就一定也融進預覽，
-        // 否則熱圖會把其實會有點的區域標成缺點，害使用者回去重掃不需要重掃的地方。
+                                    config: config, cameraOnly: !hasLiDAR,
+                                    estimatedDepth: a.centerDepthM > 0 ? a.centerDepthM : nil) else { return }
+        capturePerformance.photoCandidates += 1
+        guard pendingWrites < config.maxPendingWrites else {
+            capturePerformance.writerBackpressureFrames += 1
+            return
+        }
+        // 合格關鍵幀亦嘗試進入預覽；已有背景融合時保持背壓，下一個合格幀重試。
         if frameCounter != lastPreviewFrame {
-            lastPreviewFrame = frameCounter
             integratePreview(frame, blurPixels: a.blurPixels)
         }
         captureKeyframe(frame, assessment: a)
     }
 
-    /// 即時點雲融合：主執行緒只複製 buffer（~2ms）→ actor 在錨點局部系反投影/去重/打包 →
-    /// 主執行緒建缺席錨點、O(1) 更新磚節點。delegate 回呼零計算 —— 不餓死 ARKit 的 VIO。
+    /// 擷取時只複製自有 buffer；actor 處理驗證與融合，渲染由獨立排程更新。
     private func integratePreview(_ frame: ARFrame, blurPixels: Float) {
         guard let accumulator, !previewInFlight else { return }
         let anchorSnapshot = latestTileTransforms
+        let generation = scanGeneration
+        if pixelBufferPool == nil {
+            let src = frame.capturedImage
+            pixelBufferPool = PixelBufferUtil.makePool(
+                width: CVPixelBufferGetWidth(src),
+                height: CVPixelBufferGetHeight(src),
+                pixelFormat: CVPixelBufferGetPixelFormatType(src))
+        }
         if hasLiDAR {
-            if pixelBufferPool == nil {
-                let src = frame.capturedImage
-                pixelBufferPool = PixelBufferUtil.makePool(
-                    width: CVPixelBufferGetWidth(src),
-                    height: CVPixelBufferGetHeight(src),
-                    pixelFormat: CVPixelBufferGetPixelFormatType(src))
-            }
             guard let pool = pixelBufferPool,
                   let packet = PointExtractor.makePacket(frame: frame, pool: pool,
-                                                         blurPixels: blurPixels) else { return }
+                                                         blurPixels: blurPixels, trackingEpoch: sparseTrackingEpoch) else { return }
+            lastPreviewFrame = frameCounter
             previewInFlight = true
             previewTask = Task {
                 await accumulator.integrate(packet, anchorTransforms: anchorSnapshot)
-                await self.flushTiles()
-                self.previewInFlight = false
+                if self.scanGeneration == generation { self.previewInFlight = false }
             }
-        } else if let featurePoints = frame.rawFeaturePoints,
-                  frame.timestamp - lastSparseIntegration > 1.0 {
+        } else if frame.timestamp - lastSparseIntegration >= config.sparseSampleIntervalS,
+                  let pool = pixelBufferPool,
+                  let packet = PointExtractor.makeSparsePacket(frame: frame, pool: pool, epoch: sparseTrackingEpoch) {
             lastSparseIntegration = frame.timestamp
-            let points = featurePoints.points
-            let camPos = MatrixUtil.position(frame.camera.transform)
+            lastPreviewFrame = frameCounter
             previewInFlight = true
             previewTask = Task {
-                await accumulator.integrateSparse(points: points, anchorTransforms: anchorSnapshot,
-                                                  cameraPosition: camPos)
-                await self.flushTiles()
-                self.previewInFlight = false
+                await accumulator.integrateSparse(packet, anchorTransforms: anchorSnapshot)
+                if self.scanGeneration == generation { self.previewInFlight = false }
             }
         }
     }
 
-    /// 建立新磚的 ARAnchor（局部系原點），再把髒磚渲染資料掛上對應節點
-    private func flushTiles() async {
+    /// Render work continues at a bounded cadence even when quality gates reject new frames.
+    /// Fusion never waits for SceneKit geometry creation and failed capture attempts do not
+    /// consume the next sampling interval.
+    private func startPreviewRendering() {
+        previewRenderTask?.cancel()
         guard let accumulator else { return }
-        let pending = await accumulator.takePendingAnchors()
-        for (key, center) in pending where tileAnchorID[key] == nil {
+        let generation = scanGeneration
+        let interval = UInt64(config.previewRenderIntervalS * 1_000_000_000)
+        previewRenderTask = Task { [weak self] in
+            await accumulator.markAllDirty()
+            while !Task.isCancelled {
+                guard let self, self.phase == .scanning, self.isAttached,
+                      !self.isInBackground, self.scanGeneration == generation else { return }
+                let batch = await accumulator.nextRenderBatch(pointBudget: self.config.previewRenderPointBudget,
+                                                               mode: self.colorMode)
+                guard !Task.isCancelled, self.phase == .scanning,
+                      self.scanGeneration == generation else { return }
+                self.applyPreviewBatch(batch)
+                await accumulator.acknowledgeRenderAnchors(batch.anchors.map { $0.0 })
+                do { try await Task.sleep(nanoseconds: interval) } catch { return }
+            }
+        }
+    }
+
+    private func applyPreviewBatch(_ batch: PointCloudAccumulator.RenderBatch) {
+        let started = Date()
+        defer {
+            if !batch.tiles.isEmpty {
+                let milliseconds = Date().timeIntervalSince(started) * 1000
+                previewMainTotalMS += milliseconds
+                previewMainMaxMS = max(previewMainMaxMS, milliseconds)
+            }
+        }
+        for (key, center) in batch.anchors where tileAnchorID[key] == nil {
             var t = matrix_identity_float4x4
             t.columns.3 = SIMD4<Float>(center.x, center.y, center.z, 1)
             if let session = arView?.session {
@@ -1414,22 +1427,27 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
                 tileAnchorID[key] = anchor.identifier
                 tileKeyByAnchor[anchor.identifier] = key
             }
-            latestTileTransforms[key] = t     // 錨點回呼前的初始變換（= 磚中心）
+            latestTileTransforms[key] = t
         }
-        let tiles = await accumulator.dirtyTileRenderData(limit: 2, mode: colorMode)
-        for tile in tiles {
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = 0
+        SCNTransaction.disableActions = true
+        for tile in batch.tiles {
             let xform = latestTileTransforms[tile.key]
                 ?? { var m = matrix_identity_float4x4
                      m.columns.3 = SIMD4<Float>(tile.center.x, tile.center.y, tile.center.z, 1)
                      return m }()
             visualizer?.updateTile(tile, transform: xform)
         }
-        pointCount = await accumulator.count
-        fusionCompleteness = await accumulator.fusionCompleteness
+        SCNTransaction.commit()
+        if pointCount != batch.pointCount { pointCount = batch.pointCount }
+        if abs(fusionCompleteness - batch.completeness) > 0.005 { fusionCompleteness = batch.completeness }
     }
 
     func sessionWasInterrupted(_ session: ARSession) {
         trackingStability.reset()
+        poseContinuity.reset()
+        sparseTrackingEpoch += 1
         guard phase == .idle || phase == .scanning else { return }
         sessionState = .interrupted
     }
@@ -1452,6 +1470,7 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
     }
 
     private func captureKeyframe(_ frame: ARFrame, assessment a: QualityAssessment) {
+        guard let writer else { return }
         let src = frame.capturedImage
         let w = CVPixelBufferGetWidth(src)
         let h = CVPixelBufferGetHeight(src)
@@ -1460,7 +1479,10 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
                                                        pixelFormat: CVPixelBufferGetPixelFormatType(src))
         }
         guard let pool = pixelBufferPool,
-              let copy = PixelBufferUtil.clone(src, pool: pool) else { return }
+              let copy = PixelBufferUtil.clone(src, pool: pool) else {
+            capturePerformance.imageCopyFailures += 1
+            return
+        }
 
         // 深度 / 信心圖 → 緊湊 Data（float32 / uint8 raw）
         var depthData: Data?
@@ -1513,25 +1535,35 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
         }
 
         pendingWrites += 1
+        capturePerformance.maximumPendingWrites = max(capturePerformance.maximumPendingWrites, pendingWrites)
 
-        // 點雲融合已由 integratePreview() 連續進行，關鍵幀只負責存檔
-        guard let writer else {
-            pendingWrites -= 1
-            return
-        }
-        let cfg = config
-        let tracker = featureTracker
+        // Only consume the viewpoint after buffer ownership and write scheduling are secured.
+        shutter.markCaptured(pose: frame.camera.transform, time: frame.timestamp)
+        let processor = featureProcessor
+        let generation = scanGeneration
+        let enqueuedAt = ProcessInfo.processInfo.systemUptime
         writeTasks[record.id] = Task {
             defer {
-                pendingWrites -= 1
-                writeTasks[record.id] = nil
+                if generation == scanGeneration {
+                    pendingWrites -= 1
+                    writeTasks[record.id] = nil
+                }
             }
             do {
-                try await writer.write(keyframe)
+                let timing = try await writer.write(keyframe, enqueuedAt: enqueuedAt)
+                guard generation == scanGeneration, isAttached else { return }
+                capturePerformance.savedPhotos += 1
+                capturePerformance.writeQueueTotalMS += timing.queueMS
+                capturePerformance.writeQueueMaxMS = max(capturePerformance.writeQueueMaxMS, timing.queueMS)
+                capturePerformance.jpegTotalMS += timing.jpegMS
+                capturePerformance.jpegMaxMS = max(capturePerformance.jpegMaxMS, timing.jpegMS)
+                capturePerformance.fileWriteTotalMS += timing.fileWriteMS
+                capturePerformance.fileWriteMaxMS = max(capturePerformance.fileWriteMaxMS, timing.fileWriteMS)
                 keyframeCount += 1
                 visualizer?.addKeyframe(pose: keyframe.c2w)
                 if phase == .scanning { captureHaptic.impactOccurred(intensity: 0.6) }
             } catch {
+                guard generation == scanGeneration, isAttached else { return }
                 if let id = keyframeAnchors.removeValue(forKey: record.id),
                    let anchor = arView?.session.currentFrame?.anchors.first(where: { $0.identifier == id }) {
                     arView?.session.remove(anchor: anchor)
@@ -1540,15 +1572,9 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
                 stopScan()
                 return
             }
-            // 特徵抽取放在寫檔之後：兩者共用同一份 clone 的 pixel buffer
-            //（CVPixelBuffer 是 refcounted，兩個 actor 各自持有沒問題）。
-            // 背壓涵蓋特徵抽取，停止時也會等這份工作完成。
-            guard cfg.baRounds > 0, let dData = keyframe.depthData, dw > 0, dh > 0 else { return }
-            let confArr = keyframe.confidenceData.map { [UInt8]($0) }
-            await tracker.add(frameID: record.id, luma: keyframe.pixelBuffer,
-                              depth: dData, conf: confArr, dw: dw, dh: dh,
-                              K: record.intrinsics, c2w: keyframe.c2w,
-                              minDepth: cfg.pointMinDepthM, maxDepth: cfg.pointMaxDepthM)
+            // Submission returns immediately even while matching is busy; only the newest
+            // pending frame is retained. BA observes the subset, while all photos remain saved.
+            if keyframe.depthData != nil { await processor?.submit(keyframe) }
         }
     }
 }

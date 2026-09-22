@@ -69,6 +69,8 @@ nonisolated struct SessionMeta: Codable, Sendable {
     var lidarAvailable: Bool
     /// 硬體能力與這次是否啟用分開；nil 為舊版紀錄（依 lidarAvailable 判定）。
     var lidarEnabled: Bool? = nil
+    /// nil 為舊版；僅無 LiDAR 模式使用 RGB 多視角重建。
+    var rgbReconstructionEnabled: Bool? = nil
 }
 
 /// 掃描結束後的品質摘要。
@@ -111,7 +113,7 @@ nonisolated struct CloudPoint: Sendable {
 
 /// 跨 actor 傳遞的關鍵幀封包。
 /// pixelBuffer 是從自有 CVPixelBufferPool 複製出的副本（絕不保留 ARFrame 原始 buffer），
-/// 所有權單向轉移給 FrameWriter → 標記 @unchecked Sendable 是安全的。
+/// 影像為 App 自有 clone；FrameWriter 完成後交由特徵 worker 唯讀使用，兩者不修改 buffer。
 nonisolated struct Keyframe: @unchecked Sendable {
     let pixelBuffer: CVPixelBuffer
     let depthData: Data?

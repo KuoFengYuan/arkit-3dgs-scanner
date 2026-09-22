@@ -13,9 +13,9 @@
 //  剩下的只有「局部微調」——也就是把對應關係丟進 BA 解一次。
 //
 //  ── 為什麼在掃描時做而不是停止後 ────────────────────────────────
-//  停止後做要重新解碼 JPEG（120 張 × ~20ms = 2.4s，比 BA 本身還貴），
-//  而掃描時影像已經在記憶體裡（captureKeyframe 已經 clone 了一份 pixel buffer）。
-//  抽取＋匹配約 5ms / 關鍵幀，而關鍵幀速率只有 ~2Hz —— 成本攤掉後看不見。
+//  掃描時可重用 captureKeyframe 複製的影像，省下停止後重新解碼 JPEG。
+//  LatestFrameProcessor 將此可選工作與寫照片分離；忙碌時只保留最新待處理幀，
+//  實際耗時與略過數量記錄於 capture-performance.json。
 //
 //  ── 精度考量 ──────────────────────────────────────────────────
 //  Harris 響應在 stride 2 的網格上算（1920×1440 → 960×720），特徵座標仍記全解析度，
@@ -25,6 +25,7 @@
 
 import Foundation
 import CoreVideo
+import Accelerate
 import simd
 
 /// 一幀裡的一個特徵。patch 用來做 ZNCC 匹配 —— 引導式局部搜尋不需要旋轉不變性，
@@ -125,11 +126,66 @@ nonisolated enum FeatureParams {
 
 nonisolated enum FeatureExtractor {
 
+    /// Same central differences and 3x3 Shi-Tomasi tensor as the scalar implementation.
+    /// Accelerate runs these dense kernels natively even in a Swift Debug (-Onone) build.
+    /// Resolution, corner thresholds, NMS, patches and matching gates are unchanged.
+    static func cornerResponses(pixels: UnsafePointer<UInt8>, width: Int, height: Int,
+                                rowBytes: Int) -> [Float]? {
+        let stride = FeatureParams.stride, w = width / stride, h = height / stride
+        guard w >= 3, h >= 3 else { return nil }
+        let n = w*h, length = vDSP_Length(n)
+        var gray = [Float](repeating: 0, count: n)
+        gray.withUnsafeMutableBufferPointer { target in
+            for y in 0..<h {
+                vDSP_vfltu8(pixels + y*stride*rowBytes, vDSP_Stride(stride), target.baseAddress! + y*w, 1, vDSP_Length(w))
+            }
+        }
+        func convolve(_ input: [Float], _ kernel: [Float], _ kw: Int, _ kh: Int) -> [Float]? {
+            var output = [Float](repeating: 0, count: n)
+            let error = input.withUnsafeBytes { source in
+                output.withUnsafeMutableBytes { dest in
+                    var src = vImage_Buffer(data: UnsafeMutableRawPointer(mutating: source.baseAddress!),
+                                            height: vImagePixelCount(h), width: vImagePixelCount(w), rowBytes: w*4)
+                    var dst = vImage_Buffer(data: dest.baseAddress!, height: vImagePixelCount(h),
+                                            width: vImagePixelCount(w), rowBytes: w*4)
+                    return kernel.withUnsafeBufferPointer {
+                        vImageConvolve_PlanarF(&src, &dst, nil, 0, 0, $0.baseAddress!,
+                                              UInt32(kh), UInt32(kw), 0, vImage_Flags(kvImageEdgeExtend))
+                    }
+                }
+            }
+            return error == kvImageNoError ? output : nil
+        }
+        guard let gx = convolve(gray, [-1,0,1], 3, 1),
+              let gy = convolve(gray, [-1,0,1], 1, 3) else { return nil }
+        var xx = [Float](repeating: 0, count: n), xy = xx, yy = xx
+        vDSP_vsq(gx, 1, &xx, 1, length)
+        vDSP_vmul(gx, 1, gy, 1, &xy, 1, length)
+        vDSP_vsq(gy, 1, &yy, 1, length)
+        let box = [Float](repeating: 1, count: 9)
+        guard let a = convolve(xx, box, 3, 3), let b = convolve(xy, box, 3, 3),
+              let c = convolve(yy, box, 3, 3) else { return nil }
+        var trace = [Float](repeating: 0, count: n), diff = trace, bsq = trace, rad = trace
+        var half: Float = 0.5
+        vDSP_vadd(a, 1, c, 1, &trace, 1, length)
+        vDSP_vsmul(trace, 1, &half, &trace, 1, length)
+        vDSP_vsub(c, 1, a, 1, &diff, 1, length)
+        vDSP_vsmul(diff, 1, &half, &diff, 1, length)
+        vDSP_vsq(diff, 1, &diff, 1, length)
+        vDSP_vsq(b, 1, &bsq, 1, length)
+        vDSP_vadd(diff, 1, bsq, 1, &rad, 1, length)
+        var count = Int32(n)
+        vvsqrtf(&rad, rad, &count)
+        var response = [Float](repeating: 0, count: n)
+        vDSP_vsub(rad, 1, trace, 1, &response, 1, length)
+        return response
+    }
+
     /// 每一關卡的存活數。**這是必要的診斷，不是可有可無的統計** ——
     /// 特徵太稀是匹配率最大的失敗來源（實機「半徑內無候選」佔 37%），
     /// 而「太稀」可能卡在三個完全不同的地方：角點響應門檻、NMS 容量、深度過濾。
     /// 沒有這三個數字就只能猜哪一關該調，而我已經因為猜錯改過一次方向。
-    struct ExtractStats { var candidates = 0; var afterNMS = 0; var afterDepth = 0 }
+    struct ExtractStats: Sendable { var candidates = 0; var afterNMS = 0; var afterDepth = 0 }
 
     /// 從 ARKit capturedImage 的 luma plane 抽網格化的 Shi-Tomasi 角點，
     /// 並用深度圖給每個角點一個世界座標。
@@ -141,16 +197,24 @@ nonisolated enum FeatureExtractor {
                         K: CameraIntrinsics, c2w: simd_float4x4,
                         minDepth: Float, maxDepth: Float)
         -> (features: [TrackedFeature], stats: ExtractStats) {
-        var stats = ExtractStats()
-        guard CVPixelBufferGetPlaneCount(pb) >= 1 else { return ([], stats) }
+        guard CVPixelBufferGetPlaneCount(pb) >= 1 else { return ([], ExtractStats()) }
         CVPixelBufferLockBaseAddress(pb, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddressOfPlane(pb, 0) else { return ([], stats) }
-        let w = CVPixelBufferGetWidthOfPlane(pb, 0)
-        let h = CVPixelBufferGetHeightOfPlane(pb, 0)
-        let rowBytes = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
-        let p = base.assumingMemoryBound(to: UInt8.self)
+        guard let base = CVPixelBufferGetBaseAddressOfPlane(pb, 0) else { return ([], ExtractStats()) }
+        return extract(pixels: base.assumingMemoryBound(to: UInt8.self),
+                       width: CVPixelBufferGetWidthOfPlane(pb, 0), height: CVPixelBufferGetHeightOfPlane(pb, 0),
+                       rowBytes: CVPixelBufferGetBytesPerRowOfPlane(pb, 0), depth: depth, conf: conf,
+                       dw: dw, dh: dh, K: K, c2w: c2w, minDepth: minDepth, maxDepth: maxDepth)
+    }
 
+    static func extract(pixels p: UnsafePointer<UInt8>, width w: Int, height h: Int, rowBytes: Int,
+                        depth: Data, conf: [UInt8]?, dw: Int, dh: Int,
+                        K: CameraIntrinsics, c2w: simd_float4x4, minDepth: Float, maxDepth: Float)
+        -> (features: [TrackedFeature], stats: ExtractStats) {
+        var stats = ExtractStats()
+        guard dw > 1, dh > 1, dw <= 4096, dh <= 4096,
+              depth.count == dw * dh * 4, conf == nil || conf!.count == dw * dh,
+              w > 0, h > 0, rowBytes >= w else { return ([], stats) }
         let s = FeatureParams.stride
         let half = FeatureParams.patchSide / 2
         // 網格座標範圍：留出 patch 與差分所需的邊界
@@ -166,29 +230,10 @@ nonisolated enum FeatureExtractor {
         var cand: [(resp: Float, gx: Int, gy: Int)] = []
         cand.reserveCapacity(4096)
         // 響應先算成一整張圖，才能做局部極大值判定（逐點算無法比較鄰居）
-        var resp = [Float](repeating: 0, count: gw * gh)
-
-        var gy = margin
-        while gy < gh - margin {
-            var gx = margin
-            while gx < gw - margin {
-                // 3×3 網格窗上的結構張量（＝全解析度 6×6）
-                var a: Float = 0, b: Float = 0, c: Float = 0
-                for dy in -1...1 {
-                    for dx in -1...1 {
-                        let ix = Float(lum(gx + dx + 1, gy + dy) - lum(gx + dx - 1, gy + dy))
-                        let iy = Float(lum(gx + dx, gy + dy + 1) - lum(gx + dx, gy + dy - 1))
-                        a += ix * ix; b += ix * iy; c += iy * iy
-                    }
-                }
-                // Shi-Tomasi：最小特徵值（比 Harris 的 det-k·trace² 少一個要調的 k）
-                let t = (a + c) * 0.5
-                let d = (((a - c) * 0.5) * ((a - c) * 0.5) + b * b).squareRoot()
-                resp[gy * gw + gx] = t - d
-                gx += 1
-            }
-            gy += 1
+        guard let resp = cornerResponses(pixels: p, width: w, height: h, rowBytes: rowBytes) else {
+            return ([], stats)
         }
+        var gy = margin
 
         // 3×3 局部極大值
         gy = margin + 1
@@ -338,10 +383,32 @@ actor FeatureTracker {
         let frameID: Int
         let c2w: simd_float4x4
         let K: CameraIntrinsics
+        let w2c: simd_float4x4
+        let index: [Int32: [Int]]
         var features: [TrackedFeature]
     }
 
     private var frames: [FrameFeatures] = []
+    private var archivedObservations: [FeatureObservation] = []
+    private let observationLimit: Int
+    private let observationsPerFrame: Int
+    private let anchorIDs: Set<Int>
+    private let verifyReciprocal: Bool
+    private var discardedObservations = 0
+    private var processedFrames = 0
+    private var totalFeatures = 0
+
+    init(observationLimit: Int = 200_000, observationsPerFrame: Int = 2400,
+         anchorIDs: Set<Int> = [], verifyReciprocal: Bool = false) {
+        self.observationLimit = max(0, observationLimit)
+        self.observationsPerFrame = max(0, observationsPerFrame)
+        self.anchorIDs = Set(anchorIDs.sorted().prefix(4))
+        self.verifyReciprocal = verifyReciprocal
+    }
+
+    func retainedState() -> (descriptorFrames: Int, archivedObservations: Int, discardedObservations: Int) {
+        (frames.count, archivedObservations.count, discardedObservations)
+    }
     private var nextTrackID = 0
     private(set) var matchCount = 0
     /// 匹配失敗的原因統計 —— 產出率不足時要能指出是哪一關卡住的，
@@ -356,6 +423,10 @@ actor FeatureTracker {
 
     func reset() {
         frames.removeAll()
+        archivedObservations.removeAll()
+        discardedObservations = 0
+        processedFrames = 0
+        totalFeatures = 0
         nextTrackID = 0
         matchCount = 0
         attempted = 0; outOfView = 0; noCandidate = 0; lowScore = 0; ambiguous = 0
@@ -369,6 +440,11 @@ actor FeatureTracker {
         let (extracted, es) = FeatureExtractor.extract(luma: luma, depth: depth, conf: conf,
                                                        dw: dw, dh: dh, K: K, c2w: c2w,
                                                        minDepth: minDepth, maxDepth: maxDepth)
+        addExtracted(frameID: frameID, extracted: extracted, stats: es, K: K, c2w: c2w)
+    }
+
+    func addExtracted(frameID: Int, extracted: [TrackedFeature], stats es: FeatureExtractor.ExtractStats,
+                      K: CameraIntrinsics, c2w: simd_float4x4) {
         var feats = extracted
         candTotal += es.candidates
         nmsTotal += es.afterNMS
@@ -376,12 +452,15 @@ actor FeatureTracker {
         guard !feats.isEmpty else { return }
 
         let w2c = c2w.inverse
-        let r2 = FeatureParams.searchRadius * FeatureParams.searchRadius
-
         let index = Self.buildIndex(feats)
 
-        for prev in frames.suffix(FeatureParams.matchAgainstRecent) {
-            for pf in prev.features {
+        var assignedTracks = Set<Int>()
+        for prevIndex in frames.indices {
+            // Work on one frame value and publish it once. Mutating through frames while
+            // iterating a copied frame used to trigger repeated descriptor-array COW copies.
+            var prev = frames[prevIndex]
+            for featureIndex in prev.features.indices {
+                let pf = prev.features[featureIndex]
                 attempted += 1
                 // 用**已知位姿**把前一幀的 3D 特徵投影到本幀 → 預期位置
                 guard let (pu, pv) = Self.project(pf.world, w2c: w2c, K: K) else {
@@ -396,6 +475,18 @@ actor FeatureTracker {
                     ambiguous += 1; continue
                 }
 
+                if verifyReciprocal {
+                    // A track gets at most one observation per frame, including loop references.
+                    if pf.trackID >= 0 && assignedTracks.contains(pf.trackID) { continue }
+                    let current = feats[bestIdx]
+                    guard simd_distance(current.world, pf.world) < max(0.08, pf.depth * 0.04),
+                          let uv = Self.project(current.world, w2c: prev.w2c, K: prev.K) else { continue }
+                    let reverse = Self.bestMatch(for: current, at: uv, in: prev.features,
+                                                 index: prev.index, onlyUnassigned: false)
+                    guard reverse.idx >= 0, prev.features[reverse.idx].u == pf.u,
+                          prev.features[reverse.idx].v == pf.v, reverse.best >= FeatureParams.minZNCC,
+                          reverse.second <= 0 || reverse.second / reverse.best <= FeatureParams.maxSecondBestRatio else { continue }
+                }
                 if pf.trackID >= 0 {
                     feats[bestIdx].trackID = pf.trackID
                 } else {
@@ -403,17 +494,39 @@ actor FeatureTracker {
                     let id = nextTrackID
                     nextTrackID += 1
                     feats[bestIdx].trackID = id
-                    if let pi = frames.indices.last(where: { frames[$0].frameID == prev.frameID }),
-                       let fi = frames[pi].features.firstIndex(where: {
-                           $0.u == pf.u && $0.v == pf.v && $0.trackID < 0
-                       }) {
-                        frames[pi].features[fi].trackID = id
-                    }
+                    prev.features[featureIndex].trackID = id
                 }
+                assignedTracks.insert(feats[bestIdx].trackID)
                 matchCount += 1
             }
+            frames[prevIndex] = prev
         }
-        frames.append(FrameFeatures(frameID: frameID, c2w: c2w, K: K, features: feats))
+        frames.append(FrameFeatures(frameID: frameID, c2w: c2w, K: K,
+                                    w2c: w2c, index: index, features: feats))
+        processedFrames += 1
+        totalFeatures += feats.count
+        // Older descriptors can never be matched again. Preserve compact BA observations,
+        // not every 9x9 patch from the entire scan. Recent-frame track IDs remain mutable.
+        if frames.filter({ !anchorIDs.contains($0.frameID) }).count > FeatureParams.matchAgainstRecent,
+           let i = frames.firstIndex(where: { !anchorIDs.contains($0.frameID) }) {
+            let old = frames.remove(at: i)
+            archivedObservations.append(contentsOf: compact(old))
+            if archivedObservations.count > observationLimit {
+                let excess = archivedObservations.count - observationLimit
+                archivedObservations.removeFirst(excess)
+                discardedObservations += excess
+            }
+        }
+    }
+
+    private func compact(_ frame: FrameFeatures) -> [FeatureObservation] {
+        // Stable track priority keeps overlapping observations across frames under the same cap.
+        frame.features.filter { $0.trackID >= 0 }.sorted {
+            let a = UInt64($0.trackID) &* 2654435761, b = UInt64($1.trackID) &* 2654435761
+            return UInt32(truncatingIfNeeded: a) < UInt32(truncatingIfNeeded: b)
+        }.prefix(observationsPerFrame).map {
+            FeatureObservation(frameID: frame.frameID, trackID: $0.trackID, u: $0.u, v: $0.v, depth: $0.depth)
+        }
     }
 
     /// 本幀特徵的空間索引：格座標 → 特徵下標。
@@ -452,7 +565,7 @@ actor FeatureTracker {
     /// tools/test_feature_index.swift 拿它跟暴力搜尋逐點對照。
     static func bestMatch(for pf: TrackedFeature, at p: (Float, Float),
                           in feats: [TrackedFeature],
-                          index: [Int32: [Int]]) -> (idx: Int, best: Float, second: Float) {
+                          index: [Int32: [Int]], onlyUnassigned: Bool = true) -> (idx: Int, best: Float, second: Float) {
         let r2 = FeatureParams.searchRadius * FeatureParams.searchRadius
         let (pu, pv) = p
         let b = cell(pu, pv)
@@ -461,7 +574,7 @@ actor FeatureTracker {
         for dy in -1...1 {
             for dx in -1...1 {
                 guard let bucket = index[cellKey(b.x + dx, b.y + dy)] else { continue }
-                for i in bucket where feats[i].trackID < 0 {
+                for i in bucket where !onlyUnassigned || feats[i].trackID < 0 {
                     let f = feats[i]
                     let du = f.u - pu, dv = f.v - pv
                     if du * du + dv * dv > r2 { continue }      // 只搜半徑內的角點
@@ -498,28 +611,19 @@ actor FeatureTracker {
     /// 匯出給 BA 的觀測。只留長度足夠的 track —— 短 track 對位姿幾乎沒有約束力，
     /// 卻會把離群匹配帶進求解。
     func observations() -> [FeatureObservation] {
+        var all = archivedObservations
+        for frame in frames { all.append(contentsOf: compact(frame)) }
         var lengths: [Int: Int] = [:]
-        for f in frames { for t in f.features where t.trackID >= 0 {
-            lengths[t.trackID, default: 0] += 1
-        } }
-        var out: [FeatureObservation] = []
-        for f in frames {
-            for t in f.features where t.trackID >= 0 {
-                guard (lengths[t.trackID] ?? 0) >= FeatureParams.minTrackLength else { continue }
-                out.append(FeatureObservation(frameID: f.frameID, trackID: t.trackID,
-                                              u: t.u, v: t.v, depth: t.depth))
-            }
-        }
-        return out
+        for observation in all { lengths[observation.trackID, default: 0] += 1 }
+        return all.filter { (lengths[$0.trackID] ?? 0) >= FeatureParams.minTrackLength }
     }
 
     /// 診斷用摘要。含匹配失敗原因分解 —— 產出率不足時必須能指出卡在哪一關，
     /// 否則只會看到「BA 沒跑」而不知道要改什麼。
     func stats() -> String {
         let obs = observations()
-        let feats = frames.reduce(0) { $0 + $1.features.count }
-        let perFrame = frames.isEmpty ? 0 : obs.count / frames.count
-        var s = "特徵追蹤: \(frames.count) 幀 / \(feats) 特徵 / "
+        let perFrame = processedFrames == 0 ? 0 : obs.count / processedFrames
+        var s = "特徵追蹤: \(processedFrames) 幀 / \(totalFeatures) 特徵 / "
         s += "\(Set(obs.map(\.trackID)).count) tracks / \(obs.count) 觀測"
         s += "（每幀 \(perFrame)，BA 需要 ≥\(BundleAdjuster.kMinObsPerFrame)）"
         if attempted > 0 {
@@ -531,19 +635,21 @@ actor FeatureTracker {
         // 特徵稀疏卡在哪一關。附上「平均最近鄰 vs 搜尋半徑」——
         // 前者大於後者時，即使位姿完美也有大半的投影找不到候選，
         // 那時該調的是密度而不是 BA。
-        if !frames.isEmpty, depthTotal > 0 {
-            let perFrame = Double(depthTotal) / Double(frames.count)
+        if processedFrames > 0, depthTotal > 0 {
+            let perFrame = Double(depthTotal) / Double(processedFrames)
             // Poisson 下的平均最近鄰距離 = 0.5/√密度
             let nn = 0.5 / (perFrame / (1920.0 * 1440)).squareRoot()
             s += String(format: "\n  抽取關卡: 角點候選 %.0f → NMS %.0f（上限 %d）→ 深度過濾 %.0f /幀"
                         + "；平均最近鄰 %.0f px vs 搜尋半徑 %.0f px%@",
-                        Double(candTotal) / Double(frames.count),
-                        Double(nmsTotal) / Double(frames.count),
+                        Double(candTotal) / Double(processedFrames),
+                        Double(nmsTotal) / Double(processedFrames),
                         FeatureParams.maxFeatures, perFrame,
                         nn, Double(FeatureParams.searchRadius),
                         nn > Double(FeatureParams.searchRadius)
                             ? " ⚠️ 特徵太稀，匹配率的上限由密度決定" : "")
         }
+        s += "；常駐 \(frames.count) 幀描述子、\(archivedObservations.count) 筆歷史觀測"
+        if discardedObservations > 0 { s += "（容量保護捨棄 \(discardedObservations) 筆最舊觀測）" }
         return s
     }
 }

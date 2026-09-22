@@ -40,6 +40,57 @@ nonisolated enum ExportManager {
     }
 
 
+    enum TrainingExportError: LocalizedError {
+        case noUsableFrames, invalidFrame(Int), missingImage(String), invalidPoints
+        var errorDescription: String? {
+            switch self {
+            case .noUsableFrames: return "沒有可用的相機姿態與清晰影像，無法產生 3DGS 訓練資料"
+            case .invalidFrame(let id): return "第 \(id) 張影像的相機參數不完整，無法產生訓練資料"
+            case .missingImage(let name): return "找不到訓練影像：\(name)"
+            case .invalidPoints: return "點雲含有無效座標，無法產生訓練資料"
+            }
+        }
+    }
+
+    /// Live export and history sharing use the same dataset preparation step.
+    /// Validate before replacing any previous training files; raw photos/depth remain intact.
+    static func writeTrainingDataset(records: [FrameRecord], points: [CloudPoint],
+                                     to directory: URL, flipWorldUp: Bool = true) throws {
+        let evidence = TrainingFrameSelector.evidence(records: records, directory: directory)
+        let selection = TrainingFrameSelector.select(records, evidence: evidence)
+        let selectedIDs = Set(selection.selectedIDs)
+        let records = records.filter { selectedIDs.contains($0.id) }
+        guard !records.isEmpty else { throw TrainingExportError.noUsableFrames }
+        var ids = Set<Int>(), names = Set<String>()
+        for r in records {
+            let k = r.intrinsics
+            guard r.id > 0, r.id <= Int(Int32.max), ids.insert(r.id).inserted,
+                  r.timestamp.isFinite, r.transform.count == 16, r.transform.allSatisfy(\.isFinite),
+                  k.width > 0, k.height > 0, k.fx.isFinite, k.fy.isFinite,
+                  k.fx > 0, k.fy > 0, k.cx.isFinite, k.cy.isFinite,
+                  !r.imageFile.isEmpty, !r.imageFile.contains("\0"),
+                  URL(fileURLWithPath: r.imageFile).lastPathComponent == r.imageFile,
+                  names.insert(r.imageFile).inserted else { throw TrainingExportError.invalidFrame(r.id) }
+            let pose = colmapPose(fromRowMajorC2WGL: r.transform, flipWorldUp: flipWorldUp)
+            guard pose.q.vector.x.isFinite, pose.q.vector.y.isFinite, pose.q.vector.z.isFinite,
+                  pose.q.vector.w.isFinite, pose.t.x.isFinite, pose.t.y.isFinite, pose.t.z.isFinite else {
+                throw TrainingExportError.invalidFrame(r.id)
+            }
+            let image = directory.appendingPathComponent("images").appendingPathComponent(r.imageFile)
+            guard (try? image.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else {
+                throw TrainingExportError.missingImage(r.imageFile)
+            }
+        }
+        guard points.allSatisfy({ $0.x.isFinite && $0.y.isFinite && $0.z.isFinite }) else {
+            throw TrainingExportError.invalidPoints
+        }
+        try writeColmapSparse(records: records, points: points, to: directory, flipWorldUp: flipWorldUp)
+        // Always replace even an empty cloud: a previous export must not leave stale seed points.
+        try writePLY(points, to: directory.appendingPathComponent("points.ply"))
+        try writeRefinedPoses(records, to: directory.appendingPathComponent("poses_refined.jsonl"))
+        try JSONEncoder().encode(selection).write(to: directory.appendingPathComponent("training-selection.json"), options: .atomic)
+    }
+
     // MARK: - COLMAP sparse model
 
     /// 世界上方向對齊：ARKit 世界為 +Y up，但 COLMAP/3DGS 生態多沿用 OpenCV 相機慣例、
@@ -48,7 +99,7 @@ nonisolated enum ExportManager {
     /// 這是剛體變換，同時作用於相機姿態與點雲、不改變重建品質，只轉正顯示方向。
     static func writeColmapSparse(records: [FrameRecord], points: [CloudPoint],
                                   to sessionDir: URL, flipWorldUp: Bool = true) throws {
-        guard !records.isEmpty else { return }
+        guard !records.isEmpty else { throw TrainingExportError.noUsableFrames }
         let sparseDir = sessionDir.appendingPathComponent("sparse/0", isDirectory: true)
         try FileManager.default.createDirectory(at: sparseDir, withIntermediateDirectories: true)
         try writeCamerasBin(records: records, to: sparseDir.appendingPathComponent("cameras.bin"))
@@ -84,7 +135,7 @@ nonisolated enum ExportManager {
     /// 連續對焦會帶來內參呼吸（focus breathing）：鏡組移動使有效焦長變化，iPhone 主鏡由無限遠
     /// 到近距約 1~2%，在 1920 寬的畫面邊緣就是 10~19 px 的重投影誤差 —— 遠大於可以忽略的程度。
     /// 但這是**可修的**：ARKit 每幀都給了當下的內參，FrameRecord 也早就逐幀存下來了。
-    /// COLMAP 格式原生支援一張影像一組相機，msplat 的 loader 也是逐影像查 camId
+    /// COLMAP 格式支援一張影像一組相機，外部讀取器可依 camera_id 取得逐幀內參
     /// （load_colmap.cpp: `cameras.find(img.camId)`），所以逐幀輸出的成本是零。
     /// 於是「失焦模糊」（不可修）被換成「內參變動」（完全吸收）。
     private static func writeCamerasBin(records: [FrameRecord], to url: URL) throws {
