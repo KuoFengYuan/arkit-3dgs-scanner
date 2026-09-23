@@ -78,12 +78,19 @@ nonisolated struct DepthConsistencyView: Sendable {
     private var validQuads: [UInt64] = []
     var samplingMaskBytes: Int { validQuads.count * 8 }
     /// One bit per bilinear quad. Same predicates and floating-point order as the reference path.
-    mutating func prepareSampling(config: CaptureConfig) {
+    mutating func prepareSampling(config: CaptureConfig, maximumQuadSpreadM: Float = .infinity) {
         let w = intrinsics.width, h = intrinsics.height
         validQuads = [UInt64](repeating:0,count:(w*h+63)/64)
         for y in 0..<(h-1) { for x in 0..<(w-1) {
             let i = y*w+x
-            if validQuad(i,config:config) { validQuads[i >> 6] |= UInt64(1) << (i & 63) }
+            if validQuad(i,config:config) {
+                if maximumQuadSpreadM.isFinite {
+                    let low = min(depth[i],depth[i+1],depth[i+w],depth[i+w+1])
+                    let high = max(depth[i],depth[i+1],depth[i+w],depth[i+w+1])
+                    if high-low > maximumQuadSpreadM { continue }
+                }
+                validQuads[i >> 6] |= UInt64(1) << (i & 63)
+            }
         } }
         preparedLimits = SamplingLimits(config)
     }
@@ -285,5 +292,101 @@ nonisolated struct DepthReferenceSelection {
             if selected.count == 4 { break }
         }
         return selected
+    }
+}
+
+/// Route-wide check after surface extraction. Near-neighbor fusion can agree with itself
+/// while retaining a second shell from a different part of the route. Only strong measured
+/// free-space contradictions may remove a point; occlusion is never negative evidence.
+nonisolated enum SurfaceVisibilityValidator {
+    struct Report: Codable, Sendable {
+        var status = "pending"
+        var inputPoints = 0
+        var referenceFrames = 0
+        var candidateRemovals = 0
+        var removedPoints = 0
+        var protectedPoints = 0
+        var peakDepthFrames = 0
+        var counterBytes = 0
+        var seconds = 0.0
+    }
+    static let maximumReferences = 64
+    static let minimumBaseline: Float = 0.08
+
+    static func referenceIndices(_ records: [FrameRecord]) -> [Int] {
+        var selected: [Int] = [], centers: [SIMD3<Float>] = []
+        // Metadata only, globally separated camera centers. Repeated visits or stationary
+        // bursts cannot acquire extra votes simply by saving more frames.
+        for i in records.indices {
+            let r = records[i]
+            guard r.blurVerdict != .drop, r.depthFile != nil, r.confidenceFile != nil,
+                  r.timestamp.isFinite, r.transform.count == 16, r.transform.allSatisfy(\.isFinite),
+                  let w = r.depthWidth, let h = r.depthHeight, w > 1, h > 1, w <= 1024, h <= 1024 else { continue }
+            let p = SIMD3(Float(r.transform[3]),Float(r.transform[7]),Float(r.transform[11]))
+            guard selected.last.map({ r.timestamp-records[$0].timestamp >= 0.25 }) ?? true,
+                  centers.allSatisfy({ simd_distance($0,p) >= minimumBaseline }) else { continue }
+            selected.append(i); centers.append(p)
+        }
+        guard selected.count > maximumReferences else { return selected }
+        return (0..<maximumReferences).map { selected[$0*(selected.count-1)/(maximumReferences-1)] }
+    }
+
+    /// `load` is injected for tests. Only one owned map and two UInt8 counters per output
+    /// point are needed. No coordinates, colors, poses or raw depth values are changed.
+    static func validate(_ points: inout [CloudPoint], references: [Int], config: CaptureConfig,
+                         load: (Int) -> DepthConsistencyView?, shouldContinue: () -> Bool = { true },
+                         progress: (Double) -> Void = { _ in }) -> Report {
+        let start = Date()
+        var report = Report(inputPoints:points.count)
+        func finish(_ status: String) -> Report {
+            report.status = status; report.seconds = Date().timeIntervalSince(start); return report
+        }
+        let references = Array(references.prefix(maximumReferences))
+        guard references.count >= 3, !points.isEmpty else { return finish("insufficientReferences") }
+        guard shouldContinue() else { return finish("interrupted") }
+        var supports = [UInt8](repeating:0,count:points.count)
+        var contradictions = supports
+        report.counterBytes = points.count*2
+        var strict = config
+        strict.minDepthConfidence = 2
+        strict.pointMaxDepthM = min(3, config.pointMaxDepthM)
+        for (ordinal,index) in references.enumerated() {
+            guard shouldContinue() else { return finish("interrupted") }
+            var interrupted = false
+            autoreleasepool {
+                guard var view = load(index), view.confidence != nil else { return }
+                view.prepareSampling(config:strict,maximumQuadSpreadM:0.03)
+                report.referenceFrames += 1; report.peakDepthFrames = 1
+                for i in points.indices {
+                    if i % 4096 == 0, !shouldContinue() { interrupted = true; return }
+                    let p = points[i]
+                    guard let sample = view.sample(SIMD3(p.x,p.y,p.z),config:strict) else { continue }
+                    let residual = sample.measuredDepth-sample.projectedDepth
+                    if abs(residual) <= sample.tolerance { supports[i] += 1 }
+                    // Two agreement bands protect quantization/noise close to the real wall.
+                    else if residual > 2*sample.tolerance { contradictions[i] += 1 }
+                }
+            }
+            guard !interrupted, shouldContinue() else { return finish("interrupted") }
+            progress(Double(ordinal+1)/Double(references.count))
+        }
+        guard report.referenceFrames >= 3 else { return finish("insufficientReferences") }
+        for i in points.indices {
+            if supports[i] >= 2 { report.protectedPoints += 1 }
+            else if contradictions[i] >= 3 { report.candidateRemovals += 1 }
+        }
+        // Widespread conflict can indicate bad poses or transparent/reflective surfaces.
+        // Keep the complete input instead of presenting a heavily erased model as repaired.
+        guard report.candidateRemovals <= points.count/10 else { return finish("excessiveConflictFallback") }
+        guard shouldContinue() else { return finish("interrupted") }
+        // Compact only after the complete decision succeeds. This avoids a second point array.
+        var written = 0
+        for i in points.indices where supports[i] >= 2 || contradictions[i] < 3 {
+            if written != i { points[written] = points[i] }
+            written += 1
+        }
+        report.removedPoints = points.count-written
+        points.removeLast(report.removedPoints)
+        return finish("completed")
     }
 }

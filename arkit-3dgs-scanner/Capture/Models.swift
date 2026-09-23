@@ -84,6 +84,12 @@ nonisolated enum CaptureMetadata {
     }
 }
 
+/// Standard Swift assertion mode; old datasets omit it. This also works in CLI replays
+/// and avoids guessing the build configuration from the DEBUG compilation condition.
+nonisolated enum ProcessingBuild {
+    static var debugAssertionsEnabled: Bool { _isDebugAssertConfiguration() }
+}
+
 /// capture-meta.json：一次掃描的全域資訊，Python 端據此判斷座標慣例與深度格式
 nonisolated struct SessionMeta: Codable, Sendable {
     var app = "fable-gs-capture"
@@ -101,6 +107,7 @@ nonisolated struct SessionMeta: Codable, Sendable {
     var lidarEnabled: Bool? = nil
     /// nil 為舊版；僅無 LiDAR 模式使用 RGB 多視角重建。
     var rgbReconstructionEnabled: Bool? = nil
+    var debugAssertionsEnabled: Bool? = ProcessingBuild.debugAssertionsEnabled
 }
 
 /// 掃描結束後的品質摘要。
