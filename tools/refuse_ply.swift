@@ -10,8 +10,7 @@
 //  所以輸出會比 App 少了「mesh 補洞」那一份覆蓋。要跟 App 的 points.ply 比點數時
 //  記得這一點；參數之間互相比則不受影響（每一組都同樣少了 mesh）。
 //
-//    swiftc -O -o /tmp/refuse arkit-3dgs-scanner/Capture/Models.swift arkit-3dgs-scanner/Capture/CaptureConfig.swift \
-//           arkit-3dgs-scanner/Capture/BlurFilter.swift arkit-3dgs-scanner/Capture/RefusionEngine.swift \
+//    swiftc -O -o /tmp/refuse arkit-3dgs-scanner/Capture/{Models,CaptureConfig,BlurFilter,RefusionEngine,DepthSampleFilter,SurfaceTSDF}.swift \
 //           tools/refuse_ply.swift
 //    /tmp/refuse <scan_dir> [out.ply] [key=value ...]
 //
@@ -45,12 +44,16 @@ import simd
             case "depthEdgeRejectRatio":  c.depthEdgeRejectRatio = v
             case "exportMaxPoints":       c.exportMaxPoints = Int(v)
             case "blockBlurPixels":       c.blockBlurPixels = v
+            case "fusionNearRangeM":      c.fusionNearRangeM = v
+            case "fusionFarExclusionM":   c.fusionFarExclusionM = v
+            case "fusionFarVoxelScale":   c.fusionFarVoxelScale = v
             default:
                 throw Fail("不認得的參數 '\(k)'。可用：blurWeightPower/blurWeightHalfPx/"
                            + "blurWeightRefPx/depthMaxIncidenceDeg/refuseVoxelSizeM/"
                            + "refuseSampleStride/refuseMinNeighbors/refuseMaxCells/"
                            + "minDepthConfidence/mediumConfidenceWeight/pointMinDepthM/"
-                           + "pointMaxDepthM/depthEdgeRejectRatio/exportMaxPoints/blockBlurPixels")
+                           + "pointMaxDepthM/depthEdgeRejectRatio/exportMaxPoints/blockBlurPixels/"
+                           + "fusionNearRangeM/fusionFarExclusionM/fusionFarVoxelScale")
             }
         }
     }

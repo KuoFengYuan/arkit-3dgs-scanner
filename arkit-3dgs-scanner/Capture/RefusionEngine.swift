@@ -169,15 +169,94 @@ nonisolated struct FusedVoxelGrid {
     private(set) var voxelSize: Float
     private var maxCells: Int
     private let weightCap: Float = 8
+    /// Far-range cells use a separate key space at voxelSize × farVoxelScale.
+    /// voxelKey never sets bit 63, so the sign bit marks far keys without collisions.
+    static let farKeyFlag = Int64.min
+    private(set) var farVoxelScale: Float
+
+    struct ExportStats: Sendable {
+        var farCells = 0
+        var farExcludedNearSurface = 0
+        var farExported = 0
+    }
+    private(set) var lastExport = ExportStats()
 
     /// 分片數取 2 的冪且明顯多於核心數 —— 分堆才平均，lane 之間也不必等最慢的一片
     private static let shardCount = 16
 
-    init(voxelSize: Float, maxCells: Int) {
+    init(voxelSize: Float, maxCells: Int, farVoxelScale: Float = 1) {
         self.voxelSize = voxelSize
         self.maxCells = maxCells
+        self.farVoxelScale = farVoxelScale.isFinite ? max(1, farVoxelScale) : 1
         self.shards = Array(repeating: [:], count: Self.shardCount)
         self.shardMask = Int64(Self.shardCount - 1)
+    }
+
+    @inline(__always)
+    private static func isFar(_ key: Int64) -> Bool { key < 0 }
+
+    @inline(__always)
+    private func key(for p: SIMD3<Float>, far: Bool) -> Int64? {
+        guard far else { return PointCloudMath.voxelKey(p, size: voxelSize) }
+        return PointCloudMath.voxelKey(p, size: voxelSize * farVoxelScale).map { $0 | Self.farKeyFlag }
+    }
+
+    var farCount: Int { shards.reduce(0) { acc, s in acc + s.keys.reduce(0) { Self.isFar($1) ? $0 + 1 : $0 } } }
+
+    /// Neighbor count in the cell's own key space and resolution (26-neighborhood).
+    private func neighborCount(key: Int64, atLeast needed: Int) -> Int {
+        let far = Self.isFar(key)
+        let size = far ? voxelSize * farVoxelScale : voxelSize
+        let center = PointCloudMath.cellCenter(far ? key & ~Self.farKeyFlag : key, size: size)
+        var neighbors = 0
+        for offset in Self.neighborOffsets {
+            if let k = PointCloudMath.voxelKey(center + offset * size, size: size) {
+                let neighbor = far ? k | Self.farKeyFlag : k
+                if shards[shardIndex(neighbor)][neighbor] != nil {
+                    neighbors += 1
+                    if neighbors >= needed { break }
+                }
+            }
+        }
+        return neighbors
+    }
+
+    /// Measured near-range occupancy for far-cell exclusion: exact-center test on cells of
+    /// exclusion/3, plus a coarse 2x-radius index for a cheap early "nothing nearby" answer.
+    private struct NearSurfaceIndex {
+        let radius: Float, fine: Float, coarse: Float
+        var fineCells = Set<Int64>(), coarseCells = Set<Int64>()
+        init(radius: Float) { self.radius = radius; fine = radius / 3; coarse = radius * 2 }
+        mutating func insert(_ p: SIMD3<Float>) {
+            if let k = PointCloudMath.voxelKey(p, size: fine) { fineCells.insert(k) }
+            if let k = PointCloudMath.voxelKey(p, size: coarse) { coarseCells.insert(k) }
+        }
+        func contains(near p: SIMD3<Float>) -> Bool {
+            guard !fineCells.isEmpty else { return false }
+            var any = false
+            let c = floor(p / coarse)
+            search: for dz in -1...1 { for dy in -1...1 { for dx in -1...1 {
+                let offset = SIMD3(Float(dx), Float(dy), Float(dz))
+                if let k = PointCloudMath.voxelKey((c + offset + 0.5) * coarse, size: coarse),
+                   coarseCells.contains(k) { any = true; break search }
+            } } }
+            guard any else { return false }
+            let base = floor(p / fine)
+            for dz in -3...3 { for dy in -3...3 { for dx in -3...3 {
+                let center = (base + SIMD3(Float(dx), Float(dy), Float(dz)) + 0.5) * fine
+                guard simd_distance(center, p) <= radius,
+                      let k = PointCloudMath.voxelKey(center, size: fine) else { continue }
+                if fineCells.contains(k) { return true }
+            } } }
+            return false
+        }
+    }
+
+    private func nearSurfaceIndex(radius: Float) -> NearSurfaceIndex? {
+        guard radius.isFinite, radius > 0, farCount > 0 else { return nil }
+        var index = NearSurfaceIndex(radius: radius)
+        for shard in shards { for (key, cell) in shard where !Self.isFar(key) && cell.measured { index.insert(cell.mean) } }
+        return index
     }
 
     /// voxel key 是 `(ix << 42) | (iy << 21) | iz`，空間上高度結構化 ——
@@ -198,8 +277,10 @@ nonisolated struct FusedVoxelGrid {
     }
 
     /// - measured: true ＝ LiDAR 直接反投影（量測）；false ＝ ARKit 場景網格（推論）
+    /// - far: measured beyond the near range; stored in the far key space at the far voxel size.
     @discardableResult
-    mutating func insert(_ candidates: [CloudPoint], measured: Bool = true, boundedMemory: Bool = false,
+    mutating func insert(_ candidates: [CloudPoint], measured: Bool = true, far: Bool = false,
+                         boundedMemory: Bool = false,
                          shouldContinue: () -> Bool = { true }) -> Bool {
         guard shouldContinue() else { return false }
         guard !candidates.isEmpty else { return true }
@@ -209,7 +290,7 @@ nonisolated struct FusedVoxelGrid {
             for (index, pt) in candidates.enumerated() {
                 if index % 1024 == 0, !shouldContinue() { return false }
                 guard pt.score.isFinite else { continue }
-                if let key = PointCloudMath.voxelKey(SIMD3(pt.x, pt.y, pt.z), size: voxelSize) {
+                if let key = self.key(for: SIMD3(pt.x, pt.y, pt.z), far: far) {
                     let s = shardIndex(key)
                     let pos = SIMD3<Float>(pt.x, pt.y, pt.z)
                     let rgb = SIMD3<Float>(Float(pt.r), Float(pt.g), Float(pt.b))
@@ -244,8 +325,7 @@ nonisolated struct FusedVoxelGrid {
         for i in 0..<n { byShard[i].reserveCapacity(guess) }
         for pt in candidates {
             guard pt.score.isFinite else { continue }
-            guard let key = PointCloudMath.voxelKey(SIMD3<Float>(pt.x, pt.y, pt.z),
-                                                    size: voxelSize) else { continue }
+            guard let key = self.key(for: SIMD3<Float>(pt.x, pt.y, pt.z), far: far) else { continue }
             byShard[shardIndex(key)].append((key, pt))
         }
         let cap = weightCap
@@ -334,10 +414,10 @@ nonisolated struct FusedVoxelGrid {
         var merged = [[Int64: Cell]](repeating: [:], count: shards.count)
         var visited = 0
         for si in shards.indices {
-            for cell in shards[si].values {
+            for (oldKey, cell) in shards[si] {
                 if visited % 1024 == 0, !shouldContinue() { return false }
                 visited += 1
-                guard let key = PointCloudMath.voxelKey(cell.mean, size: voxelSize) else { continue }
+                guard let key = self.key(for: cell.mean, far: Self.isFar(oldKey)) else { continue }
                 let s = shardIndex(key)
                 if var m = merged[s][key] {
                     if m.measured && !cell.measured { continue }
@@ -371,12 +451,15 @@ nonisolated struct FusedVoxelGrid {
     /// Filter into one bit per cell, then consume shards while materializing the bounded output.
     /// Sampling AFTER rejection preserves the requested density when many cells are isolated.
     /// A nil result means cancellation/pressure: never publish a partial cloud as successful.
-    mutating func consumeExportPoints(target: Int, minNeighbors: Int,
+    mutating func consumeExportPoints(target: Int, minNeighbors: Int, farExclusion: Float = 0,
                                       shouldContinue: () -> Bool,
                                       progress: (Double) -> Void) -> [CloudPoint]? {
+        lastExport = ExportStats()
         guard shouldContinue() else { return nil }
         guard target > 0, count > 0 else { return [] }
         let total = count
+        let nearSurface = nearSurfaceIndex(radius: farExclusion)
+        guard shouldContinue() else { return nil }
         var accepted = [[UInt64]]()
         var eligible = 0, visited = 0
         for shard in shards {
@@ -391,18 +474,16 @@ nonisolated struct FusedVoxelGrid {
                 guard cell.color.x.isFinite, cell.color.y.isFinite, cell.color.z.isFinite,
                       cell.mean.x.isFinite, cell.mean.y.isFinite, cell.mean.z.isFinite,
                       cell.weight.isFinite, cell.bestScore.isFinite else { continue }
-                var neighbors = 0
-                if minNeighbors > 0 {
-                    let center = PointCloudMath.cellCenter(entry.key, size: voxelSize)
-                    for offset in Self.neighborOffsets {
-                        if let key = PointCloudMath.voxelKey(center + offset * voxelSize, size: voxelSize),
-                           shards[shardIndex(key)][key] != nil {
-                            neighbors += 1
-                            if neighbors >= minNeighbors { break }
-                        }
-                    }
-                }
+                let far = Self.isFar(entry.key)
+                if far { lastExport.farCells += 1 }
+                let neighbors = minNeighbors > 0 ? neighborCount(key: entry.key, atLeast: minNeighbors) : 0
                 guard neighbors >= minNeighbors else { continue }
+                // A far sample next to a near measured surface is that surface seen through a
+                // range-dependent bias; keeping it would add a second layer.
+                if far, let nearSurface, nearSurface.contains(near: cell.mean) {
+                    lastExport.farExcludedNearSurface += 1
+                    continue
+                }
                 bits[index / 64] |= UInt64(1) << (index % 64)
                 eligible += 1
             }
@@ -417,7 +498,7 @@ nonisolated struct FusedVoxelGrid {
         func color(_ value: Float) -> UInt8 { UInt8(min(255, max(0, value))) }
         for shardIndex in shards.indices {
             // Dictionary order is stable until mutation; acceptance bits belong to this snapshot.
-            for (index, cell) in shards[shardIndex].values.enumerated() {
+            for (index, entry) in shards[shardIndex].enumerated() {
                 if visited % 4096 == 0 {
                     guard shouldContinue() else { return nil }
                     progress(0.5 + Double(visited) / Double(total) * 0.5)
@@ -427,6 +508,8 @@ nonisolated struct FusedVoxelGrid {
                 let before = selected * limit / max(1, eligible)
                 selected += 1
                 guard selected * limit / max(1, eligible) > before else { continue }
+                let cell = entry.value
+                if Self.isFar(entry.key) { lastExport.farExported += 1 }
                 output.append(CloudPoint(x: cell.mean.x, y: cell.mean.y, z: cell.mean.z,
                     r: color(cell.color.x), g: color(cell.color.y), b: color(cell.color.z),
                     score: cell.bestScore * min(1, cell.weight / 1.5)))
@@ -441,16 +524,23 @@ nonisolated struct FusedVoxelGrid {
     /// 匯出：孤立點移除（飄浮雜點）+ 單次觀測降權，再分層擇優到 target。
     /// minNeighbors>0 時，26 鄰域占據數不足的 voxel 視為雜訊剔除。
     func exportPoints(target: Int, minNeighbors: Int, boundedMemory: Bool = false) -> [CloudPoint] {
-        guard target > 0 else { return [] }
+        exportPointsWithStats(target: target, minNeighbors: minNeighbors, boundedMemory: boundedMemory).points
+    }
+
+    /// farExclusion > 0 drops far cells next to a near measured surface (see consumeExportPoints).
+    func exportPointsWithStats(target: Int, minNeighbors: Int, boundedMemory: Bool = false,
+                               farExclusion: Float = 0) -> (points: [CloudPoint], stats: ExportStats) {
+        var stats = ExportStats()
+        guard target > 0 else { return ([], stats) }
         func c8(_ f: Float) -> UInt8 { UInt8(min(255, max(0, f))) }
-        let vs = voxelSize
+        let nearSurface = nearSurfaceIndex(radius: farExclusion)
         var points: [CloudPoint] = []
         let total = count
         let limit = min(total, target)
         points.reserveCapacity(boundedMemory ? limit : total)
         var visited = 0
         for shard in shards {
-            for cell in shard.values {
+            for (key, cell) in shard {
                 // Bounded fallback: spread selections over the whole grid, without first
                 // allocating all points plus another spatial downsampling dictionary.
                 if boundedMemory, total > target {
@@ -458,19 +548,29 @@ nonisolated struct FusedVoxelGrid {
                     visited += 1
                     if visited * limit / total == before { continue }
                 }
+                let far = Self.isFar(key)
+                if far { stats.farCells += 1 }
                 if minNeighbors > 0 {
+                    let vs = far ? voxelSize * farVoxelScale : voxelSize
                     var n = 0
                     for o in Self.neighborOffsets {
                         let np = cell.mean + o * vs
                         // 鄰格可能落在別的分片 —— 查詢必須先算分片，不能只查自己這片
-                        if let k = PointCloudMath.voxelKey(np, size: vs),
-                           shards[shardIndex(k)][k] != nil {
-                            n += 1
-                            if n >= minNeighbors { break }
+                        if let k0 = PointCloudMath.voxelKey(np, size: vs) {
+                            let k = far ? k0 | Self.farKeyFlag : k0
+                            if shards[shardIndex(k)][k] != nil {
+                                n += 1
+                                if n >= minNeighbors { break }
+                            }
                         }
                     }
                     if n < minNeighbors { continue }   // 孤立 → 飄浮雜點，丟棄
                 }
+                if far, let nearSurface, nearSurface.contains(near: cell.mean) {
+                    stats.farExcludedNearSurface += 1
+                    continue
+                }
+                if far { stats.farExported += 1 }
                 points.append(CloudPoint(x: cell.mean.x, y: cell.mean.y, z: cell.mean.z,
                                          r: c8(cell.color.x), g: c8(cell.color.y),
                                          b: c8(cell.color.z),
@@ -479,7 +579,7 @@ nonisolated struct FusedVoxelGrid {
         }
         // 起始格距用原生 voxelSize：加粗多少交給解析步長決定。
         // 先前預設 ×2 等於還沒開始就先砍掉 4 倍的點。
-        return boundedMemory ? points : PointCloudMath.stratifiedBest(points, startCell: voxelSize, target: target)
+        return (boundedMemory ? points : PointCloudMath.stratifiedBest(points, startCell: voxelSize, target: target), stats)
     }
 }
 
@@ -545,7 +645,7 @@ nonisolated enum RefusionEngine {
     }
 
     struct Report: Codable, Sendable {
-        var version = 6
+        var version = 7
         var status = "running"
         var stage = "frames"
         var totalFrames = 0
@@ -578,8 +678,22 @@ nonisolated enum RefusionEngine {
         var rgbWaitSeconds: Double?
         var wallSeconds: Double?
         var surface: SurfaceTSDF.Report?
+        /// Range priority (v7). nil in reports written before it existed or when disabled.
+        var nearRangeM: Float?
+        var farExclusionM: Float?
+        var farVoxelSizeM: Float?
+        var farCells: Int?
+        var farExcludedNearSurface: Int?
+        var farExportedPoints: Int?
     }
     struct Result: Sendable { var points: [CloudPoint]; var report: Report }
+
+    /// Range priority is active only when it actually splits the accepted depth interval.
+    static func nearPriorityRange(_ config: CaptureConfig) -> Float? {
+        let range = config.fusionNearRangeM
+        guard range.isFinite, range > config.pointMinDepthM, range < config.pointMaxDepthM else { return nil }
+        return range
+    }
 
     /// availableMemory is injectable to reproduce pressure appearing midway through a scan.
     static func refuseWithReport(records: [FrameRecord], sessionDir: URL, config: CaptureConfig,
@@ -595,6 +709,14 @@ nonisolated enum RefusionEngine {
         report.diverseReferences = config.depthConsistencyEnabled && config.depthDiverseReferences
         report.rayConsensus = config.depthConsistencyEnabled && config.depthConsensusEnabled
         report.preparedDepthSampling = config.preparedDepthSampling
+        let nearRange = nearPriorityRange(config)
+        let farExclusion = nearRange == nil ? 0 : max(0, config.fusionFarExclusionM.isFinite ? config.fusionFarExclusionM : 0)
+        let farScale = nearRange == nil ? 1 : max(1, config.fusionFarVoxelScale.isFinite ? config.fusionFarVoxelScale : 1)
+        if let nearRange {
+            report.nearRangeM = nearRange
+            report.farExclusionM = farExclusion
+            report.farVoxelSizeM = config.refuseVoxelSizeM * farScale
+        }
         func persistReport() {
             do {
                 let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -655,7 +777,7 @@ nonisolated enum RefusionEngine {
         var surface: SurfaceTSDF? = config.surfaceReconstruction
             ? SurfaceTSDF(voxel:config.refuseVoxelSizeM, budgetBytes:max(0,min(64,config.surfaceBudgetMB))*1_048_576) : nil
         var grid = FusedVoxelGrid(voxelSize: config.refuseVoxelSizeM,
-                                  maxCells: initialLimit)
+                                  maxCells: initialLimit, farVoxelScale: farScale)
         let depthDir = sessionDir.appendingPathComponent("depth", isDirectory: true)
         let imagesDir = sessionDir.appendingPathComponent("images", isDirectory: true)
         let prefetch = config.prefetchFusionRGB && (initialMemory == nil || initialMemory! >= 512*1_048_576)
@@ -689,6 +811,8 @@ nonisolated enum RefusionEngine {
         /// 一幀的產出。純函式、不碰共享狀態 —— 所以可以平行跑。
         struct FrameYield {
             var measured: [CloudPoint] = []
+            /// Measured beyond the near range: fused separately, kept only where no near surface exists.
+            var far: [CloudPoint] = []
             var mesh: [CloudPoint] = []
             var decodeSec: Double = 0
             var meshSec: Double = 0
@@ -767,6 +891,19 @@ nonisolated enum RefusionEngine {
                     y.measured = DepthConsistencyView.filter(y.measured, against: neighbors, config: config)
                 }
             }
+            if let nearRange {
+                // Camera-space depth; the ray consensus shifts points by at most a few cm.
+                let camera = SIMD3(c2w.columns.3.x, c2w.columns.3.y, c2w.columns.3.z)
+                let forward = -SIMD3(c2w.columns.2.x, c2w.columns.2.y, c2w.columns.2.z)
+                var near: [CloudPoint] = []
+                near.reserveCapacity(y.measured.count)
+                for point in y.measured {
+                    if simd_dot(SIMD3(point.x, point.y, point.z) - camera, forward) <= nearRange {
+                        near.append(point)
+                    } else { y.far.append(point) }
+                }
+                y.measured = near
+            }
             report.consistencySeconds += ProcessInfo.processInfo.systemUptime - consistencyStart
             // mesh 頂點：投影進本幀取色。同一頂點會被多幀命中 → 由 voxel 加權平均做多視角混色。
             if !meshVertices.isEmpty {
@@ -830,7 +967,8 @@ nonisolated enum RefusionEngine {
             }
             let tI = Date()
             guard grid.insert(produced.measured, boundedMemory: boundedMemory, shouldContinue: canContinue),
-                  grid.insert(produced.mesh, measured: false, boundedMemory: boundedMemory, shouldContinue: canContinue) else {
+                  grid.insert(produced.mesh, measured: false, boundedMemory: boundedMemory, shouldContinue: canContinue),
+                  grid.insert(produced.far, far: true, boundedMemory: boundedMemory, shouldContinue: canContinue) else {
                 return interrupted(status: interruptionStatus)
             }
             if let volume = surface {
@@ -878,10 +1016,12 @@ nonisolated enum RefusionEngine {
         // On device, use a bounded pass rather than a full cloud + downsampling dictionary.
         report.boundedExport = boundedMemory
         var out: [CloudPoint]
+        var exportStats = FusedVoxelGrid.ExportStats()
         if boundedMemory {
             var lastPersisted = -1
             guard let exported = grid.consumeExportPoints(target: outputLimit,
-                minNeighbors: config.refuseMinNeighbors, shouldContinue: canContinue, progress: { fraction in
+                minNeighbors: config.refuseMinNeighbors, farExclusion: farExclusion,
+                shouldContinue: canContinue, progress: { fraction in
                     report.exportFraction = fraction
                     report.stage = fraction < 0.5 ? "exportFilter" : "exportPoints"
                     report.exportSeconds = Date().timeIntervalSince(tE)
@@ -890,8 +1030,18 @@ nonisolated enum RefusionEngine {
                     progress(0.9 + fraction * (config.surfaceReconstruction ? 0.05 : 0.1))
                 }) else { return interrupted(status: interruptionStatus) }
             out = exported
+            exportStats = grid.lastExport
         } else {
-            out = grid.exportPoints(target: outputLimit, minNeighbors: config.refuseMinNeighbors)
+            let exported = grid.exportPointsWithStats(target: outputLimit, minNeighbors: config.refuseMinNeighbors,
+                                                      farExclusion: farExclusion)
+            out = exported.points
+            exportStats = exported.stats
+        }
+        if nearRange != nil {
+            report.farVoxelSizeM = gridVoxel * grid.farVoxelScale
+            report.farCells = exportStats.farCells
+            report.farExcludedNearSurface = exportStats.farExcludedNearSurface
+            report.farExportedPoints = exportStats.farExported
         }
         if let volume = surface {
             report.stage = "surfaceExport"; persistReport(); progress(0.95)
@@ -918,6 +1068,10 @@ nonisolated enum RefusionEngine {
             msg += String(format: " (觸頂粗化 %d 次，設定值 %.3fm)", steps, config.refuseVoxelSizeM)
         }
         msg += " -> 匯出 \(out.count) 點（本次上限 \(outputLimit)）"
+        if let nearRange {
+            msg += String(format: "；%.1fm 外深度 %d 格，其中 %d 格貼近近距表面而捨棄、%d 點補入未覆蓋表面",
+                          nearRange, exportStats.farCells, exportStats.farExcludedNearSurface, exportStats.farExported)
+        }
         if inferredOnly > 0 {
             let pct = Double(inferredOnly) * 100 / Double(max(1, rawCells))
             msg += String(format: "；其中 %d 格(%.1f%%) 是 LiDAR 沒覆蓋、只靠 ARKit mesh 撐著",

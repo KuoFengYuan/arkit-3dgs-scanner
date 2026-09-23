@@ -200,6 +200,16 @@ nonisolated struct CaptureConfig: Sendable {
     var depthDiverseReferences = true
     var depthConsensusEnabled = true
     var depthConsensusMaxShiftM: Float = 0.02
+    /// Offline range priority. Measured depth up to this camera-space range fuses normally;
+    /// farther depth only fills surfaces no near measurement reached. Real-scan replay showed
+    /// 1-5 cm range-dependent LiDAR offsets beyond ~2.5-3 m, larger than a voxel, so weights
+    /// cannot merge them into the near surface. 0 (or >= pointMaxDepthM) keeps legacy fusion.
+    var fusionNearRangeM: Float = 3.0
+    /// A far-range cell within this distance of a near measured surface is a biased repeat.
+    var fusionFarExclusionM: Float = 0.15
+    /// Far cells use this multiple of refuseVoxelSizeM so noisy far data cannot exhaust the
+    /// cell budget and coarsen the whole scene.
+    var fusionFarVoxelScale: Float = 2
     /// 入射角上限（度）。超過就不收這個深度樣本。
     ///
     /// **這是牆面疊影的主要對策。** 掠射時一個深度像素涵蓋牆面上一大片，

@@ -24,7 +24,7 @@ Two avoidable overlaps were found: live CPU preview cells remained fully allocat
 | RGB, depth, confidence | Written continuously; one geometry frame plus at most one prefetched depth-resolution RGB image, without a new photo-count limit |
 | Retained live cells | Reduced proportionally to at most 100,000 after GPU release and preview persistence |
 | Anchors and remaining cells | Preserve local positions, colors, weights, and direction bits for resumed scanning |
-| Offline grid | Estimated 96 MiB budget plus available-memory reductions; 128 bytes/cell is an estimate, not RSS |
+| Offline grid | Estimated 96 MiB budget plus available-memory reductions; 128 bytes/cell is an estimate, not RSS. Depth beyond `fusionNearRangeM` (3 m) uses separate 4 cm cells, so far noise no longer forces near surfaces to coarsen |
 | Insertion scratch | Serial mobile insertion without shard candidate copies; capacity and interruption checked every 1,024 points, including during coarsening; a stopped mutable grid is discarded |
 | Reference-depth cache | LRU capped at eight entries and 2 MiB of depth/confidence arrays and exact quad-validity masks; cleared below 384 MiB available memory |
 | Final cloud / floor-plan input | Mobile target clamped to `exportMaxPoints`, currently 250,000; no extra large downsampling dictionary |
@@ -45,6 +45,8 @@ Below 192 MiB available memory, or upon a system memory-pressure event, fusion r
 See [experimental surface reconstruction](SURFACE_RECONSTRUCTION.md) for the additional 32 MiB resident TSDF block budget, 256 MiB temporary backing-data budget, exact-result prefetch and hybrid fallback.
 
 ## Diagnostics
+
+Refusion report v7 adds range-priority counts; see [surface consensus](LIDAR_SURFACE_CONSENSUS.md). In the 569-frame replay, the grid peak fell from 785,576 cells (coarsened to 4 cm) to 718,650 cells at 2 cm.
 
 Refusion report v5 adds `peakProcessFootprintBytes` (sampled process physical footprint on iOS), `memoryWarningCount`, `memoryStopReason`, and `requiredFrameHeadroomBytes`. The peak is sampled, not a guaranteed maximum; OS/GPU allocation changes between samples can still cause failure. Reasons distinguish system pressure, the reserved headroom, and frame-workspace preflight. Version 4 stage/export progress remains available to locate an interrupted job.
 

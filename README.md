@@ -80,6 +80,8 @@ Depth fusion selects up to four reference views, prioritizing separated camera p
 
 On one 569-frame scan, the median local surface thickness decreased from **8.94 cm to 7.01 cm**. This measures consistency at fixed local patches, including possible furniture and real layered structures. It is **not an absolute dimensional accuracy measurement** or a guarantee of artifact-free 3DGS results. See the [method, comparison, and limitations](docs/LIDAR_SURFACE_CONSENSUS.md).
 
+Depth beyond 3 m now only fills surfaces that no nearer view measured, using 4 cm cells. Far LiDAR depth showed 1–5 cm range-dependent offsets in real scans, which formed second layers. In a desktop replay of the same 569-frame room scan, median local thickness at the current fusion's patch centers fell from **7.71 cm to 3.67 cm**, and the grid no longer coarsened to 4 cm; a close-range scan was unchanged. Surfaces seen only from far away keep their far-range error. See [range priority](docs/LIDAR_SURFACE_CONSENSUS.md).
+
 Processing streams frames instead of retaining all decoded images and depth maps. The reference-depth cache is capped at eight entries / 2 MiB; the fusion grid and exported point cloud have separate memory limits. The current mobile output cap is 250,000 points. These are processing safeguards, not a guarantee against every out-of-memory condition. See [large-scan memory handling](docs/LARGE_SCAN_MEMORY.md).
 
 Pose refinement combines guided local optimization with bounded revisit matching and a sparse rigid-correction graph. It is not COLMAP/Ceres or a complete global SfM pipeline. Failed validation keeps the existing poses. Image selection and depth fusion are separate, so a photo excluded from training can still contribute reliable depth.
