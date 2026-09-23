@@ -665,7 +665,8 @@ nonisolated enum RefusionEngine {
     }
 
     struct Report: Codable, Sendable {
-        var version = 8
+        var version = 9
+        var debugAssertionsEnabled: Bool? = ProcessingBuild.debugAssertionsEnabled
         var status = "running"
         var stage = "frames"
         var totalFrames = 0
@@ -699,6 +700,7 @@ nonisolated enum RefusionEngine {
         var rgbWaitSeconds: Double?
         var wallSeconds: Double?
         var surface: SurfaceTSDF.Report?
+        var surfaceValidation: SurfaceVisibilityValidator.Report?
         /// Range priority (v7). nil in reports written before it existed or when disabled.
         var nearRangeM: Float?
         var farExclusionM: Float?
@@ -1076,6 +1078,15 @@ nonisolated enum RefusionEngine {
             }
             if report.surface?.status != "densityFallback" { report.surface = volume.report }
             surface = nil
+            guard canContinue() else { return interrupted(status:interruptionStatus) }
+        }
+        if config.surfaceVisibilityValidation, config.depthConsistencyEnabled,
+           report.surface?.status.hasPrefix("completed") == true {
+            report.stage = "surfaceValidation"; persistReport(); progress(0.97)
+            report.surfaceValidation = SurfaceVisibilityValidator.validate(&out,
+                references:SurfaceVisibilityValidator.referenceIndices(records),config:config,
+                load:{ storedDepthView(records[$0],directory:depthDir) },shouldContinue:canContinue,
+                progress:{progress(0.97+$0*0.025)})
             guard canContinue() else { return interrupted(status:interruptionStatus) }
         }
         report.exportSeconds = Date().timeIntervalSince(tE)

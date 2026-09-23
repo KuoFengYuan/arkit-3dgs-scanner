@@ -169,6 +169,67 @@ import ImageIO
                 && pilot.report.eligibleFrames == 874 && pilot.records.map(\.transform) == thousand.map(\.transform),
               "1000-frame planar pilot bounds solves and leaves an already correct trajectory intact")
         check(pilot.report.peakDepthFrames <= 3,"pilot has the same three-frame memory bound as the full pass")
+        let visibilityConfig = CaptureConfig()
+        let vk = CameraIntrinsics(fx:60,fy:60,cx:32,cy:24,width:64,height:48)
+        func visibilityView(_ z: Float = 2, confidence: UInt8? = 2) -> DepthConsistencyView {
+            let values = [Float](repeating:z,count:64*48)
+            return DepthConsistencyView(depth:values.withUnsafeBytes { Data($0) },
+                confidence:confidence.map { [UInt8](repeating:$0,count:64*48) },
+                intrinsics:vk,c2w:matrix_identity_float4x4)!
+        }
+        func sample(_ z: Float) -> CloudPoint { CloudPoint(x:0,y:0,z:-z,r:21,g:55,b:89) }
+        let realWall = [CloudPoint](repeating:sample(2),count:100)
+        let visibilityInput = realWall + [sample(1.9),sample(2.1),sample(4),
+            CloudPoint(x:10,y:0,z:-2,r:1,g:2,b:3)]
+        var visible = visibilityInput
+        let visibility = SurfaceVisibilityValidator.validate(&visible,references:[0,1,2],config:visibilityConfig,
+            load:{_ in visibilityView()})
+        check(visibility.removedPoints == 1 && visible.count == 103 && !visible.contains { $0.z == -1.9 },
+              "three free-space contradictions remove a foreground ghost only")
+        check(visible.contains { $0.z == -2.1 } && visible.contains { $0.z == -4 } && visible.contains { $0.x == 10 },
+              "occluded, distant and out-of-view surfaces are never carved away")
+        check(visible.prefix(100).allSatisfy { $0.z.bitPattern == Float(-2).bitPattern && $0.r == 21 && $0.g == 55 && $0.b == 89 },
+              "surface validation preserves retained coordinates and colors exactly")
+        var parallel = realWall + [sample(1.9)]
+        let thin = SurfaceVisibilityValidator.validate(&parallel,references:Array(0..<6),config:visibilityConfig,
+            load:{ visibilityView($0 < 2 ? 1.9 : 2) })
+        check(thin.removedPoints == 0 && parallel.count == 101,
+              "two independently supported parallel surfaces survive four conflicting views")
+        var uncertain = visibilityInput
+        let low = SurfaceVisibilityValidator.validate(&uncertain,references:[0,1,2],config:visibilityConfig,
+            load:{_ in visibilityView(confidence:1)})
+        check(low.removedPoints == 0 && uncertain.count == visibilityInput.count,
+              "medium-confidence depth cannot erase an existing surface")
+        let missing = SurfaceVisibilityValidator.validate(&uncertain,references:[0,1,2],config:visibilityConfig,
+            load:{_ in visibilityView(confidence:nil)})
+        check(missing.status == "insufficientReferences" && uncertain.count == visibilityInput.count,
+              "legacy scans without confidence data remain intact")
+        var widespread = [CloudPoint](repeating:sample(1.9),count:20)
+        let conflict = SurfaceVisibilityValidator.validate(&widespread,references:[0,1,2],config:visibilityConfig,
+            load:{_ in visibilityView()})
+        check(conflict.status == "excessiveConflictFallback" && conflict.candidateRemovals == 20 && widespread.count == 20,
+              "widespread pose or transparent-surface conflict preserves the complete input")
+        var cancelledCloud = visibilityInput, calls = 0
+        let cancelledVisibility = SurfaceVisibilityValidator.validate(&cancelledCloud,references:[0,1,2],config:visibilityConfig,
+            load:{_ in visibilityView()},shouldContinue:{ calls += 1; return calls != 3 })
+        check(cancelledVisibility.status == "interrupted" && cancelledCloud.map(\.z) == visibilityInput.map(\.z),
+              "even transient cancellation inside a point batch cannot commit partial votes")
+        check(visibility.counterBytes == visibilityInput.count*2 && visibility.peakDepthFrames == 1,
+              "visibility workspace uses two byte counters per point and one depth map")
+        var route = thousand
+        for i in route.indices { route[i].confidenceFile = "confidence.bin"; route[i].transform[3] = Double(i)*0.1 }
+        let indices = SurfaceVisibilityValidator.referenceIndices(route)
+        check(indices.count == 64 && indices.first == 0 && indices.last == 998,
+              "bounded reference sampling includes both ends of a long route")
+        for i in route.indices { route[i].transform[3] = Double(i%2)*0.02 }
+        check(SurfaceVisibilityValidator.referenceIndices(route).count == 1,
+              "revisits and stationary bursts cannot fabricate independent camera centers")
+        var legacyReport = try JSONSerialization.jsonObject(with:JSONEncoder().encode(enabled.report)) as! [String:Any]
+        legacyReport.removeValue(forKey:"surfaceValidation"); legacyReport.removeValue(forKey:"debugAssertionsEnabled")
+        legacyReport.removeValue(forKey:"buildConfiguration")
+        let decodedReport = try JSONDecoder().decode(RefusionEngine.Report.self,from:JSONSerialization.data(withJSONObject:legacyReport))
+        check(decodedReport.surfaceValidation == nil && decodedReport.debugAssertionsEnabled == nil,
+              "old fusion reports do not invent validation or build diagnostics")
         print("\(checks) surface reconstruction checks passed")
     }
     static func benchmark(_ path: String) throws {

@@ -175,6 +175,9 @@ nonisolated final class SurfaceTSDF {
         guard report.status == "integrating" else { return false }
         let started = Date(); defer { report.seconds += Date().timeIntervalSince(started) }
         guard frame >= 0, frame < Int(Int32.max) else { report.status = "invalidFrame"; return false }
+        // Adjacent samples often continue in the last resident block. Keep one reference
+        // across the frame, never across a paging operation without replacing it.
+        var lastKey: Key?, lastBlock: Block?
         for (i, p) in points.enumerated() {
             if i % 256 == 0, !shouldContinue() { report.status = "interrupted"; return false }
             let position = SIMD3(p.x,p.y,p.z), delta = position-camera, range = simd_length(delta)
@@ -189,7 +192,8 @@ nonisolated final class SurfaceTSDF {
             surfaceBlocks.insert(surface.0)
             // Half-voxel normal steps avoid holes along diagonals. A cell receives at most one
             // observation per frame, so higher sampling density cannot inflate confidence.
-            var lastKey: Key?, lastBlock: Block?
+            if !cacheBlockLookups { lastKey = nil; lastBlock = nil }
+            var previousVoxel: SIMD3<Int32>?
             for step in -6...6 {
                 guard let (key,index,v) = address(position + normal * (Float(step) * voxel * 0.5)) else { continue }
                 let block: Block
@@ -203,6 +207,10 @@ nonisolated final class SurfaceTSDF {
                     }
                     block = loaded; lastKey = key; lastBlock = loaded
                 }
+                // Half-voxel steps can hit the same cell twice. LRU has already advanced;
+                // its first observation is final for this frame, so no second array read.
+                if cacheBlockLookups, previousVoxel == v { continue }
+                previousVoxel = v
                 var cell = block.cells[index]
                 guard cell.lastFrame != Int32(frame) else { continue }
                 let sdf = simd_dot(center(v)-position, normal)

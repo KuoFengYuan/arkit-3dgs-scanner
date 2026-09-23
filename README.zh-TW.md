@@ -33,7 +33,7 @@
 
 ## 快速開始
 
-1. 使用 Xcode 26 或更新版本開啟 `arkit-3dgs-scanner.xcodeproj`，選取 `arkit-3dgs-scanner` scheme 與自己的簽章 Team。
+1. 使用 Xcode 26 或更新版本開啟 `arkit-3dgs-scanner.xcodeproj`，選取 `arkit-3dgs-scanner` scheme 與自己的簽章 Team。 Run 預設使用最佳化 Release；需要逐行除錯時才選 `arkit-3dgs-scanner-Debug`。詳見[融合速度與表面重影](docs/SCAN_FUSION_DIAGNOSTICS.zh-TW.md)。
 2. 安裝至支援 ARKit 的 iPhone／iPad；專案最低部署版本為 iOS 17。LiDAR 深度與 RoomPlan 功能需對應硬體支援。
 3. 按「開始掃描」，允許相機存取，等待追蹤就緒；開拍前選擇 LiDAR、精細掃描等設定。
 4. 沿著空間移動，從不同角度拍到同一表面。停止後等待資料優化，檢查點雲與缺漏，必要時「續掃」。

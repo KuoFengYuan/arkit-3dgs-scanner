@@ -51,7 +51,7 @@ cd arkit-3dgs-scanner
 open arkit-3dgs-scanner.xcodeproj
 ```
 
-1. Select the `arkit-3dgs-scanner` scheme, your signing team, and a physical device in Xcode.
+1. Select the `arkit-3dgs-scanner` scheme, your signing team, and a physical device in Xcode. Run uses optimized Release; choose `arkit-3dgs-scanner-Debug` only for source-level debugging. See [fusion speed and overlapping surfaces](docs/SCAN_FUSION_DIAGNOSTICS.md).
 2. Build and run. Allow camera access and wait for tracking to become ready.
 3. Choose LiDAR and refinement options before starting. Move around the scene so surfaces are visible from multiple positions.
 4. Stop the scan, wait for processing, and inspect the point cloud. Continue the active scan if more coverage is needed.

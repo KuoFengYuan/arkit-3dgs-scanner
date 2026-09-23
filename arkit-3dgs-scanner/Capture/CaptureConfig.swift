@@ -146,6 +146,8 @@ nonisolated struct CaptureConfig: Sendable {
     /// Experimental bounded surface reconstruction; explicitly enabled by capture/history UI.
     var surfaceReconstruction = false
     var surfaceBudgetMB = 32
+    /// Bounded route-wide free-space check for completed experimental surfaces.
+    var surfaceVisibilityValidation = true
     var refuseSampleStride = 1
     /// 重融合 voxel 尺寸：比即時預覽（1cm）略粗，把遠距深度雜訊造成的「厚牆」塌成薄面。
     /// 想要最高細節設 0.01；房間尺度 3DGS 初始化 2cm 已足夠且更乾淨。
