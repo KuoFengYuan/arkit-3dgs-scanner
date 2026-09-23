@@ -4,8 +4,9 @@ import Foundation
 @main struct RefuseDataset {
     static func main() throws {
         let args = CommandLine.arguments
-        guard args.count == 3 || (args.count == 4 && args[3] == "--legacy-depth") else {
-            print("Usage: refuse_dataset SOURCE NEW_OUTPUT [--legacy-depth]"); exit(2)
+        let flags = Set(args.dropFirst(3))
+        guard args.count >= 3, flags.isSubset(of: ["--legacy-depth", "--no-range-priority"]) else {
+            print("Usage: refuse_dataset SOURCE NEW_OUTPUT [--legacy-depth] [--no-range-priority]"); exit(2)
         }
         let fm = FileManager.default, source = URL(fileURLWithPath: CommandLine.arguments[1])
         let output = URL(fileURLWithPath: CommandLine.arguments[2])
@@ -33,10 +34,13 @@ import Foundation
             if fm.fileExists(atPath: url.path) { try fm.copyItem(at: url, to: output.appendingPathComponent(name)) }
         }
         var config = CaptureConfig()
-        if args.count == 4 {
+        if flags.contains("--legacy-depth") {
+            // Reproduces the earlier temporal-neighbor check and single-range fusion.
             config.depthDiverseReferences = false
             config.depthConsensusEnabled = false
+            config.fusionNearRangeM = 0
         }
+        if flags.contains("--no-range-priority") { config.fusionNearRangeM = 0 }
         let start = Date()
         let result = RefusionEngine.refuseWithReport(records: records, sessionDir: output, config: config,
             availableMemory: { 6 * 1024 * 1024 * 1024 }, progress: { _ in })

@@ -38,6 +38,29 @@ About 84.6% of baseline occupied 10 cm volume cells remain occupied. This is vol
 
 The original pose-refinement holdout residual worsened from 5.76 to 5.95 px, so that correction was not forced. Local depth consensus cannot fix all long-range pose drift or guarantee artifact-free 3DGS training.
 
+## Range priority for far depth
+
+Consensus compares a sample only with cameras near its own. In larger rooms those references see the same far surface from a similar range, so their range-dependent errors agree and pass together. Desktop replays of two iPhone 17 Pro scans compared every frame's pixels with planes fitted to depth measured within 3 m. Beyond about 2.5–3 m, per-frame median offsets reached 1–5 cm (walls measured farther, floors or ceilings closer), larger than the 2 cm voxel. Per-voxel weights cannot merge samples that land in different voxels: removing the weight cap, stronger range weights, a 70° incidence limit, or the experimental TSDF each changed median thickness by 5% or less.
+
+Offline fusion therefore splits measured depth by camera-space range, `fusionNearRangeM` (default 3 m):
+
+- Depth within the near range fuses as before. A scan without farther depth produces a bit-identical cloud.
+- Farther depth passes the same consensus checks, then fuses into a separate key space at `fusionFarVoxelScale` times the fusion voxel (4 cm by default). Noisy far data can no longer fill the cell budget and coarsen near surfaces.
+- At export, a far cell within about `fusionFarExclusionM` (15 cm) of a near measured cell is treated as a biased repeat of that surface and omitted. Other far cells remain as the only coverage of surfaces never observed within the near range. The decision is made after all frames, so capture order does not matter.
+- ARKit mesh supplementation, live preview, and depth-consistency thresholds are unchanged. The experimental TSDF integrates near-range samples only; far fill reaches its output through the existing voxel fallback.
+- `refusion-progress.json` version 7 records `nearRangeM`, `farExclusionM`, `farVoxelSizeM`, `farCells`, `farExcludedNearSurface`, and `farExportedPoints`. Older reports remain readable. `fusionNearRangeM = 0` restores single-range fusion.
+
+| Desktop replay with mobile memory limits | Previous fusion | Range priority |
+| --- | ---: | ---: |
+| 9F8040 (569 frames): grid voxel / peak cells | 4 cm, coarsened / 785,576 | 2 cm / 718,650 |
+| 9F8040: median local P10–P90 thickness | 7.71 cm | 3.67 cm |
+| 9F8040: 90th percentile of local thickness | 12.24 cm | 9.46 cm |
+| 7F2187 (399 frames, close range): median thickness | 5.26 cm | 5.30 cm |
+
+Both clouds were measured at the previous cloud's patch centers and normals, as above; the earlier table sampled the older preview's centers, so its 7.01 cm is not directly comparable with 7.71 cm here. On 9F8040, 72% of 2,700 comparable patches became thinner and 9 lost support. 81.8% of previously occupied 10 cm cells remain occupied and 97.4% of the top-down footprint remains; the lost footprint lies beside walls where only far depth existed, 4–12 cm from the near-range wall. Of 139,745 far cells, 125,159 were omitted next to near surfaces. The output reached the 250,000-point cap instead of 190,974 because the grid no longer coarsened. The capped output is sampled in dictionary order, which varies between processes; two runs gave 3.63–3.67 cm and 81.5–81.8% retention. The close-range scan changed within the metric's noise.
+
+Surfaces seen only from far away keep their far-range error, and the edges of near coverage can lose about one exclusion radius of far fill. A badly posed near view also takes priority over far data, so this step does not correct poses. Thickness includes furniture and real layers; it is not absolute dimensional accuracy.
+
 ## Runtime tradeoff
 
 One Mac Release comparison with mobile memory limits, including export preparation, took about 11.33 seconds for the old method and 12.02 seconds for the new one (about 6% longer). Consistency checking took about 2.07 → 3.00 seconds. Neither run repeated BA. These are Mac measurements, not iPhone performance; this is a quality improvement with additional computation.
@@ -47,15 +70,17 @@ One Mac Release comparison with mobile memory limits, including export preparati
 - `test_lidar_consistency.swift`: 51 checks including convergence, 2 cm bound, camera-ray preservation, rotation, occlusion, confidence, references, mesh, and memory pressure.
 - `test_large_scan_memory.swift`: 24 checks including 1,000 depth frames, bounded caching/output, and cancellation. Diverse references need not have more cache hits than loads; tests verify reuse and at most four reference loads per frame.
 - `test_history_training_export.swift`: 14 checks for COLMAP export and legacy history.
+- `test_range_priority.swift`: 12 checks for separate far key space, coarsening, near-surface exclusion, far-only fill, v7 report fields, the desktop export path, and bit-identical near-only scans. `tools/test_fusion_memory.sh` runs it with the other fusion suites.
 - Historical iPhone and Simulator Debug builds passed. Updated real-device performance still needs measurement.
 
-The refusion tool creates a new directory and shares immutable media by hard links, falling back to copying across filesystems.
+The refusion tool creates a new directory and shares immutable media by hard links, falling back to copying across filesystems. `--legacy-depth` reproduces the earlier temporal-neighbor check and single-range fusion; `--no-range-priority` keeps the current consensus but disables the range split.
 
 ```sh
 swiftc -O -module-cache-path /tmp/fable-swift-cache \
-  arkit-3dgs-scanner/Capture/{Localization,Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,ExportManager,TrainingFrameSelector}.swift \
+  arkit-3dgs-scanner/Capture/{Localization,Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,SurfaceTSDF,ExportManager,TrainingFrameSelector}.swift \
   arkit-3dgs-scanner/History/ScanLibrary.swift tools/refuse_dataset.swift -o /tmp/refuse_dataset
 /tmp/refuse_dataset SOURCE NEW_OUTPUT
+/tmp/refuse_dataset SOURCE SINGLE_RANGE_OUTPUT --no-range-priority
 /tmp/refuse_dataset SOURCE LEGACY_OUTPUT --legacy-depth
 python tools/compare_surface_thickness.py LEGACY_OUTPUT/review.ply NEW_OUTPUT/review.ply REPORT_DIR
 ```
