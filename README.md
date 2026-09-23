@@ -34,7 +34,7 @@ See [fusion progress, first-person review, and export safeguards](docs/FUSION_RE
 | Automatic keyframes | Selects frames using camera movement, rotation, and capture quality; stores per-frame intrinsics and poses |
 | LiDAR fusion | Filters depth edges and inconsistent observations, then refines supported samples across viewpoints |
 | Camera-only capture | Saves RGB and verified sparse points; optionally reconstructs additional geometry from multiple images |
-| Pose refinement | LiDAR-assisted local adjustment and bounded revisit correction; changes require held-out validation |
+| Pose refinement | Joint LiDAR-assisted adjustment with ARKit motion priors and bounded revisit correction; changes require held-out tracks and a photo-alignment check |
 | Metric scale | Pick point-cloud distances, calibrate against a known length, independently verify, and export scaled cameras/points |
 | Image selection | Prefers sharper, nonredundant views while retaining all original photos and reliable depth |
 | Synchronized playback | Photos follow their corresponding 3D camera position and direction; adjustable playback FPS |
@@ -84,7 +84,7 @@ Depth beyond 3 m now only fills surfaces that no nearer view measured, using 4 c
 
 Processing streams frames instead of retaining all decoded images and depth maps. The reference-depth cache is capped at eight entries / 2 MiB; the fusion grid and exported point cloud have separate memory limits. The current mobile output cap is 250,000 points. These are processing safeguards, not a guarantee against every out-of-memory condition. See [large-scan memory handling](docs/LARGE_SCAN_MEMORY.md).
 
-Pose refinement combines guided local optimization with bounded revisit matching and a sparse rigid-correction graph. It is not COLMAP/Ceres or a complete global SfM pipeline. Failed validation keeps the existing poses. Image selection and depth fusion are separate, so a photo excluded from training can still contribute reliable depth.
+Pose refinement combines guided feature matching, a joint bundle adjustment that keeps ARKit's accurate frame-to-frame motion, bounded revisit matching, and a sparse rigid-correction graph. It is not COLMAP/Ceres or a complete global SfM pipeline. A photo-alignment check compares image texture between overlapping frames and applies a stage only if it improves wide-baseline alignment without harming adjacent frames. In desktop replays of two scans, the previous refinement failed this check; the new one raised median wide-baseline NCC by about 0.02, and the local surface stage was rejected. Failed validation keeps the existing poses. See [pose refinement](docs/POSE_REFINEMENT.md). Image selection and depth fusion are separate, so a photo excluded from training can still contribute reliable depth.
 
 Motion estimates alone no longer trigger a post-fusion recapture warning. Weak measured detail still receives a frame-specific review message; motion-only and unknown evidence remain in collapsed capture-quality information. This changes reporting, not the original photos or depth eligibility.
 
@@ -177,6 +177,7 @@ Swift regression tools cover capture writes, geometry, bounded depth caching, la
 ## Documentation
 
 - [Capture architecture](docs/CAPTURE_ARCHITECTURE.md)
+- [Pose refinement and photo-alignment validation](docs/POSE_REFINEMENT.md)
 - [Loop closure and metric scale](docs/LOOP_CLOSURE_AND_SCALE.md)
 - [On-device dataset refinement](docs/ON_DEVICE_TRAINING_QUALITY.md)
 - [LiDAR surface consistency](docs/LIDAR_SURFACE_CONSENSUS.md)

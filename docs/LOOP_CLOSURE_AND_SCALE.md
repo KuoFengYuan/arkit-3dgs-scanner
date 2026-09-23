@@ -8,7 +8,7 @@ The phone can verify revisited views after local pose refinement and export a da
 
 With LiDAR and refinement enabled, stopping a scan runs local refinement, revisit matching, validation, then depth refusion. **Optimize training data** in history uses the same pipeline and publishes a separate scan. Original RGB/depth files are preserved.
 
-This is a custom implementation, not a port of COLMAP or Ceres. Local BA alternates landmark and camera updates; the additional loop stage solves a linearized graph of small rigid corrections, not full joint camera/landmark BA or complete global SfM. It requires saved LiDAR depth. Camera-only scans retain their existing processing.
+This is a custom implementation, not a port of COLMAP or Ceres. Bundle adjustment jointly updates cameras against LiDAR-derived landmarks with ARKit motion priors ([pose refinement](POSE_REFINEMENT.md)); the additional loop stage solves a linearized graph of small rigid corrections, not full joint camera/landmark BA or complete global SfM. It requires saved LiDAR depth. Camera-only scans retain their existing processing.
 
 - Search at most 512 distributed query frames and 64 candidate pairs. Candidates are separated by more than 30 eligible frames, at least 8 seconds and 2 meters of travel, with camera centers within 0.8 meters and similar viewing directions.
 - Load descriptors for only two frames at a time. Reciprocal appearance matches also require nearby depth-derived world positions; each pair has at most 256 matches.
@@ -17,7 +17,7 @@ This is a custom implementation, not a port of COLMAP or Ceres. Local BA alterna
 - Reject camera shifts above 15 cm, rotations above 5 degrees, abrupt changes to relative motion, or degraded held-out geometry/reprojection. Interpolate accepted corrections through excluded frames for continuous playback.
 - Refuse depth with accepted poses. Do not reuse an uncorrected ARKit mesh alongside changed poses. Failed loop validation preserves the preceding local-refinement result. Cancellation does not publish a partially solved loop; memory pressure skips optional loop processing.
 
-`pose-refinement.json` version 3 adds `loopClosure`: candidate/verified pair counts, maximum pair matches, descriptor-frame peak, status, elapsed time, correction magnitude, and held-out 3D/pixel residuals when final validation is reached. Geometrically verified pairs can still fail the graph's final checks; only `status: validated` means corrections were applied.
+`pose-refinement.json` version 3 adds `loopClosure`: candidate/verified pair counts, maximum pair matches, descriptor-frame peak, status, elapsed time, correction magnitude, and held-out 3D/pixel residuals when final validation is reached. Geometrically verified pairs can still fail the graph's final checks; only `status: validated` means corrections were applied. Version 5 adds the photo-alignment result: loop corrections belong to the feature stage and are applied only if that stage passes the check (`appliedStage`).
 
 Repeated texture, missing depth, large drift, changes in appearance, or insufficient overlap can prevent closure. Return to a previously seen area with similar viewing direction and clear images. This bounded implementation deliberately does not recover arbitrary large tracking failures.
 

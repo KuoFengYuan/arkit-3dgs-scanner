@@ -499,3 +499,7 @@
 "重設相機參數" = "Reset camera settings";
 
 "拍攝品質需要檢查" = "Review capture quality";
+"檢查照片對齊…" = "Checking photo alignment…";
+"照片對齊檢查已通過。" = "The photo alignment check passed.";
+"照片對齊檢查未確認改善，保留原本相機位置。" = "The photo alignment check did not confirm an improvement. Original camera positions preserved.";
+"重疊照片不足以確認修正，保留原本相機位置。" = "Too few overlapping photos to confirm the correction. Original camera positions preserved.";
