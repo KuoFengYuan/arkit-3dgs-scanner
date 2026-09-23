@@ -142,6 +142,21 @@ import ImageIO
         let missing = drifted.map { r -> FrameRecord in var out = r; out.imageFile = "missing.jpg"; return out }
         check(PhotometricPoseValidator.evaluate(input: missing, candidate: exact, directory: dir).status == "insufficientPairs",
               "missing photos are unscored rather than trusted")
+        let invisible = moved(exact) { i, m in
+            correction(m,omega:.zero,shift:i % 2 == 0 ? SIMD3(0,0,1) : .zero)
+        }
+        let lost = PhotometricPoseValidator.evaluate(input:exact,candidate:invisible,directory:dir)
+        check(lost.status == "rejected" && (lost.lowRetentionPairs ?? 0) > 0
+                && (lost.minimumRetainedFraction ?? 1) < 0.9,
+              "moving difficult projections out of depth agreement is rejected, never silently unscored")
+        check((fixed.baselineSamples ?? 0) >= (fixed.retainedSamples ?? 0)
+                && (fixed.retainedSamples ?? 0) > 0 && fixed.lowRetentionPairs == 0,
+              "correct drift retains sufficient baseline-valid samples")
+        check((fixed.wideEffectiveDelta ?? 1) <= (fixed.wideDelta ?? 0),
+              "lost samples carry a penalty even below the rejection threshold")
+        let oldReport = Data(#"{"status":"accepted","adjacentPairs":8,"widePairs":8,"adjacentWorse":0,"seconds":1}"#.utf8)
+        let decoded = try JSONDecoder().decode(PhotometricPoseValidator.Report.self,from:oldReport)
+        check(decoded.accepted && decoded.baselineSamples == nil,"older photo reports remain readable")
         print("\(checks) photometric validation checks passed")
     }
 }

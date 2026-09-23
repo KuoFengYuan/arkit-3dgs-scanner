@@ -105,6 +105,9 @@ import ImageIO
                 && desktop.points.contains { abs($0.z + 2.6) < 0.03 },
               "unbounded desktop export applies the same near-surface exclusion")
 
+        check(desktop.report.exportSampling == "stratifiedBest" && ranged.report.exportSampling == "spatialUniform",
+              "diagnostics identify the actual desktop or bounded export sampler")
+
         func sorted(_ points: [CloudPoint]) -> [CloudPoint] {
             points.sorted { ($0.x, $0.y, $0.z) < ($1.x, $1.y, $1.z) }
         }

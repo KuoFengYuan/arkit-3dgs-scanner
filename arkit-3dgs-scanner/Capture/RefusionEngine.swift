@@ -494,25 +494,45 @@ nonisolated struct FusedVoxelGrid {
         var output: [CloudPoint] = []
         output.reserveCapacity(limit)
         var selected = 0
+        var best: (key: Int64, cell: Cell, rank: UInt64)?
+        func sampleRank(_ key: Int64) -> UInt64 {
+            // Stable pseudo-random choice within each spatial interval avoids striping and
+            // confidence bias against thin/distant surfaces. It never perturbs point values.
+            var x = UInt64(bitPattern:key) &+ 0x9e3779b97f4a7c15
+            x = (x ^ (x >> 30)) &* 0xbf58476d1ce4e5b9
+            x = (x ^ (x >> 27)) &* 0x94d049bb133111eb
+            return x ^ (x >> 31)
+        }
         visited = 0
         func color(_ value: Float) -> UInt8 { UInt8(min(255, max(0, value))) }
+        func quality(_ cell: Cell) -> Float { cell.bestScore * min(1,cell.weight/1.5) }
         for shardIndex in shards.indices {
-            // Dictionary order is stable until mutation; acceptance bits belong to this snapshot.
-            for (index, entry) in shards[shardIndex].enumerated() {
+            // Only one shard's compact Int64 keys are sorted, never a second full cloud/grid.
+            // Stable spatial order removes Dictionary hash-seed dependence at the output cap.
+            var keys: [Int64] = []
+            keys.reserveCapacity(shards[shardIndex].count)
+            for (index,entry) in shards[shardIndex].enumerated() {
                 if visited % 4096 == 0 {
                     guard shouldContinue() else { return nil }
                     progress(0.5 + Double(visited) / Double(total) * 0.5)
                 }
                 visited += 1
-                guard accepted[shardIndex][index / 64] & (UInt64(1) << (index % 64)) != 0 else { continue }
-                let before = selected * limit / max(1, eligible)
+                if accepted[shardIndex][index/64] & (UInt64(1) << (index%64)) != 0 { keys.append(entry.key) }
+            }
+            keys.sort()
+            for (index,key) in keys.enumerated() {
+                if index % 4096 == 0, !shouldContinue() { return nil }
+                guard let cell = shards[shardIndex][key] else { continue }
+                let rank = sampleRank(key)
+                if best == nil || rank < best!.rank { best = (key,cell,rank) }
+                let before = selected * limit / max(1,eligible)
                 selected += 1
-                guard selected * limit / max(1, eligible) > before else { continue }
-                let cell = entry.value
-                if Self.isFar(entry.key) { lastExport.farExported += 1 }
-                output.append(CloudPoint(x: cell.mean.x, y: cell.mean.y, z: cell.mean.z,
-                    r: color(cell.color.x), g: color(cell.color.y), b: color(cell.color.z),
-                    score: cell.bestScore * min(1, cell.weight / 1.5)))
+                guard selected * limit / max(1,eligible) > before, let chosen = best else { continue }
+                let point = chosen.cell
+                if Self.isFar(chosen.key) { lastExport.farExported += 1 }
+                output.append(CloudPoint(x:point.mean.x,y:point.mean.y,z:point.mean.z,
+                    r:color(point.color.x),g:color(point.color.y),b:color(point.color.z),score:quality(point)))
+                best = nil
             }
             shards[shardIndex] = [:]
             accepted[shardIndex] = []
@@ -645,7 +665,7 @@ nonisolated enum RefusionEngine {
     }
 
     struct Report: Codable, Sendable {
-        var version = 7
+        var version = 8
         var status = "running"
         var stage = "frames"
         var totalFrames = 0
@@ -660,6 +680,7 @@ nonisolated enum RefusionEngine {
         var requiredFrameHeadroomBytes: UInt64?
         var outputPoints = 0
         var boundedExport = false
+        var exportSampling: String?
         var finalVoxelSizeM: Float = 0
         var effectiveOutputLimit = 0
         var exportFraction: Double?
@@ -739,6 +760,7 @@ nonisolated enum RefusionEngine {
             : max(0, target ?? config.exportMaxPoints)
         report.effectiveOutputLimit = outputLimit
         report.boundedExport = boundedMemory
+        report.exportSampling = boundedMemory ? "spatialUniform" : "stratifiedBest"
         let initialLimit = initialMemory.map {
             min(cellBudget(configured: config.refuseMaxCells, availableBytes: $0),
                 workingSetCellLimit(megabytes: config.refuseMemoryBudgetMB))

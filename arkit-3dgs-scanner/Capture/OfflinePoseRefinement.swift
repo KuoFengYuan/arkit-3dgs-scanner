@@ -5,7 +5,7 @@ import simd
 /// on the best-effort live worker. LiDAR supplies metric landmarks; no desktop SfM is required.
 nonisolated enum OfflinePoseRefinement {
     struct Report: Codable, Sendable {
-        var version = 5
+        var version = 6
         var status = "pending"
         var inputFrames = 0
         var processedFrames = 0
@@ -23,6 +23,8 @@ nonisolated enum OfflinePoseRefinement {
         var matchingSeconds: Double? = nil
         var bundleAdjustmentSeconds: Double? = nil
         var localSurface: LocalSurfaceRefiner.Report?
+        var localSurfacePilot: LocalSurfaceRefiner.Report?
+        var localSurfaceSkippedReason: String?
         var loopClosure: LoopClosureRefiner.Report?
         /// v5: independent photo-alignment check per candidate stage ("features", "localSurface").
         var photometric: [String: PhotometricPoseValidator.Report]?
@@ -93,65 +95,73 @@ nonisolated enum OfflinePoseRefinement {
         }
         let terminal = ["cancelled","memoryPressure","observationBudgetExceeded","insufficientDepthFrames"]
         if features.report.status == "cancelled" || isCancelled() { return keepInput("cancelled") }
-        var candidates: [(stage: String, result: Result)] = []
-        if features.report.status == "validated", features.report.changedFrames > 0 {
-            candidates.append(("features", features))
-        }
-        if surfaceRefinement, rounds > 0, !terminal.contains(features.report.status) {
-            let local = LocalSurfaceRefiner.run(records:features.records,directory:directory,
-                shouldContinue:{ !isCancelled() && RefusionEngine.hasOptionalProcessingHeadroom },
-                progress:{progress(0.78+$0*0.14)})
-            report.localSurface = local.report
-            if local.report.status == "interrupted" {
-                report.localSurface?.accepted = 0
-                if isCancelled() { return keepInput("cancelled") }
-            } else if local.report.accepted > 0 {
-                var ba = features.ba, localReport = report
-                for r in local.records where r.transform.count == 16 { ba.poses[r.id] = RefusionEngine.float4x4(rowMajor:r.transform) }
-                let original = Dictionary(records.map { ($0.id,$0.transform) },uniquingKeysWith:{$1})
-                localReport.status = "validated"
-                localReport.changedFrames = local.records.filter { original[$0.id] != $0.transform }.count
-                candidates.append(("localSurface", Result(records: local.records, ba: ba, report: localReport)))
-            }
-        }
-        guard !candidates.isEmpty else {
-            var ba = features.ba
-            if report.changedFrames == 0 { ba.poses = [:] }   // nothing moved: keep ARKit mesh support
-            progress(1)
-            return finish(Result(records: features.records, ba: ba, report: report))
-        }
-        guard RefusionEngine.hasOptionalProcessingHeadroom else { return keepInput("memoryPressure") }
-        // Stages are checked in pipeline order, each against the poses it would replace: the first
-        // must improve on the input; a later stage must not harm the accepted one.
-        var applied: Result?
+        var accepted = features
+        var hasAcceptedStage = false
         var photometric: [String: PhotometricPoseValidator.Report] = [:]
-        for (index, candidate) in candidates.enumerated() {
-            let reference = applied?.records ?? records
-            let check = PhotometricPoseValidator.evaluate(input: reference, candidate: candidate.result.records,
-                directory: directory,
-                requiredGain: applied == nil ? PhotometricPoseValidator.requiredWideGain : -PhotometricPoseValidator.adjacentTolerance,
-                isCancelled: isCancelled)
-            photometric[candidate.stage] = check
-            report.photometric = photometric
-            progress(0.92 + 0.08 * Double(index + 1) / Double(candidates.count))
-            if check.status == "cancelled" || isCancelled() { return keepInput("cancelled") }
-            if check.accepted {
-                var result = candidate.result
-                result.report.appliedStage = candidate.stage
-                applied = result
-            } else if applied == nil {
-                break   // later stages were computed from these rejected poses
-            }
-        }
-        if var applied {
-            applied.report.localSurface = report.localSurface
-            applied.report.photometric = photometric
+        func finishAccepted() -> Result {
+            accepted.report.localSurface = report.localSurface
+            accepted.report.localSurfacePilot = report.localSurfacePilot
+            accepted.report.localSurfaceSkippedReason = report.localSurfaceSkippedReason
+            accepted.report.photometric = photometric.isEmpty ? nil : photometric
+            if accepted.report.changedFrames == 0 { accepted.ba.poses = [:] }
             progress(1)
-            return finish(applied)
+            return finish(accepted)
         }
-        progress(1)
-        return keepInput(photometric.values.contains { $0.status == "rejected" }
-                         ? "photometricValidationRejected" : "photometricValidationInsufficient")
+        // Validate features BEFORE spending time on a local stage built from those poses.
+        if features.report.status == "validated", features.report.changedFrames > 0 {
+            guard RefusionEngine.hasOptionalProcessingHeadroom else { return keepInput("memoryPressure") }
+            let check = PhotometricPoseValidator.evaluate(input:records,candidate:features.records,
+                directory:directory,isCancelled:isCancelled)
+            photometric["features"] = check; report.photometric = photometric
+            progress(surfaceRefinement ? 0.82 : 1)
+            if check.status == "cancelled" || isCancelled() { return keepInput("cancelled") }
+            guard check.accepted else {
+                report.localSurfaceSkippedReason = "featurePhotoRejected"
+                return keepInput(check.status == "rejected" ? "photometricValidationRejected" : "photometricValidationInsufficient")
+            }
+            accepted.report.appliedStage = "features"; hasAcceptedStage = true
+        }
+        guard surfaceRefinement, rounds > 0, !terminal.contains(features.report.status) else { return finishAccepted() }
+        guard RefusionEngine.hasOptionalProcessingHeadroom else { return finishAccepted() }
+        let canContinue = { !isCancelled() && RefusionEngine.hasOptionalProcessingHeadroom }
+        let pilot = LocalSurfaceRefiner.run(records:accepted.records,directory:directory,sampleLimit:48,
+            shouldContinue:canContinue,progress:{progress(0.82+$0*0.05)})
+        report.localSurfacePilot = pilot.report
+        if isCancelled() { return keepInput("cancelled") }
+        guard pilot.report.status != "interrupted", pilot.report.accepted > 0 else {
+            report.localSurfaceSkippedReason = pilot.report.status == "interrupted" ? "pilotInterrupted" : "pilotNoImprovement"
+            return finishAccepted()
+        }
+        let requiredGain = hasAcceptedStage ? -PhotometricPoseValidator.adjacentTolerance : PhotometricPoseValidator.requiredWideGain
+        let pilotCheck = PhotometricPoseValidator.evaluate(input:accepted.records,candidate:pilot.records,
+            directory:directory,requiredGain:requiredGain,isCancelled:isCancelled)
+        photometric["localSurfacePilot"] = pilotCheck
+        progress(0.90)
+        if pilotCheck.status == "cancelled" || isCancelled() { return keepInput("cancelled") }
+        guard pilotCheck.accepted else {
+            report.localSurfaceSkippedReason = "pilotPhotoRejected"
+            return finishAccepted()
+        }
+        // A full-coverage pilot can be reused. Otherwise solve the complete trajectory from
+        // the accepted input; never apply only the sampled pilot's corrections.
+        let local = pilot.report.sampledFrames == pilot.report.eligibleFrames ? pilot
+            : LocalSurfaceRefiner.run(records:accepted.records,directory:directory,
+                shouldContinue:canContinue,progress:{progress(0.90+$0*0.07)})
+        report.localSurface = local.report
+        if isCancelled() { return keepInput("cancelled") }
+        guard local.report.status != "interrupted",local.report.accepted > 0 else { return finishAccepted() }
+        let check = pilot.report.sampledFrames == pilot.report.eligibleFrames ? pilotCheck
+            : PhotometricPoseValidator.evaluate(input:accepted.records,candidate:local.records,
+                directory:directory,requiredGain:requiredGain,isCancelled:isCancelled)
+        photometric["localSurface"] = check
+        if check.status == "cancelled" || isCancelled() { return keepInput("cancelled") }
+        guard check.accepted else { return finishAccepted() }
+        accepted.records = local.records
+        for r in local.records where r.transform.count == 16 { accepted.ba.poses[r.id] = RefusionEngine.float4x4(rowMajor:r.transform) }
+        let original = Dictionary(records.map { ($0.id,$0.transform) },uniquingKeysWith:{$1})
+        accepted.report.status = "validated"; accepted.report.appliedStage = "localSurface"
+        accepted.report.changedFrames = local.records.filter { original[$0.id] != $0.transform }.count
+        return finishAccepted()
     }
 
     private static func runFeatures(records: [FrameRecord], directory: URL, rounds: Int,

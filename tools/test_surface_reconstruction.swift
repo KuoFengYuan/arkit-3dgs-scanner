@@ -90,6 +90,10 @@ import ImageIO
         check(!pagedCloud.isEmpty && pagedCloud.count == residentCloud.count,"paging extracts the entire scene across evicted block boundaries")
         check(zip(pagedCloud,residentCloud).allSatisfy { $0.x.bitPattern == $1.x.bitPattern && $0.y.bitPattern == $1.y.bitPattern && $0.z.bitPattern == $1.z.bitPattern && $0.r == $1.r && $0.g == $1.g && $0.b == $1.b },"paged and in-memory TSDF outputs are bit-for-bit identical")
         check(paged.report.peakBlocks <= 8 && paged.report.blockReads > 0 && paged.report.blockWrites > 0,"paging bounds resident blocks while reloading exact observations")
+        check((paged.report.storageWriteOperations ?? Int.max) < paged.report.blockWrites,
+              "contiguous dirty slots share writes without changing complete extracted geometry")
+        check(paged.report.diskBytes <= 256*1_048_576 && (paged.report.storageReadOperations ?? 0) == paged.report.blockReads,
+              "packed slot storage stays bounded and records actual read operations")
         let diskFull = SurfaceTSDF(budgetBytes:SurfaceTSDF.blockBytes,diskBudgetBytes:0)
         check(!diskFull.integrate(plane(-2),camera:.zero,frame:0) && diskFull.report.status == "diskBudgetFallback","disk budget exhaustion cannot publish a partial surface")
         let stopped = SurfaceTSDF()
@@ -157,6 +161,14 @@ import ImageIO
         cfg.pointMaxDepthM = 1.5
         check(prepared.sample(SIMD3(0,0,-2),config:cfg) == nil,"changing thresholds cannot reuse stale quad validity")
         check(prepared.samplingMaskBytes <= (64*48+63)/64*8,"quad validity uses one bit per pixel")
+        let sampled = LocalSurfaceRefiner.sampledOrdinals(count:1000,limit:48)
+        check(sampled.count == 48 && Set(sampled).count == 48 && sampled.first == 1 && sampled.last == 998
+                && sampled.allSatisfy { $0 % 8 != 0 },"pilot samples span the complete route and never move fixed anchors")
+        let pilot = LocalSurfaceRefiner.run(records:thousand,directory:dir,sampleLimit:48)
+        check(pilot.report.attempted == 48 && pilot.report.sampledFrames == 48
+                && pilot.report.eligibleFrames == 874 && pilot.records.map(\.transform) == thousand.map(\.transform),
+              "1000-frame planar pilot bounds solves and leaves an already correct trajectory intact")
+        check(pilot.report.peakDepthFrames <= 3,"pilot has the same three-frame memory bound as the full pass")
         print("\(checks) surface reconstruction checks passed")
     }
     static func benchmark(_ path: String) throws {

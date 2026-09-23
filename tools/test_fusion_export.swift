@@ -50,6 +50,23 @@ import Foundation
         var bad = CloudPoint(x: 0, y: 0, z: 0, r: 1, g: 2, b: 3); bad.score = .infinity
         grid.insert([bad], boundedMemory: true)
         check(grid.count == 0, "nonfinite weights cannot poison fused colors and trap UInt8 conversion")
+        var firstGrid = FusedVoxelGrid(voxelSize:0.02,maxCells:100_000)
+        var reversedGrid = FusedVoxelGrid(voxelSize:0.02,maxCells:100_000)
+        firstGrid.insert(surface,boundedMemory:true)
+        reversedGrid.insert(Array(surface.reversed()),boundedMemory:true)
+        let first = firstGrid.consumeExportPoints(target:4000,minNeighbors:3,shouldContinue:{true},progress:{_ in})!
+        let reversed = reversedGrid.consumeExportPoints(target:4000,minNeighbors:3,shouldContinue:{true},progress:{_ in})!
+        check(first.count == 4000 && zip(first,reversed).allSatisfy {
+            $0.x.bitPattern == $1.x.bitPattern && $0.y.bitPattern == $1.y.bitPattern && $0.z.bitPattern == $1.z.bitPattern
+                && $0.r == $1.r && $0.g == $1.g && $0.b == $1.b && $0.score.bitPattern == $1.score.bitPattern
+        },"capped output is identical across insertion orders and independent Dictionary seeds")
+        let tiles = Set(first.map { SIMD2(Int(floor($0.x/0.2)),Int(floor($0.y/0.2))) })
+        check(tiles.count == 200,"capped planar output retains every occupied 20 cm region")
+        let rail = (0..<200).map { i in CloudPoint(x:4.11,y:Float(i)*0.02+0.01,z:-1.01,r:9,g:8,b:7,score:0.05) }
+        var mixed = FusedVoxelGrid(voxelSize:0.02,maxCells:100_000)
+        mixed.insert(surface+rail,boundedMemory:true)
+        let capped = mixed.consumeExportPoints(target:4000,minNeighbors:0,shouldContinue:{true},progress:{_ in})!
+        check(capped.filter { $0.x > 4 }.count >= 25,"low-confidence thin geometry retains samples beside a dense wall at the cap")
         print("\(checks) fusion export checks passed")
     }
 }
