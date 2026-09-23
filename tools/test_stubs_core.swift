@@ -7,7 +7,7 @@ import simd
 struct CameraIntrinsics { var fx, fy, cx, cy: Double; var width, height: Int }
 enum BlurVerdict { case keep, demote, drop }
 struct FrameRecord { var id: Int; var transform: [Double]; var intrinsics: CameraIntrinsics
-                     var blurVerdict: BlurVerdict = .keep }
+                     var blurVerdict: BlurVerdict = .keep; var timestamp: Double = 0 }
 enum RefusionEngine {
     static func float4x4(rowMajor m: [Double]) -> simd_float4x4 {
         var o = matrix_identity_float4x4

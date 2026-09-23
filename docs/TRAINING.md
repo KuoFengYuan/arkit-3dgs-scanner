@@ -26,7 +26,7 @@ Check conversion options and selected-frame handling for your input rather than 
 
 ## Pose refinement and missing tracks
 
-The app uses corrected anchors and, when validation passes, LiDAR-guided local BA. Failed validation retains prior poses. Refusion uses the matching pose set; changing cameras independently from the initialization cloud can create inconsistency.
+The app uses corrected anchors and, when held-out tracks and the [photo-alignment check](POSE_REFINEMENT.md) pass, LiDAR-guided bundle adjustment. Failed validation retains prior poses. Remaining errors that the phone does not model, such as rolling shutter, can still benefit from a trainer's own camera optimization when available. Refusion uses the matching pose set; changing cameras independently from the initialization cloud can create inconsistency.
 
 Empty image observations and point tracks are valid for this exported seed model, but a bundle adjuster cannot reconstruct missing correspondences by itself. A desktop refinement pipeline would need feature extraction, matching, consistent camera/image IDs, triangulation, and validation before BA. See COLMAP's [known-camera-pose reconstruction discussion](https://colmap.github.io/faq.html#reconstruct-sparse-dense-model-from-known-camera-poses). Pose changes require corresponding cloud realignment or refusion. The phone pipeline does not require running desktop COLMAP.
 

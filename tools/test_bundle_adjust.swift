@@ -99,8 +99,34 @@ import simd
 
     static func records(_ poses: [simd_float4x4]) -> [FrameRecord] {
         poses.enumerated().map { i, m in
-            FrameRecord(id: i, transform: rowMajor(m), intrinsics: K)
+            FrameRecord(id: i, transform: rowMajor(m), intrinsics: K, timestamp: Double(i) * 0.2)
         }
+    }
+
+    /// ARKit-like error: accurate local motion with slowly accumulating drift, plus tiny jitter.
+    static func drift(_ poses: [simd_float4x4], transM: Float, rotDeg: Float, jitterM: Float) -> [simd_float4x4] {
+        let axis = simd_normalize(SIMD3<Float>(0.3, 1, -0.2)), direction = simd_normalize(SIMD3<Float>(1, 0.2, 0.5))
+        return poses.enumerated().map { i, m in
+            let f = Float(i) / Float(max(1, poses.count - 1))
+            let c = SIMD3(m.columns.3.x, m.columns.3.y, m.columns.3.z)
+            let jitter = SIMD3<Float>(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5) * (2 * jitterM)
+            let d = PoseRefiner.deltaTransform(omega: axis * (f * rotDeg * .pi / 180),
+                                               trans: direction * (f * transM) + jitter, about: c)
+            return d * m
+        }
+    }
+
+    /// Mean error of consecutive relative motion (cm, degrees): what ARKit gets right locally.
+    static func relativeError(_ truth: [simd_float4x4], _ b: [simd_float4x4]) -> (cm: Double, deg: Double) {
+        var st = 0.0, sr = 0.0
+        for k in 0..<(truth.count - 1) {
+            let e = (b[k].inverse * b[k + 1]).inverse * (truth[k].inverse * truth[k + 1])
+            st += Double(simd_length(SIMD3(e.columns.3.x, e.columns.3.y, e.columns.3.z)))
+            let tr = min(3, max(-1, e.columns.0.x + e.columns.1.y + e.columns.2.z))
+            sr += Double(acos((tr - 1) / 2)) * 180 / .pi
+        }
+        let n = Double(truth.count - 1)
+        return (st / n * 100, sr / n)
     }
 
     static func rowMajor(_ m: simd_float4x4) -> [Double] {
@@ -205,7 +231,7 @@ import simd
             let obs = observations(points: pts, poses: truth, noisePx: 0, noiseDepthM: 0)
             let bad = perturb(truth, transM: tm, rotDeg: rd)
             let e0 = poseError(truth, alignRigid(bad, to: truth))
-            let r = BundleAdjuster.refine(records: records(bad), observations: obs, rounds: 8)
+            let r = BundleAdjuster.refine(records: records(bad), observations: obs, rounds: 8, options: .legacy)
             let fixed = (0..<truth.count).map { r.poses[$0] ?? bad[$0] }
             let e1 = poseError(truth, alignRigid(fixed, to: truth))
             check(e1.cm < e0.cm * 0.5 && e1.deg < e0.deg * 0.5,
@@ -220,7 +246,7 @@ import simd
         let obsN = observations(points: pts, poses: truth, noisePx: 0.5, noiseDepthM: 0.005)
         let badN = perturb(truth, transM: 0.02, rotDeg: 0.4)
         let e0 = poseError(truth, alignRigid(badN, to: truth))
-        let rN = BundleAdjuster.refine(records: records(badN), observations: obsN, rounds: 8)
+        let rN = BundleAdjuster.refine(records: records(badN), observations: obsN, rounds: 8, options: .legacy)
         let fixedN = (0..<truth.count).map { rN.poses[$0] ?? badN[$0] }
         let e1 = poseError(truth, alignRigid(fixedN, to: truth))
         check(e1.cm < e0.cm * 0.7,
@@ -238,7 +264,7 @@ import simd
             return o
         }
         let z0 = poseError(truth, alignRigid(badZ, to: truth))
-        let rZ = BundleAdjuster.refine(records: records(badZ), observations: obsZ, rounds: 8)
+        let rZ = BundleAdjuster.refine(records: records(badZ), observations: obsZ, rounds: 8, options: .legacy)
         let fixedZ = (0..<truth.count).map { rZ.poses[$0] ?? badZ[$0] }
         let z1 = poseError(truth, alignRigid(fixedZ, to: truth))
         // 這個方向是**結構性的弱方向**，不是 bug。
@@ -256,7 +282,7 @@ import simd
         // ── 4. 已經是真值時不該亂動 ──
         seed = 5
         let obsT = observations(points: pts, poses: truth, noisePx: 0, noiseDepthM: 0)
-        let rT = BundleAdjuster.refine(records: records(truth), observations: obsT, rounds: 5)
+        let rT = BundleAdjuster.refine(records: records(truth), observations: obsT, rounds: 5, options: .legacy)
         let fixedT = (0..<truth.count).map { rT.poses[$0] ?? truth[$0] }
         let eT = poseError(truth, alignRigid(fixedT, to: truth))
         check(eT.cm < 0.2, String(format: "已是真值 → 位姿只動了 %.3f cm（應接近 0）", eT.cm))
@@ -269,7 +295,7 @@ import simd
         }
         let bad5 = perturb(truth, transM: 0.02, rotDeg: 0.3)
         let j0 = poseError(truth, alignRigid(bad5, to: truth))
-        let rJ = BundleAdjuster.refine(records: records(bad5), observations: junk, rounds: 5)
+        let rJ = BundleAdjuster.refine(records: records(bad5), observations: junk, rounds: 5, options: .legacy)
         let fixedJ = (0..<truth.count).map { rJ.poses[$0] ?? bad5[$0] }
         let j1 = poseError(truth, alignRigid(fixedJ, to: truth))
         check(j1.cm < j0.cm * 1.3,
@@ -292,13 +318,94 @@ import simd
         // 若這一項失敗，保留集就跟其他數字一樣沒有判別力，實機 log 會再次誤導我。
         seed = 8888
         let obsNoisy = observations(points: pts, poses: truth, noisePx: 3.0, noiseDepthM: 0.03)
-        let rF = BundleAdjuster.refine(records: records(truth), observations: obsNoisy, rounds: 10)
+        let rF = BundleAdjuster.refine(records: records(truth), observations: obsNoisy, rounds: 10, options: .legacy)
         let objDrop = (rF.residualsPx.first ?? 1) > 1e-6
             ? (1 - (rF.residualsPx.last ?? 0) / (rF.residualsPx.first ?? 1)) * 100 : 0
         check((rF.holdoutDelta ?? 0) > -0.03,
               String(format: "保留集｜無位姿誤差、只有雜訊(3px/3cm) → 目標函數假性改善 %.0f%%，"
                      + "保留集 %+.0f%%（不得聲稱變好）",
                      objDrop, (rF.holdoutDelta ?? 0) * 100))
+
+        // ── Joint solve (default): ARKit relative-motion priors ──
+        print("\nJoint solve with ARKit relative-motion priors (default options):")
+        seed = 2026
+        let obsD = observations(points: pts, poses: truth, noisePx: 0.5, noiseDepthM: 0.005)
+        let drifted = drift(truth, transM: 0.03, rotDeg: 0.6, jitterM: 0.0005)
+        let d0 = poseError(truth, alignRigid(drifted, to: truth)), rpe0 = relativeError(truth, drifted)
+        let rD = BundleAdjuster.refine(records: records(drifted), observations: obsD, rounds: 8)
+        let fixedD = (0..<truth.count).map { rD.poses[$0] ?? drifted[$0] }
+        let d1 = poseError(truth, alignRigid(fixedD, to: truth)), rpe1 = relativeError(truth, fixedD)
+        check(d1.cm < d0.cm * 0.6 && d1.deg < d0.deg * 0.6,
+              String(format: "smooth drift 3cm/0.6° → %.2fcm/%.3f° → %.2fcm/%.3f°", d0.cm, d0.deg, d1.cm, d1.deg))
+        let rP = BundleAdjuster.refine(records: records(drifted), observations: obsD, rounds: 8, options: .legacy)
+        let fixedP = (0..<truth.count).map { rP.poses[$0] ?? drifted[$0] }
+        let rpeP = relativeError(truth, fixedP)
+        check(rpe1.cm <= max(rpe0.cm * 1.2, 0.05) && rpe1.cm < rpeP.cm,
+              String(format: "relative motion error %.3fcm (input) → joint %.3fcm vs per-frame %.3fcm", rpe0.cm, rpe1.cm, rpeP.cm))
+        check((rD.holdoutDelta ?? 0) < -0.05,
+              String(format: "held-out tracks confirm the drift correction: %.2f → %.2f px",
+                     rD.holdoutMedianPx?.before ?? 0, rD.holdoutMedianPx?.after ?? 0))
+
+        seed = 77
+        let rZJ = BundleAdjuster.refine(records: records(badZ), observations: obsZ, rounds: 8)
+        let zJ = poseError(truth, alignRigid((0..<truth.count).map { rZJ.poses[$0] ?? badZ[$0] }, to: truth))
+        check(zJ.cm < z0.cm * 0.95, String(format: "along-ray 3cm shift → %.2fcm → %.2fcm (LiDAR-mean tracks keep scale)", z0.cm, zJ.cm))
+        var tracked = BundleAdjuster.Options(); tracked.optimizeTracks = true
+        let rZT = BundleAdjuster.refine(records: records(badZ), observations: obsZ, rounds: 8, options: tracked)
+        let zT = poseError(truth, alignRigid((0..<truth.count).map { rZT.poses[$0] ?? badZ[$0] }, to: truth))
+        check(zT.cm > zJ.cm, String(format: "optimised track points absorb the scale-like shift (%.2fcm), so they stay off", zT.cm))
+
+        seed = 5
+        let rTJ = BundleAdjuster.refine(records: records(truth), observations: obsT, rounds: 5)
+        let tJ = poseError(truth, alignRigid((0..<truth.count).map { rTJ.poses[$0] ?? truth[$0] }, to: truth))
+        check(tJ.cm < 0.2, String(format: "exact poses stay put: %.3f cm", tJ.cm))
+        let rJJ = BundleAdjuster.refine(records: records(bad5), observations: junk, rounds: 5)
+        let jJ = poseError(truth, alignRigid((0..<truth.count).map { rJJ.poses[$0] ?? bad5[$0] }, to: truth))
+        check(jJ.cm < j0.cm * 1.3, String(format: "junk observations → %.2f → %.2f cm (not worse)", j0.cm, jJ.cm))
+        let rFJ = BundleAdjuster.refine(records: records(truth), observations: obsNoisy, rounds: 10)
+        check((rFJ.holdoutDelta ?? 0) > -0.03,
+              String(format: "noise-only holdout does not claim improvement: %+.0f%%", (rFJ.holdoutDelta ?? 0) * 100))
+        seed = 999
+        let obsI = observations(points: pts, poses: truth, noisePx: 0, noiseDepthM: 0)
+        let badI = perturb(truth, transM: 0.03, rotDeg: 0.5)
+        let i0 = poseError(truth, alignRigid(badI, to: truth))
+        let rI = BundleAdjuster.refine(records: records(badI), observations: obsI, rounds: 8)
+        let i1 = poseError(truth, alignRigid((0..<truth.count).map { rI.poses[$0] ?? badI[$0] }, to: truth))
+        // Independent per-frame jumps contradict ARKit's accurate local motion, which the prior
+        // encodes; they are corrected only partly by design (tracking gaps > 0.5 s break the chain).
+        check(i1.cm < i0.cm, String(format: "independent per-frame 3cm jitter (unlike ARKit) is not made worse: %.2f → %.2f cm", i0.cm, i1.cm))
+
+        // Block-tridiagonal solver equals a dense solve.
+        let n = 5
+        var diag: [[Double]] = [], upper: [[Double]?] = [], rhs: [[Double]] = []
+        for k in 0..<n {
+            var m = [Double](repeating: 0, count: 36)
+            for i in 0..<6 { for j in 0..<6 { m[i * 6 + j] = Double(rnd() - 0.5) } }
+            var spd = [Double](repeating: 0, count: 36)
+            for i in 0..<6 { for j in 0..<6 { for t in 0..<6 { spd[i * 6 + j] += m[t * 6 + i] * m[t * 6 + j] } } }
+            for i in 0..<6 { spd[i * 6 + i] += 12 }
+            diag.append(spd); rhs.append((0..<6).map { _ in Double(rnd() - 0.5) })
+            upper.append(k == n - 1 || k == 2 ? nil : (0..<36).map { _ in Double(rnd() - 0.5) })
+        }
+        let x = BundleAdjuster.solveBlockTridiagonal(diagonal: diag, upper: upper, rhs: rhs)!
+        var worst = 0.0
+        for k in 0..<n {
+            for i in 0..<6 {
+                var sum = 0.0
+                for j in 0..<6 { sum += diag[k][i * 6 + j] * x[k][j] }
+                if k + 1 < n, let u = upper[k] { for j in 0..<6 { sum += u[i * 6 + j] * x[k + 1][j] } }
+                if k > 0, let u = upper[k - 1] { for j in 0..<6 { sum += u[j * 6 + i] * x[k - 1][j] } }
+                worst = max(worst, abs(sum - rhs[k][i]))
+            }
+        }
+        check(worst < 1e-9, String(format: "block-tridiagonal solve residual %.1e (dense check)", worst))
+
+        let c3 = SIMD3(truth[3].columns.3.x, truth[3].columns.3.y, truth[3].columns.3.z)
+        let moved = PoseRefiner.deltaTransform(omega: SIMD3(0.01, -0.02, 0.005), trans: SIMD3(0.03, 0.01, -0.02),
+                                               about: c3) * truth[3]
+        let e = BundleAdjuster.correction(moved, from: truth[3])
+        let expected = [0.01, -0.02, 0.005, 0.03, 0.01, -0.02]
+        check(zip(e, expected).allSatisfy { abs($0 - $1) < 1e-5 }, "pose correction recovers rotation vector and centre shift")
 
         print()
         print(fails == 0 ? "全部通過 — 局部 BA 驗證完成" : "\(fails) 項失敗")

@@ -362,6 +362,44 @@ nonisolated enum FeatureExtractor {
         return (out, stats)
     }
 
+    /// Förstner corner refinement on a full-resolution luminance image: the point where the image
+    /// gradients around a corner are orthogonal to their offsets from it. Detection runs on a
+    /// stride-2 grid of a half-resolution image, which quantises coordinates to 4 px; this
+    /// recovers sub-pixel positions. nil keeps the original position (edge-like structure,
+    /// image border, or a solution outside the detection cell).
+    static func refineCorner(pixels p: UnsafePointer<UInt8>, width w: Int, height h: Int, rowBytes: Int,
+                             u: Float, v: Float, radius: Int = 5) -> (u: Float, v: Float)? {
+        var q = SIMD2<Float>(u, v)
+        let sigma2 = Float(radius * radius) / 2
+        for _ in 0..<6 {
+            let cx = Int(q.x.rounded()), cy = Int(q.y.rounded())
+            guard cx - radius - 1 >= 0, cy - radius - 1 >= 0, cx + radius + 1 < w, cy + radius + 1 < h else { return nil }
+            var a00: Float = 0, a01: Float = 0, a11: Float = 0, b0: Float = 0, b1: Float = 0
+            for dy in -radius...radius {
+                let row = p + (cy + dy) * rowBytes
+                for dx in -radius...radius {
+                    let x = cx + dx
+                    let gx = (Float(row[x + 1]) - Float(row[x - 1])) * 0.5
+                    let gy = (Float((row + rowBytes)[x]) - Float((row - rowBytes)[x])) * 0.5
+                    let weight = exp(-Float(dx * dx + dy * dy) / (2 * sigma2))
+                    let xx = weight * gx * gx, xy = weight * gx * gy, yy = weight * gy * gy
+                    a00 += xx; a01 += xy; a11 += yy
+                    b0 += xx * Float(x) + xy * Float(cy + dy)
+                    b1 += xy * Float(x) + yy * Float(cy + dy)
+                }
+            }
+            let det = a00 * a11 - a01 * a01, trace = a00 + a11
+            let smaller = trace / 2 - ((trace * trace / 4 - det).squareRoot())
+            guard det > 1e-6, smaller.isFinite, smaller > 0.1 * (trace - smaller) else { return nil }
+            let next = SIMD2<Float>((a11 * b0 - a01 * b1) / det, (a00 * b1 - a01 * b0) / det)
+            let step = simd_distance(next, q)
+            q = next
+            if step < 0.02 { break }
+        }
+        guard q.x.isFinite, q.y.isFinite, simd_distance(q, SIMD2(u, v)) <= 2.5 else { return nil }
+        return (q.x, q.y)
+    }
+
     /// ZNCC。兩個 patch 都已預先算好 mean 與 invNorm，故只剩一次點積。
     /// 對曝光變化免疫 —— 掃描中 AE 會變，SSD 在這種情況下不可靠。
     @inline(__always)
@@ -394,16 +432,21 @@ actor FeatureTracker {
     private let observationsPerFrame: Int
     private let anchorIDs: Set<Int>
     private let verifyReciprocal: Bool
+    private let recentFrames: Int
     private var discardedObservations = 0
     private var processedFrames = 0
     private var totalFeatures = 0
 
+    /// - recentFrames: descriptor frames kept for matching besides the fixed anchors.
+    /// - maxAnchors: fixed route references kept for revisit matching.
     init(observationLimit: Int = 200_000, observationsPerFrame: Int = 2400,
-         anchorIDs: Set<Int> = [], verifyReciprocal: Bool = false) {
+         anchorIDs: Set<Int> = [], verifyReciprocal: Bool = false,
+         recentFrames: Int = FeatureParams.matchAgainstRecent, maxAnchors: Int = 4) {
         self.observationLimit = max(0, observationLimit)
         self.observationsPerFrame = max(0, observationsPerFrame)
-        self.anchorIDs = Set(anchorIDs.sorted().prefix(4))
+        self.anchorIDs = Set(anchorIDs.sorted().prefix(max(0, maxAnchors)))
         self.verifyReciprocal = verifyReciprocal
+        self.recentFrames = max(1, recentFrames)
     }
 
     func retainedState() -> (descriptorFrames: Int, archivedObservations: Int, discardedObservations: Int) {
@@ -507,7 +550,7 @@ actor FeatureTracker {
         totalFeatures += feats.count
         // Older descriptors can never be matched again. Preserve compact BA observations,
         // not every 9x9 patch from the entire scan. Recent-frame track IDs remain mutable.
-        if frames.filter({ !anchorIDs.contains($0.frameID) }).count > FeatureParams.matchAgainstRecent,
+        if frames.filter({ !anchorIDs.contains($0.frameID) }).count > recentFrames,
            let i = frames.firstIndex(where: { !anchorIDs.contains($0.frameID) }) {
             let old = frames.remove(at: i)
             archivedObservations.append(contentsOf: compact(old))

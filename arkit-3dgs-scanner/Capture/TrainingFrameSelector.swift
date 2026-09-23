@@ -176,4 +176,23 @@ nonisolated enum ScanImageDecoder {
         }
         return ok ? Gray(pixels: pixels, width: w, height: h) : nil
     }
+
+    /// Native-resolution luminance for sub-pixel feature refinement; same sensor orientation.
+    static func fullGray(_ record: FrameRecord, directory: URL) -> Gray? {
+        guard record.imageFile == (record.imageFile as NSString).lastPathComponent,
+              record.intrinsics.width > 0, record.intrinsics.height > 0,
+              record.intrinsics.width <= 8192, record.intrinsics.height <= 8192 else { return nil }
+        let url = directory.appendingPathComponent("images").appendingPathComponent(record.imageFile)
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary),
+              image.width == record.intrinsics.width, image.height == record.intrinsics.height else { return nil }
+        let w = image.width, h = image.height
+        var pixels = [UInt8](repeating: 0, count: w*h)
+        let ok = pixels.withUnsafeMutableBytes { raw -> Bool in
+            guard let ctx = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                                      bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: 0) else { return false }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h)); return true
+        }
+        return ok ? Gray(pixels: pixels, width: w, height: h) : nil
+    }
 }

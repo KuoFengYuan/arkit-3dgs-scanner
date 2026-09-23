@@ -23,6 +23,14 @@
 //  每輪都量修正前後的重投影 RMS，沒下降就回退並停止。
 //  但那是 BA 自己最小化的量 —— 見下方 kHoldoutEvery，還需要一個目標函數外的證人。
 //
+//  ── Joint solve (default) ─────────────────────────────────────
+//  Real-scan replays showed the per-frame solve above makes adjacent photos line up worse:
+//  each frame re-fits its own feature noise and LiDAR bias. The default now solves all frames
+//  together with ARKit's frame-to-frame motion as a prior (block-tridiagonal normal equations)
+//  and a range-dependent depth noise model; see Options and docs/POSE_REFINEMENT.md.
+//  OfflinePoseRefinement additionally requires PhotometricPoseValidator to accept the result.
+//  The per-frame path remains available as Options.legacy.
+//
 
 import Foundation
 import simd
@@ -63,6 +71,8 @@ nonisolated enum BundleAdjuster {
     /// （d=2m、fx=1450 時 1cm 深度誤差 ≈ 7.25 px，正好與橫向誤差同量級）——
     /// 兩種殘差因此可以直接相加，不必另外調係數。
     static let kDepthWeight: Float = 1.0
+    // kDepthHuberPx / the fx/d weighting above apply to Options.legacy; the default divides depth
+    // errors by Options.depthSigma(d) instead.
 
     /// 交叉驗證：每 N 條 track 抽 1 條**完全不參與求解**，只用來當目標函數外的證人。
     ///
@@ -100,6 +110,68 @@ nonisolated enum BundleAdjuster {
     /// 取 3% 是為了擋住量測本身的抖動，不是為了切在兩群之間。
     static let kHoldoutGate: Double = -0.03
 
+    struct Options: Sendable {
+        /// Feature depth residuals use sigma(d) = base + perSquareMeter × d², in meters.
+        /// Replays measured frame-level LiDAR offsets near 1 cm up close and several cm beyond
+        /// 3 m. The legacy fx/d scaling treated depth as ~1.5 mm accurate at 2 m, so every frame
+        /// absorbed its own depth bias along the view ray and adjacent photos lined up worse.
+        var legacyDepthWeighting = false
+        var depthSigmaBaseM: Float = 0.005
+        var depthSigmaPerSquareMeter: Float = 0.0022
+        /// Huber threshold for normalized depth residuals (in sigmas).
+        var depthHuber: Float = 2
+        /// Joint solve over all frames with ARKit's relative motion between consecutive keyframes
+        /// as a prior. ARKit is locally accurate (adjacent-photo NCC ~0.98-0.99), so refinement
+        /// should move neighbouring frames together instead of re-fitting each frame alone.
+        /// Real-scan replays peaked at 0.3 mm / 0.01° per step (looser 1-2 mm / 0.05-0.1° and
+        /// tighter 0.1 mm / 0.003° both aligned wide-baseline photos less well).
+        var jointSolve = true
+        var priorTranslationM: Float = 0.0003
+        var priorRotationRad: Float = 0.01 * .pi / 180
+        /// Optional allowance growing with the step: sigma += fraction × |translation or angle|.
+        var priorMotionFraction: Float = 0
+        var priorMaxGapS: Double = 0.5
+        /// Gauss-Newton iterations of the joint solve. Structure is re-derived from LiDAR each
+        /// iteration, so low-frequency drift needs more than the per-frame solver's six rounds.
+        var jointIterations = 30
+        /// Weak pull toward the input poses; also fixes the global gauge of the joint system.
+        var anchorTranslationM: Float = 0.05
+        var anchorRotationRad: Float = 1 * .pi / 180
+        /// Re-estimate each track point from reprojection plus the depth prior instead of the plain
+        /// mean of LiDAR back-projections. Off: with the realistic (weaker) depth prior, optimised
+        /// points can follow scale-like pose errors (a synthetic along-ray shift worsened under a
+        /// looser motion prior), LiDAR-mean points keep structure metric, and real replays showed
+        /// no gain.
+        var optimizeTracks = false
+        /// Held-out feature tracks must improve by this fraction (negative = better); nil skips it
+        /// for diagnostics only.
+        var holdoutGate: Double? = BundleAdjuster.kHoldoutGate
+        /// Offline track building (OfflinePoseRefinement): descriptor frames matched besides fixed
+        /// route anchors, the anchor count, and full-resolution sub-pixel feature positions.
+        var recentMatchFrames = 4          // FeatureParams.matchAgainstRecent
+        var anchorFrames = 4
+        var subpixelFeatures = false
+        init() {}
+
+        /// Earlier per-frame solver with fx/d depth weighting, kept for A/B replays and its tests.
+        static var legacy: Options {
+            var options = Options()
+            options.legacyDepthWeighting = true
+            options.jointSolve = false
+            options.optimizeTracks = false
+            return options
+        }
+
+        @inline(__always)
+        func depthSigma(_ depth: Float) -> Float { depthSigmaBaseM + depthSigmaPerSquareMeter * depth * depth }
+
+        /// Scale converting a depth error in meters into residual units, and its Huber threshold.
+        @inline(__always)
+        func depthScale(observed: Float, predicted: Float, fx: Float) -> (scale: Float, huber: Float) {
+            legacyDepthWeighting ? ((fx / predicted) * kDepthWeight, kDepthHuberPx) : (1 / depthSigma(observed), depthHuber)
+        }
+    }
+
     /// 觀測深度的中位數 —— 像素 ↔ 公分的換算尺度。用中位數而非平均，
     /// 因為深度分佈長尾（遠處的牆會把平均拉走）。
     static func medianDepth(_ obs: [FeatureObservation]) -> Float {
@@ -114,7 +186,8 @@ nonisolated enum BundleAdjuster {
     /// - records: 關鍵幀（transform 為初值，來自 ARKit＋錨點修正）
     /// - observations: 掃描時同步建立的跨幀對應（見 FeatureTracker）
     static func refine(records: [FrameRecord], observations: [FeatureObservation],
-                       rounds: Int, isCancelled: () -> Bool = { false }) -> PoseRefineResult {
+                       rounds: Int, options: Options = Options(),
+                       isCancelled: () -> Bool = { false }) -> PoseRefineResult {
         var result = PoseRefineResult()
         guard rounds > 0, !observations.isEmpty, !isCancelled() else {
             result.rejectionReason = isCancelled() ? "cancelled" : "noObservations"
@@ -126,11 +199,17 @@ nonisolated enum BundleAdjuster {
         var poses: [Int: simd_float4x4] = [:]
         var intr: [Int: CameraIntrinsics] = [:]
         var obsByFrame: [Int: [FeatureObservation]] = [:]
-        for r in records where r.blurVerdict != .drop {
+        var times: [Int: Double] = [:]
+        for r in records where r.blurVerdict != .drop && r.transform.count == 16 && r.transform.allSatisfy(\.isFinite) {
             poses[r.id] = RefusionEngine.float4x4(rowMajor: r.transform)
             intr[r.id] = r.intrinsics
+            times[r.id] = r.timestamp
             order.append(r.id)
         }
+        // Every usable frame, in capture order: the joint solve moves frames with few features
+        // together with their neighbours instead of leaving them at the old pose.
+        let chain = order.sorted { (times[$0] ?? 0, $0) < (times[$1] ?? 0, $1) }
+        let initialPoses = poses
         // 保留集：以 track 為單位切出來，完全不進求解（見 kHoldoutEvery）
         var heldByFrame: [Int: [FeatureObservation]] = [:]
         var heldTracks = Set<Int>()
@@ -169,15 +248,25 @@ nonisolated enum BundleAdjuster {
         /// 而且那些錯誤的症狀全是「沒效果」而不是「壞掉」。
         func runRounds(fit: [Int: [FeatureObservation]], from start: [Int: simd_float4x4])
             -> (poses: [Int: simd_float4x4], residuals: [Float], rounds: Int) {
+            if options.jointSolve {
+                return jointRounds(chain: chain, initial: initialPoses, start: start, times: times, intr: intr,
+                                   fit: fit, rounds: max(rounds, options.jointIterations), options: options,
+                                   isCancelled: isCancelled)
+            }
+            func points(_ p: [Int: simd_float4x4]) -> [Int: SIMD3<Float>] {
+                options.optimizeTracks
+                    ? optimizedTrackPoints(p, frames: order, intr: intr, obsByFrame: fit, options: options)
+                    : trackPointsFor(p, order: order, intr: intr, obsByFrame: fit)
+            }
             var poses = start
             var best = start
             var res: [Float] = []
             var applied = 0
             for _ in 0..<rounds {
                 if isCancelled() { break }
-                let pts = trackPointsFor(poses, order: order, intr: intr, obsByFrame: fit)
+                let pts = points(poses)
                 let rBefore = residuals(order: order, poses: poses, intr: intr,
-                                        obsByFrame: fit, points: pts)
+                                        obsByFrame: fit, points: pts, options: options)
                 if res.isEmpty { res.append(rBefore.total) }
 
                 // 逐幀獨立求解（結構固定 ⇒ 相機之間解耦）
@@ -185,7 +274,7 @@ nonisolated enum BundleAdjuster {
                 for id in order {
                     if isCancelled() { break }
                     guard let c2w = poses[id], let K = intr[id], let obs = fit[id] else { continue }
-                    if let d = solveFrame(c2w: c2w, K: K, obs: obs, points: pts) {
+                    if let d = solveFrame(c2w: c2w, K: K, obs: obs, points: pts, options: options) {
                         deltas[id] = d
                     }
                 }
@@ -199,9 +288,7 @@ nonisolated enum BundleAdjuster {
                 var candidate = poses
                 for (id, d) in deltas { if let c = candidate[id] { candidate[id] = d * c } }
                 let rAfter = residuals(order: order, poses: candidate, intr: intr,
-                                       obsByFrame: fit,
-                                       points: trackPointsFor(candidate, order: order,
-                                                              intr: intr, obsByFrame: fit))
+                                       obsByFrame: fit, points: points(candidate), options: options)
                 // 自我驗證用 **robust 成本**（＝求解實際最小化的量），不用原始 RMS。
                 // 原始 RMS 被少數誤匹配主導：一輪可能把 inlier 改善很多、RMS 卻沒降，
                 // 於是被誤判為「沒變好」而提早停止（實機 BA 卡在 8% 改善的成因）。
@@ -234,7 +321,7 @@ nonisolated enum BundleAdjuster {
         // 房間尺度 2~3m 則與深度取樣雜訊同量級 → BA 只是把雜訊擬合得更好。
         // 這是幾何決定的，不是可以調的參數；而保留集每次掃描都算得出來，
         // 就讓它自己決定。我猜一個預設值只會在另一半的情況下猜錯。
-        let pass = (result.holdoutDelta ?? 0) < kHoldoutGate
+        let pass = options.holdoutGate.map { (result.holdoutDelta ?? 0) < $0 } ?? true
         if pass && !isCancelled() {
             // Apply the exact solution evaluated on untouched tracks. Re-fitting on the held-out
             // tracks would produce a different, unvalidated solution and invalidate this gate.
@@ -250,7 +337,8 @@ nonisolated enum BundleAdjuster {
             let rEnd = residuals(order: order, poses: gate.poses, intr: intr,
                                  obsByFrame: obsByFrame,
                                  points: trackPointsFor(gate.poses, order: order,
-                                                        intr: intr, obsByFrame: obsByFrame))
+                                                        intr: intr, obsByFrame: obsByFrame),
+                                 options: options)
             // **像素 → 公分要用這次掃描的實際工作距離。**
             //
             // 先前硬寫 d=2m。那在房間尺度還算合理，但這個專案也會拿來掃小物件 ——
@@ -306,7 +394,7 @@ nonisolated enum BundleAdjuster {
     ///     ∂v/∂(X,Y,Z) = ( 0,     fy/Z,  −Y·fy/Z²)
     static func solveFrame(c2w: simd_float4x4, K: CameraIntrinsics,
                            obs: [FeatureObservation],
-                           points: [Int: SIMD3<Float>]) -> simd_float4x4? {
+                           points: [Int: SIMD3<Float>], options: Options = Options()) -> simd_float4x4? {
         let w2c = c2w.inverse
         let camPos = SIMD3<Float>(c2w.columns.3.x, c2w.columns.3.y, c2w.columns.3.z)
         let fx = Float(K.fx), fy = Float(K.fy), cx = Float(K.cx), cy = Float(K.cy)
@@ -380,13 +468,14 @@ nonisolated enum BundleAdjuster {
             // 權重 fx/d 把公尺換算成同尺度的像素，故可與上面兩列直接相加。
             if kDepthWeight > 0 {
                 let d = -Z
-                let rd = (d - o.depth) * (fx / d) * kDepthWeight
+                let (scale, huber) = options.depthScale(observed: o.depth, predicted: d, fx: fx)
+                let rd = (d - o.depth) * scale
                 // ∂(−Z)/∂x = −(∂Pc/∂x 的 z 分量)
-                let dwt = min(Float(1), kDepthHuberPx / max(kDepthHuberPx, abs(rd))).squareRoot()
+                let dwt = min(Float(1), huber / max(huber, abs(rd))).squareRoot()
                 var rowD = [Float](repeating: 0, count: 6)
                 for i in 0..<3 {
-                    rowD[i] = -dOmega[i].z * (fx / d) * kDepthWeight * dwt
-                    rowD[i + 3] = -dT[i].z * (fx / d) * kDepthWeight * dwt
+                    rowD[i] = -dOmega[i].z * scale * dwt
+                    rowD[i + 3] = -dT[i].z * scale * dwt
                 }
                 let bd = -rd * dwt        // 殘差定義為 (量測 − 預測)，與上面的 ru/rv 一致
                 for i in 0..<6 {
@@ -463,7 +552,7 @@ nonisolated enum BundleAdjuster {
     static func residuals(order: [Int], poses: [Int: simd_float4x4],
                           intr: [Int: CameraIntrinsics],
                           obsByFrame: [Int: [FeatureObservation]],
-                          points: [Int: SIMD3<Float>])
+                          points: [Int: SIMD3<Float>], options: Options = Options())
         -> (total: Float, reproj: Float, depth: Float, medianReproj: Float, robust: Double) {
         var sum: Double = 0, sumR: Double = 0, sumD: Double = 0
         var n = 0
@@ -488,10 +577,13 @@ nonisolated enum BundleAdjuster {
                 if r2 > Double(kMaxResidualPx * kMaxResidualPx) { continue }
                 var m2 = r2
                 var d2: Double = 0
+                var depthHuber = kDepthHuberPx
                 if kDepthWeight > 0 {
-                    let rd = Double((d - o.depth) * (fx / d) * kDepthWeight)
+                    let (scale, huber) = options.depthScale(observed: o.depth, predicted: d, fx: fx)
+                    let rd = Double((d - o.depth) * scale)
                     d2 = rd * rd
                     m2 += d2
+                    depthHuber = huber
                 }
                 sum += m2; sumR += r2; sumD += d2
                 let mag = Float(r2.squareRoot())
@@ -502,9 +594,9 @@ nonisolated enum BundleAdjuster {
                     : Double(kHuberPx * (2 * mag - kHuberPx))
                 if kDepthWeight > 0 {
                     let dm = Float(d2.squareRoot())
-                    robust += dm <= kDepthHuberPx
+                    robust += dm <= depthHuber
                         ? Double(dm * dm)
-                        : Double(kDepthHuberPx * (2 * dm - kDepthHuberPx))
+                        : Double(depthHuber * (2 * dm - depthHuber))
                 }
                 n += 1
             }
@@ -517,5 +609,368 @@ nonisolated enum BundleAdjuster {
                 Float((sumD / k).squareRoot()),
                 reprojMags[reprojMags.count / 2],
                 robust / k)
+    }
+
+    // MARK: - Joint solve with ARKit relative-motion priors
+
+    @inline(__always)
+    static func rotation(_ m: simd_float4x4) -> simd_float3x3 {
+        simd_float3x3(SIMD3(m.columns.0.x, m.columns.0.y, m.columns.0.z),
+                      SIMD3(m.columns.1.x, m.columns.1.y, m.columns.1.z),
+                      SIMD3(m.columns.2.x, m.columns.2.y, m.columns.2.z))
+    }
+
+    @inline(__always)
+    static func center(_ m: simd_float4x4) -> SIMD3<Float> { SIMD3(m.columns.3.x, m.columns.3.y, m.columns.3.z) }
+
+    static func rotationVector(_ r: simd_float3x3) -> SIMD3<Float> {
+        var q = simd_quatf(r)
+        if q.real < 0 { q = simd_quatf(ix: -q.imag.x, iy: -q.imag.y, iz: -q.imag.z, r: -q.real) }
+        let s = simd_length(q.imag)
+        guard s > 1e-9, s.isFinite else { return .zero }
+        return q.imag / s * (2 * atan2(s, q.real))
+    }
+
+    /// World rotation vector and camera-centre shift of `pose` relative to `initial`. Increments
+    /// applied with `PoseRefiner.deltaTransform(about: current centre)` add to it to first order.
+    static func correction(_ pose: simd_float4x4, from initial: simd_float4x4) -> [Double] {
+        let w = rotationVector(rotation(pose) * rotation(initial).transpose)
+        let t = center(pose) - center(initial)
+        return [w.x, w.y, w.z, t.x, t.y, t.z].map(Double.init)
+    }
+
+    /// Relative motion between consecutive frames k -> j is kept when both receive the same world
+    /// correction. First-order residual: [w_j - w_k ; t_j - t_k + v x w_k], v = initial c_j - c_k.
+    struct MotionPrior {
+        let k: Int, j: Int
+        let lever: SIMD3<Double>
+        let weight: [Double]
+    }
+
+    static func motionPriors(chain: [Int], initial: [Int: simd_float4x4], times: [Int: Double],
+                             options: Options) -> [MotionPrior] {
+        var priors: [MotionPrior] = []
+        for (a, b) in zip(chain.indices, chain.indices.dropFirst()) {
+            guard let pa = initial[chain[a]], let pb = initial[chain[b]] else { continue }
+            let gap = (times[chain[b]] ?? 0) - (times[chain[a]] ?? 0)
+            guard gap >= 0, gap <= options.priorMaxGapS else { continue }
+            let v = center(pb) - center(pa)
+            let angle = simd_length(rotationVector(rotation(pb) * rotation(pa).transpose))
+            let sr = Double(options.priorRotationRad + options.priorMotionFraction * angle)
+            let st = Double(options.priorTranslationM + options.priorMotionFraction * simd_length(v))
+            let wr = 1 / (sr * sr), wt = 1 / (st * st)
+            priors.append(MotionPrior(k: a, j: b, lever: SIMD3<Double>(Double(v.x), Double(v.y), Double(v.z)),
+                                      weight: [wr, wr, wr, wt, wt, wt]))
+        }
+        return priors
+    }
+
+    static func priorResidual(_ prior: MotionPrior, _ ek: [Double], _ ej: [Double]) -> [Double] {
+        let w = SIMD3(ek[0], ek[1], ek[2]), v = prior.lever
+        let lever = simd_cross(v, w)
+        return [ej[0] - ek[0], ej[1] - ek[1], ej[2] - ek[2],
+                ej[3] - ek[3] + lever.x, ej[4] - ek[4] + lever.y, ej[5] - ek[5] + lever.z]
+    }
+
+    /// d(residual)/d(increment of k): [[-I, 0], [[v]x, -I]]; the increment of j enters with I.
+    static func priorJacobianK(_ v: SIMD3<Double>) -> [Double] {
+        var a = [Double](repeating: 0, count: 36)
+        for i in 0..<6 { a[i * 6 + i] = -1 }
+        // [v]x in rows 3...5, columns 0...2
+        a[3 * 6 + 1] = -v.z; a[3 * 6 + 2] = v.y
+        a[4 * 6 + 0] = v.z;  a[4 * 6 + 2] = -v.x
+        a[5 * 6 + 0] = -v.y; a[5 * 6 + 1] = v.x
+        return a
+    }
+
+    /// Normal-equation contribution of one frame's feature observations, without solving it.
+    static func linearize(c2w: simd_float4x4, K: CameraIntrinsics, obs: [FeatureObservation],
+                          points: [Int: SIMD3<Float>], options: Options) -> (h: [Double], b: [Double]) {
+        var h = [Double](repeating: 0, count: 36), b = [Double](repeating: 0, count: 6)
+        let w2c = c2w.inverse, camPos = center(c2w)
+        let fx = Float(K.fx), fy = Float(K.fy), cx = Float(K.cx), cy = Float(K.cy)
+        let Rwc = rotation(w2c)
+        var row = [Double](repeating: 0, count: 6)
+        func add(_ residual: Float) {
+            for i in 0..<6 {
+                b[i] += row[i] * Double(residual)
+                for j in i..<6 { h[i * 6 + j] += row[i] * row[j] }
+            }
+        }
+        for o in obs {
+            guard let X = points[o.trackID] else { continue }
+            let pc = w2c * SIMD4<Float>(X, 1), Z = pc.z
+            guard Z < -1e-4 else { continue }
+            let ru = o.u - (cx + pc.x * fx / (-Z)), rv = o.v - (cy - pc.y * fy / (-Z))
+            let mag = (ru * ru + rv * rv).squareRoot()
+            if mag > kMaxResidualPx { continue }
+            let sw = (mag <= kHuberPx ? 1 : kHuberPx / mag).squareRoot()
+            let iz = 1 / Z
+            let ju = SIMD3<Float>(-fx * iz, 0, pc.x * fx * iz * iz)
+            let jv = SIMD3<Float>(0, fy * iz, -pc.y * fy * iz * iz)
+            let r = X - camPos
+            let dOmega = [Rwc * SIMD3<Float>(0, r.z, -r.y), Rwc * SIMD3<Float>(-r.z, 0, r.x), Rwc * SIMD3<Float>(r.y, -r.x, 0)]
+            let dT = [Rwc * SIMD3<Float>(-1, 0, 0), Rwc * SIMD3<Float>(0, -1, 0), Rwc * SIMD3<Float>(0, 0, -1)]
+            for i in 0..<3 { row[i] = Double(simd_dot(ju, dOmega[i]) * sw); row[i + 3] = Double(simd_dot(ju, dT[i]) * sw) }
+            add(ru * sw)
+            for i in 0..<3 { row[i] = Double(simd_dot(jv, dOmega[i]) * sw); row[i + 3] = Double(simd_dot(jv, dT[i]) * sw) }
+            add(rv * sw)
+            if kDepthWeight > 0 {
+                let d = -Z
+                let (scale, huber) = options.depthScale(observed: o.depth, predicted: d, fx: fx)
+                let rd = (d - o.depth) * scale
+                let dw = min(Float(1), huber / max(huber, abs(rd))).squareRoot()
+                for i in 0..<3 { row[i] = Double(-dOmega[i].z * scale * dw); row[i + 3] = Double(-dT[i].z * scale * dw) }
+                add(-rd * dw)
+            }
+        }
+        for i in 0..<6 { for j in 0..<i { h[i * 6 + j] = h[j * 6 + i] } }
+        return (h, b)
+    }
+
+    /// Robust observation cost as a sum (same Huber form as `residuals`).
+    static func observationCost(frames: [Int], poses: [Int: simd_float4x4], intr: [Int: CameraIntrinsics],
+                                obsByFrame: [Int: [FeatureObservation]], points: [Int: SIMD3<Float>],
+                                options: Options) -> Double {
+        var cost = 0.0
+        for id in frames {
+            guard let c2w = poses[id], let K = intr[id], let obs = obsByFrame[id] else { continue }
+            let w2c = c2w.inverse, fx = Float(K.fx)
+            for o in obs {
+                guard let X = points[o.trackID] else { continue }
+                let pc = w2c * SIMD4<Float>(X, 1)
+                guard pc.z < -1e-4 else { continue }
+                let d = -pc.z
+                let du = o.u - (Float(K.cx) + pc.x * fx / d), dv = o.v - (Float(K.cy) - pc.y * Float(K.fy) / d)
+                let mag = (du * du + dv * dv).squareRoot()
+                if mag > kMaxResidualPx { continue }
+                cost += mag <= kHuberPx ? Double(mag * mag) : Double(kHuberPx * (2 * mag - kHuberPx))
+                if kDepthWeight > 0 {
+                    let (scale, huber) = options.depthScale(observed: o.depth, predicted: d, fx: fx)
+                    let dm = abs((d - o.depth) * scale)
+                    cost += dm <= huber ? Double(dm * dm) : Double(huber * (2 * dm - huber))
+                }
+            }
+        }
+        return cost
+    }
+
+    /// Track points minimising reprojection plus the depth prior, from the mean back-projection.
+    static func optimizedTrackPoints(_ poses: [Int: simd_float4x4], frames: [Int], intr: [Int: CameraIntrinsics],
+                                     obsByFrame: [Int: [FeatureObservation]], options: Options) -> [Int: SIMD3<Float>] {
+        var points = trackPointsFor(poses, order: frames, intr: intr, obsByFrame: obsByFrame)
+        struct View { let w2c: simd_float4x4; let R: simd_float3x3; let K: CameraIntrinsics; let o: FeatureObservation }
+        var views: [Int: [View]] = [:]
+        for id in frames {
+            guard let c2w = poses[id], let K = intr[id], let obs = obsByFrame[id] else { continue }
+            let w2c = c2w.inverse, R = rotation(w2c)
+            for o in obs { views[o.trackID, default: []].append(View(w2c: w2c, R: R, K: K, o: o)) }
+        }
+        for (track, list) in views where list.count >= 2 {
+            guard var X = points[track] else { continue }
+            for _ in 0..<3 {
+                var h = simd_double3x3(0), g = SIMD3<Double>.zero
+                for view in list {
+                    let pc = view.w2c * SIMD4<Float>(X, 1), Z = pc.z
+                    guard Z < -1e-4 else { continue }
+                    let fx = Float(view.K.fx), fy = Float(view.K.fy), iz = 1 / Z
+                    let ru = view.o.u - (Float(view.K.cx) + pc.x * fx / (-Z))
+                    let rv = view.o.v - (Float(view.K.cy) - pc.y * fy / (-Z))
+                    let mag = (ru * ru + rv * rv).squareRoot()
+                    if mag > kMaxResidualPx { continue }
+                    let w = Double(mag <= kHuberPx ? 1 : kHuberPx / mag)
+                    // d(u, v)/dX = d(u, v)/dPc × R_w2c
+                    let gu = view.R.transpose * SIMD3<Float>(-fx * iz, 0, pc.x * fx * iz * iz)
+                    let gv = view.R.transpose * SIMD3<Float>(0, fy * iz, -pc.y * fy * iz * iz)
+                    let du = SIMD3<Double>(Double(gu.x), Double(gu.y), Double(gu.z))
+                    let dv = SIMD3<Double>(Double(gv.x), Double(gv.y), Double(gv.z))
+                    h += w * (simd_double3x3(rows: [du * du.x, du * du.y, du * du.z]) + simd_double3x3(rows: [dv * dv.x, dv * dv.y, dv * dv.z]))
+                    g += w * (du * Double(ru) + dv * Double(rv))
+                    if kDepthWeight > 0 {
+                        let d = -Z
+                        let (scale, huber) = options.depthScale(observed: view.o.depth, predicted: d, fx: fx)
+                        let rd = (d - view.o.depth) * scale
+                        let wd = Double(min(Float(1), huber / max(huber, abs(rd))))
+                        let gdF = -(view.R.transpose * SIMD3<Float>(0, 0, 1)) * scale
+                        let gd = SIMD3<Double>(Double(gdF.x), Double(gdF.y), Double(gdF.z))
+                        h += wd * simd_double3x3(rows: [gd * gd.x, gd * gd.y, gd * gd.z])
+                        g += wd * gd * Double(-rd)
+                    }
+                }
+                guard abs(h.determinant) > 1e-18 else { break }
+                var step = h.inverse * g
+                let length = simd_length(step)
+                guard length.isFinite else { break }
+                if length > 0.05 { step *= 0.05 / length }
+                X += SIMD3<Float>(Float(step.x), Float(step.y), Float(step.z))
+                if length < 1e-5 { break }
+            }
+            points[track] = X
+        }
+        return points
+    }
+
+    static func cholesky6(_ a: [Double]) -> [Double]? {
+        var l = [Double](repeating: 0, count: 36)
+        for i in 0..<6 {
+            for j in 0...i {
+                var s = a[i * 6 + j]
+                for k in 0..<j { s -= l[i * 6 + k] * l[j * 6 + k] }
+                if i == j {
+                    guard s > 1e-12, s.isFinite else { return nil }
+                    l[i * 6 + i] = s.squareRoot()
+                } else { l[i * 6 + j] = s / l[j * 6 + j] }
+            }
+        }
+        return l
+    }
+
+    static func choleskySolve(_ l: [Double], _ b: [Double]) -> [Double] {
+        var y = [Double](repeating: 0, count: 6)
+        for i in 0..<6 { var s = b[i]; for k in 0..<i { s -= l[i * 6 + k] * y[k] }; y[i] = s / l[i * 6 + i] }
+        var x = [Double](repeating: 0, count: 6)
+        for i in stride(from: 5, through: 0, by: -1) {
+            var s = y[i]; for k in (i + 1)..<6 { s -= l[k * 6 + i] * x[k] }; x[i] = s / l[i * 6 + i]
+        }
+        return x
+    }
+
+    /// Symmetric block-tridiagonal solve (block Thomas / LDLᵀ). upper[k] couples k and k+1.
+    static func solveBlockTridiagonal(diagonal: [[Double]], upper: [[Double]?], rhs: [[Double]]) -> [[Double]]? {
+        let n = diagonal.count
+        guard n > 0 else { return [] }
+        var z = [[Double]](repeating: [], count: n)          // B'_k^-1 d'_k
+        var coupling = [[Double]?](repeating: nil, count: n)  // B'_k^-1 C_k, stored column-major by 6 RHS
+        var nextDiagonal = diagonal[0], nextRHS = rhs[0]
+        for k in 0..<n {
+            guard let l = cholesky6(nextDiagonal) else { return nil }
+            z[k] = choleskySolve(l, nextRHS)
+            guard k + 1 < n else { break }
+            nextDiagonal = diagonal[k + 1]; nextRHS = rhs[k + 1]
+            guard let c = upper[k] else { continue }
+            var columns = [Double](repeating: 0, count: 36)       // columns of B'^-1 C
+            for col in 0..<6 {
+                let x = choleskySolve(l, (0..<6).map { c[$0 * 6 + col] })
+                for row in 0..<6 { columns[row * 6 + col] = x[row] }
+            }
+            coupling[k] = columns
+            // B'_{k+1} = B_{k+1} - Cᵀ B'^-1 C ; d'_{k+1} = d_{k+1} - Cᵀ z_k
+            for i in 0..<6 {
+                for j in 0..<6 {
+                    var sum = 0.0
+                    for m in 0..<6 { sum += c[m * 6 + i] * columns[m * 6 + j] }
+                    nextDiagonal[i * 6 + j] -= sum
+                }
+                var sum = 0.0
+                for m in 0..<6 { sum += c[m * 6 + i] * z[k][m] }
+                nextRHS[i] -= sum
+            }
+        }
+        var x = [[Double]](repeating: [Double](repeating: 0, count: 6), count: n)
+        x[n - 1] = z[n - 1]
+        for k in stride(from: n - 2, through: 0, by: -1) {
+            x[k] = z[k]
+            if let w = coupling[k] {
+                for i in 0..<6 { var sum = 0.0; for j in 0..<6 { sum += w[i * 6 + j] * x[k + 1][j] }; x[k][i] -= sum }
+            }
+        }
+        return x
+    }
+
+    static func jointRounds(chain: [Int], initial: [Int: simd_float4x4], start: [Int: simd_float4x4],
+                            times: [Int: Double], intr: [Int: CameraIntrinsics],
+                            fit: [Int: [FeatureObservation]], rounds: Int, options: Options,
+                            isCancelled: () -> Bool) -> (poses: [Int: simd_float4x4], residuals: [Float], rounds: Int) {
+        let priors = motionPriors(chain: chain, initial: initial, times: times, options: options)
+        let ar = Double(options.anchorRotationRad), at = Double(options.anchorTranslationM)
+        let anchor = [1 / (ar * ar), 1 / (ar * ar), 1 / (ar * ar), 1 / (at * at), 1 / (at * at), 1 / (at * at)]
+        func points(_ p: [Int: simd_float4x4]) -> [Int: SIMD3<Float>] {
+            options.optimizeTracks
+                ? optimizedTrackPoints(p, frames: chain, intr: intr, obsByFrame: fit, options: options)
+                : trackPointsFor(p, order: chain, intr: intr, obsByFrame: fit)
+        }
+        func corrections(_ p: [Int: simd_float4x4]) -> [[Double]] {
+            chain.map { id in correction(p[id]!, from: initial[id]!) }
+        }
+        func priorCost(_ e: [[Double]]) -> Double {
+            var cost = 0.0
+            for ek in e { for i in 0..<6 { cost += anchor[i] * ek[i] * ek[i] } }
+            for prior in priors {
+                let r = priorResidual(prior, e[prior.k], e[prior.j])
+                for i in 0..<6 { cost += prior.weight[i] * r[i] * r[i] }
+            }
+            return cost
+        }
+        var poses = start, res: [Float] = [], applied = 0
+        var lambda = 1e-3
+        for _ in 0..<rounds {
+            if isCancelled() { break }
+            let pts = points(poses)
+            let e = corrections(poses)
+            let before = observationCost(frames: chain, poses: poses, intr: intr, obsByFrame: fit, points: pts,
+                                         options: options) + priorCost(e)
+            if res.isEmpty {
+                res.append(residuals(order: chain, poses: poses, intr: intr, obsByFrame: fit, points: pts, options: options).total)
+            }
+            var diagonal: [[Double]] = [], rhs: [[Double]] = []
+            for (k, id) in chain.enumerated() {
+                var (h, b) = (fit[id]?.isEmpty ?? true)
+                    ? ([Double](repeating: 0, count: 36), [Double](repeating: 0, count: 6))
+                    : linearize(c2w: poses[id]!, K: intr[id]!, obs: fit[id]!, points: pts, options: options)
+                for i in 0..<6 { h[i * 6 + i] += anchor[i]; b[i] -= anchor[i] * e[k][i] }
+                diagonal.append(h); rhs.append(b)
+            }
+            var upper = [[Double]?](repeating: nil, count: chain.count)
+            for prior in priors {
+                let r = priorResidual(prior, e[prior.k], e[prior.j])
+                let a = priorJacobianK(prior.lever), w = prior.weight
+                // H_kk += AᵀWA, H_jj += W, H_kj += AᵀW ; b_k -= AᵀWr, b_j -= Wr
+                for i in 0..<6 {
+                    for j in 0..<6 {
+                        var sum = 0.0
+                        for m in 0..<6 { sum += a[m * 6 + i] * w[m] * a[m * 6 + j] }
+                        diagonal[prior.k][i * 6 + j] += sum
+                    }
+                    diagonal[prior.j][i * 6 + i] += w[i]
+                    var bk = 0.0
+                    for m in 0..<6 { bk += a[m * 6 + i] * w[m] * r[m] }
+                    rhs[prior.k][i] -= bk
+                    rhs[prior.j][i] -= w[i] * r[i]
+                }
+                var coupling = [Double](repeating: 0, count: 36)
+                for i in 0..<6 { for j in 0..<6 { coupling[i * 6 + j] = a[j * 6 + i] * w[j] } }
+                upper[prior.k] = coupling
+            }
+            var accepted = false
+            for _ in 0..<4 {
+                var damped = diagonal
+                for k in damped.indices { for i in 0..<6 { damped[k][i * 6 + i] *= 1 + lambda } }
+                guard let steps = solveBlockTridiagonal(diagonal: damped, upper: upper, rhs: rhs) else { lambda *= 10; continue }
+                var candidate = poses
+                for (k, id) in chain.enumerated() {
+                    var omega = SIMD3<Float>(Float(steps[k][0]), Float(steps[k][1]), Float(steps[k][2]))
+                    var trans = SIMD3<Float>(Float(steps[k][3]), Float(steps[k][4]), Float(steps[k][5]))
+                    guard omega.x.isFinite, omega.y.isFinite, omega.z.isFinite,
+                          trans.x.isFinite, trans.y.isFinite, trans.z.isFinite else { continue }
+                    let rn = simd_length(omega), tn = simd_length(trans)
+                    if rn > PoseRefiner.kMaxRotRad { omega *= PoseRefiner.kMaxRotRad / rn }
+                    if tn > PoseRefiner.kMaxTransM { trans *= PoseRefiner.kMaxTransM / tn }
+                    candidate[id] = PoseRefiner.deltaTransform(omega: omega, trans: trans, about: center(poses[id]!)) * poses[id]!
+                }
+                let candidatePoints = points(candidate)
+                let after = observationCost(frames: chain, poses: candidate, intr: intr, obsByFrame: fit,
+                                            points: candidatePoints, options: options) + priorCost(corrections(candidate))
+                if after < before {
+                    poses = candidate; applied += 1; accepted = true
+                    lambda = max(1e-6, lambda / 10)
+                    res.append(residuals(order: chain, poses: poses, intr: intr, obsByFrame: fit,
+                                         points: candidatePoints, options: options).total)
+                    break
+                }
+                lambda *= 10
+            }
+            if !accepted { break }
+        }
+        return (poses, res, applied)
     }
 }

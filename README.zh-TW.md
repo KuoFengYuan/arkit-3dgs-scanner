@@ -64,7 +64,7 @@ Simulator 可驗證一般介面與資料流程，不能代替真機 ARKit／LiDA
 
 - 重融合優先選不同位置的參考深度；需要多視角支持，再沿原相機射線作最多 2 cm 的共識修正。
 - 修正前後檢查可信度、深度邊界、遮擋與自由空間矛盾；mesh 補點同樣需要支持，避免重新補回厚層。
-- 「精細掃描」逐張匹配影像，做局部相機精修與有界重訪閉環驗證；使用自訂演算法，沒有移植 COLMAP／Ceres。只有通過保留觀測驗證的結果才套用；資料不足或驗證失敗時保留既有姿態。
+- 「精細掃描」逐張匹配影像，以保持 ARKit 相鄰影格運動的聯合光束法平差精修相機，並做有界重訪閉環驗證；使用自訂演算法，沒有移植 COLMAP／Ceres。結果須通過保留觀測與照片對齊檢查（比對重疊影格的影像紋理）才套用。兩份掃描的桌機重跑中，舊精修未通過此檢查；新精修讓寬基線 NCC 中位數提高約 0.02，局部表面階段則被拒絕。資料不足或驗證失敗時保留既有姿態。詳見[姿態精修](docs/POSE_REFINEMENT.zh-TW.md)。
 - RGB 照片選用與深度融合分開：實際清晰度與視角差異決定訓練照片，可靠深度仍可保留。原始照片不因篩選而刪除。
 
 569 幀掃描的局部厚度中位數曾由 8.94 降到 7.01 cm（約 21.6%）。這是固定局部區域的表面一致性量測，包含真實家具／多層結構，**不是絕對尺寸精度，也不保證 3DGS 無殘影**。方法、效能代價與限制見 [LiDAR 表面共識](docs/LIDAR_SURFACE_CONSENSUS.zh-TW.md)。
@@ -188,6 +188,7 @@ bash tools/test_fusion_memory.sh
 ## 文件索引
 
 - [掃描架構](docs/CAPTURE_ARCHITECTURE.zh-TW.md)
+- [姿態精修與照片對齊驗證](docs/POSE_REFINEMENT.zh-TW.md)
 - [閉環修正與公尺尺度](docs/LOOP_CLOSURE_AND_SCALE.zh-TW.md)
 - [手機端資料優化](docs/ON_DEVICE_TRAINING_QUALITY.zh-TW.md)
 - [LiDAR 多視角共識](docs/LIDAR_SURFACE_CONSENSUS.zh-TW.md)

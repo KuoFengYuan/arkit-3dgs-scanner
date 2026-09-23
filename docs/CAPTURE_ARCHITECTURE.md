@@ -46,7 +46,7 @@ Stable tracking must persist for 0.6 seconds; lost tracking or long gaps restart
 
 Tiles look up existing cells using corrected anchor positions, reducing duplication across world-grid boundaries; final anchor correction also applies to tiles unseen in the last frame. Measured depth takes priority over mesh, including grid merges. Full rotation matrices keep pose increments rigid.
 
-Refined scanning defaults on. LiDAR-assisted local BA runs six rounds and applies only a validated holdout improvement. It adds processing time. These safeguards do not establish absolute real-world accuracy.
+Refined scanning defaults on. LiDAR-assisted bundle adjustment solves all frames jointly with ARKit motion priors. It is applied only after held-out tracks and a photo-alignment check confirm it; see [pose refinement](POSE_REFINEMENT.md). It adds processing time. These safeguards do not establish absolute real-world accuracy.
 
 ## History and deletion
 
@@ -101,7 +101,7 @@ swiftc -O -module-cache-path /tmp/fable-swift-cache \
 /tmp/fable-follow-camera-test
 ```
 
-Regression suites cover capture success/failure/retry, closed writes, ZIP atomic replacement, stable tracking, rigid rotations, depth checks, finite coordinates, measured-depth priority, anchor corrections, history compatibility and batch deletion, image/pose pairing, playback following/timing, BA holdout rejection, and shard consistency. Historical counts: capture accuracy 18, history eight groups, playback four groups, following five groups, timing two groups, BA eight, and shards five.
+Regression suites cover capture success/failure/retry, closed writes, ZIP atomic replacement, stable tracking, rigid rotations, depth checks, finite coordinates, measured-depth priority, anchor corrections, history compatibility and batch deletion, image/pose pairing, playback following/timing, BA holdout rejection, photo-alignment gating, and shard consistency. Historical counts: capture accuracy 18, history eight groups, playback four groups, following five groups, timing two groups, BA 19, photo alignment eight, and shards five.
 
 Earlier Simulator checks covered home/history, empty state, mode badge, point cloud, photo stepping, delete confirmation, and ZIP. Some later interaction checks timed out; do not infer full UI coverage from compilation. Real-device checks remain necessary for permission recovery, backgrounding, tracking loss/recovery, rapid stop/resume, floor-plan return, LiDAR/no-LiDAR modes, orientations, larger text, VoiceOver, long-session memory, heat, and frame rate.
 

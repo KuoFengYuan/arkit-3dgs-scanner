@@ -26,7 +26,7 @@ python tools/arkit2gs.py /path/to/scan -o /path/to/dataset --format both
 
 ## 姿態精修與缺少 tracks
 
-App 採校正錨點，驗證通過時才套用 LiDAR 輔助局部 BA；未通過就保留原姿態。重融合使用同組姿態，不能只改相機而保留未對齊的初始化點雲。
+App 採校正錨點，保留集與[照片對齊檢查](POSE_REFINEMENT.zh-TW.md)都通過時才套用 LiDAR 輔助 BA；未通過就保留原姿態。手機未建模的誤差（例如捲簾快門），若訓練器支援相機最佳化，仍可再由訓練器修正。重融合使用同組姿態，不能只改相機而保留未對齊的初始化點雲。
 
 空影像觀測／tracks 可作為此種種子模型匯出，但 BA 無法自行產生缺少的對應。桌面精修需要特徵抽取、匹配、一致的相機／影像 ID、三角化及驗證後再 BA。參考 [COLMAP 已知姿態重建](https://colmap.github.io/faq.html#reconstruct-sparse-dense-model-from-known-camera-poses)。姿態變更後點雲也需對齊或重融合；手機流程本身不要求桌面 COLMAP。
 

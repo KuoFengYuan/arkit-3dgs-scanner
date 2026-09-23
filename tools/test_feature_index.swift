@@ -152,6 +152,37 @@ import simd
                      FeatureParams.depthSurvivalRate * 100, expected, needed, nn(expected)))
 
         print()
+        // Förstner refinement recovers sub-pixel corners hidden by the 4 px detection grid.
+        // Pixel index = pixel centre, the convention of the feature coordinates and intrinsics.
+        var worst: Float = 0, refined = 0
+        for trial in 0..<60 {
+            let x0 = Float(90) + Float(trial % 17) * 0.137, y0 = Float(70) + Float(trial % 13) * 0.173
+            let angle = Float(trial % 7) * 0.2, w = 200, h = 160
+            var img = [UInt8](repeating: 0, count: w * h)
+            for y in 0..<h { for x in 0..<w {
+                var acc: Float = 0
+                for sy in 0..<4 { for sx in 0..<4 {
+                    let px = Float(x) + (Float(sx) + 0.5) / 4 - 0.5 - x0, py = Float(y) + (Float(sy) + 0.5) / 4 - 0.5 - y0
+                    let rx = cos(angle) * px + sin(angle) * py, ry = -sin(angle) * px + cos(angle) * py
+                    acc += (rx >= 0) != (ry >= 0) ? 200 : 40
+                } }
+                img[y * w + x] = UInt8(acc / 16)
+            } }
+            let guess = (x0 + Float(trial % 5) * 0.6 - 1.2, y0 - Float(trial % 3) * 0.7 + 0.7)
+            if let r = img.withUnsafeBufferPointer({ FeatureExtractor.refineCorner(pixels: $0.baseAddress!, width: w, height: h,
+                                                                                  rowBytes: w, u: guess.0, v: guess.1) }) {
+                refined += 1
+                worst = max(worst, ((r.u - x0) * (r.u - x0) + (r.v - y0) * (r.v - y0)).squareRoot())
+            }
+        }
+        check(refined >= 57 && worst < 0.25,
+              String(format: "Förstner refinement: %d/60 corners from ≤1.5 px guesses, worst error %.3f px", refined, worst))
+        var edge = [UInt8](repeating: 40, count: 200 * 160)
+        for y in 0..<160 { for x in 100..<200 { edge[y * 200 + x] = 200 } }
+        check(edge.withUnsafeBufferPointer { FeatureExtractor.refineCorner(pixels: $0.baseAddress!, width: 200, height: 160,
+                                                                          rowBytes: 200, u: 100, v: 80) } == nil,
+              "a straight edge keeps its original position instead of sliding along the edge")
+
         print(fails == 0 ? "全部通過 — 匹配空間索引驗證完成" : "\(fails) 項失敗")
         exit(fails == 0 ? 0 : 1)
     }
