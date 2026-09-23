@@ -6,6 +6,8 @@ import simd
 nonisolated enum LocalSurfaceRefiner {
     struct Report: Codable, Sendable {
         var status = "completed"
+        var eligibleFrames: Int?
+        var sampledFrames: Int?
         var attempted = 0
         var accepted = 0
         var degenerate = 0
@@ -198,19 +200,34 @@ nonisolated enum LocalSurfaceRefiner {
         let result = (0..<6).map { b[$0]/scales[$0] }
         return result.allSatisfy(\.isFinite) ? result : nil
     }
-    static func run(records: [FrameRecord], directory: URL,
+    /// Sample intermediate frames across the whole route; the fixed anchors and solve are
+    /// identical to a full pass. A pilot never becomes the final partially corrected trajectory.
+    static func sampledOrdinals(count: Int, limit: Int?) -> [Int] {
+        guard count >= 3 else { return [] }
+        let eligible = (1..<(count-1)).filter { $0 % 8 != 0 }
+        guard let limit, eligible.count > max(0,limit) else { return eligible }
+        guard limit > 0 else { return [] }
+        if limit == 1 { return [eligible[eligible.count/2]] }
+        return (0..<limit).map { eligible[$0*(eligible.count-1)/(limit-1)] }
+    }
+
+    static func run(records: [FrameRecord], directory: URL, sampleLimit: Int? = nil,
                     shouldContinue: () -> Bool = { true }, progress: (Double) -> Void = { _ in }) -> (records: [FrameRecord], report: Report) {
         let started = Date(); var report = Report(), output = records
         let ordered = records.indices.filter { records[$0].blurVerdict != .drop && records[$0].depthFile != nil }
-            .sorted { records[$0].timestamp < records[$1].timestamp }
+            .sorted { records[$0].timestamp == records[$1].timestamp ? $0 < $1 : records[$0].timestamp < records[$1].timestamp }
+        let selected = Set(sampledOrdinals(count:ordered.count,limit:sampleLimit))
+        report.eligibleFrames = sampledOrdinals(count:ordered.count,limit:nil).count
+        report.sampledFrames = selected.count
         var sumBefore: Float = 0, sumAfter: Float = 0
         guard ordered.count >= 3 else { report.status = "insufficientDepthFrames"; return (records,report) }
         for start in Swift.stride(from:0,to:ordered.count-1,by:8) {
             guard shouldContinue() else { report.status = "interrupted"; report.seconds = Date().timeIntervalSince(started); return (records,report) }
             let end = min(start+8,ordered.count-1)
+            guard ((start+1)..<end).contains(where:{selected.contains($0)}) else { continue }
             let refs = autoreleasepool { [ordered[start],ordered[end]].compactMap { load(records[$0],directory:directory) } }
             guard refs.count == 2 else { continue }
-            for ordinal in (start+1)..<end {
+            for ordinal in (start+1)..<end where selected.contains(ordinal) {
                 guard shouldContinue() else { report.status = "interrupted"; report.seconds = Date().timeIntervalSince(started); return (records,report) }
                 let i = ordered[ordinal]
                 guard let source = autoreleasepool(invoking:{load(records[i],directory:directory)}) else { continue }

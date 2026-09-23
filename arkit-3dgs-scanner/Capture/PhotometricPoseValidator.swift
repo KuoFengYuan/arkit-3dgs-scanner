@@ -24,6 +24,14 @@ nonisolated enum PhotometricPoseValidator {
         var wideDelta: Float?
         /// Adjacent pairs whose NCC dropped by more than `worseDrop`.
         var adjacentWorse = 0
+        /// Baseline-valid samples must not disappear to make a candidate score better.
+        var baselineSamples: Int? = 0
+        var retainedSamples: Int? = 0
+        var minimumRetainedFraction: Float?
+        var lowRetentionPairs: Int? = 0
+        var evaluatedPairs: Int? = 0
+        var adjacentEffectiveDelta: Float?
+        var wideEffectiveDelta: Float?
         var seconds = 0.0
         var accepted: Bool { status == "accepted" }
     }
@@ -39,6 +47,10 @@ nonisolated enum PhotometricPoseValidator {
     static let maxWidePairs = 40
     static let minimumPairs = 8
     static let minimumSamples = 400
+    static let minimumRetainedFraction: Float = 0.90
+    static let minimumTotalRetainedFraction: Float = 0.95
+    static let maxLowRetentionFraction: Float = 0.15
+    static let lostSamplePenalty: Float = 0.1
     /// Adjacent ARKit poses already align photos well (median NCC about 0.98-0.99 in replays);
     /// refinement must not disturb them.
     static let adjacentTolerance: Float = 0.002
@@ -135,10 +147,20 @@ nonisolated enum PhotometricPoseValidator {
         return aa > 0 && bb > 0 ? Float(ab / (aa * bb).squareRoot()) : 0
     }
 
-    /// NCC of one pair under two pose sets, on the samples valid under both.
+    struct PairScore {
+        let before: Float
+        let after: Float
+        let samples: Int
+        let baselineSamples: Int
+        var retainedFraction: Float { Float(samples) / Float(max(1,baselineSamples)) }
+        var effectiveDelta: Float { after - before - (1-retainedFraction)*lostSamplePenalty }
+    }
+
+    /// NCC uses the same intersection, but lost baseline-valid samples remain visible to the
+    /// acceptance gate. Even a candidate losing every projection must be scored as a failure.
     static func pairScores(_ pair: Pair, before: [simd_float4x4], after: [simd_float4x4],
                            records: [FrameRecord], frames: (Int) -> (ScanImageDecoder.Gray, DepthConsistencyView)?)
-        -> (before: Float, after: Float, samples: Int)? {
+        -> PairScore? {
         guard let (sourceImage, sourceDepth) = frames(pair.source),
               let (targetImage, targetDepth) = frames(pair.target) else { return nil }
         let dk = sourceDepth.intrinsics, dw = dk.width, dh = dk.height
@@ -187,13 +209,16 @@ nonisolated enum PhotometricPoseValidator {
         }
         let beforeInverse = before[pair.target].inverse, afterInverse = after[pair.target].inverse
         var source: [Float] = [], first: [Float] = [], second: [Float] = []
+        var baselineSamples = 0
         for s in samples where s.gradient >= threshold {
-            guard let a = project(s.local, sourcePose: before[pair.source], targetInverse: beforeInverse),
-                  let b = project(s.local, sourcePose: after[pair.source], targetInverse: afterInverse) else { continue }
+            guard let a = project(s.local, sourcePose: before[pair.source], targetInverse: beforeInverse) else { continue }
+            baselineSamples += 1
+            guard let b = project(s.local, sourcePose: after[pair.source], targetInverse: afterInverse) else { continue }
             source.append(s.intensity); first.append(a); second.append(b)
         }
-        guard source.count >= minimumSamples else { return nil }
-        return (ncc(source, first), ncc(source, second), source.count)
+        guard baselineSamples >= minimumSamples else { return nil }
+        return PairScore(before:ncc(source,first), after:ncc(source,second),
+                         samples:source.count, baselineSamples:baselineSamples)
     }
 
     private static func median(_ values: [Float]) -> Float? {
@@ -228,11 +253,30 @@ nonisolated enum PhotometricPoseValidator {
         guard !moved.isEmpty else { return finish("unchanged") }
         let cache = FrameCache(records: input, directory: directory)
         var adjacent: [(Float, Float)] = [], wide: [(Float, Float)] = []
+        var adjacentEffective: [Float] = [], wideEffective: [Float] = []
         for pair in pairs(input, focus: moved) {
             if isCancelled() { return finish("cancelled") }
             guard let score = autoreleasepool(invoking: { pairScores(pair, before: before, after: after, records: input, frames: cache.frame) })
             else { continue }
-            if pair.adjacent { adjacent.append((score.before, score.after)) } else { wide.append((score.before, score.after)) }
+            report.baselineSamples = (report.baselineSamples ?? 0) + score.baselineSamples
+            report.retainedSamples = (report.retainedSamples ?? 0) + score.samples
+            report.minimumRetainedFraction = min(report.minimumRetainedFraction ?? 1,score.retainedFraction)
+            report.evaluatedPairs = (report.evaluatedPairs ?? 0) + 1
+            if score.retainedFraction < minimumRetainedFraction || score.samples < minimumSamples {
+                report.lowRetentionPairs = (report.lowRetentionPairs ?? 0) + 1
+            }
+            // Border/occlusion samples can change after a legitimate correction. Keep their
+            // loss in the score and require >=95% retention overall, with at most 15% weak pairs.
+            // An entirely lost pair gets a negative score instead of disappearing from the gate.
+            let delta = score.samples >= minimumSamples ? score.effectiveDelta
+                : -max(worseDrop,(1-score.retainedFraction)*lostSamplePenalty)
+            if pair.adjacent {
+                adjacentEffective.append(delta)
+                if score.samples >= minimumSamples { adjacent.append((score.before,score.after)) }
+            } else {
+                wideEffective.append(delta)
+                if score.samples >= minimumSamples { wide.append((score.before,score.after)) }
+            }
         }
         report.adjacentPairs = adjacent.count; report.widePairs = wide.count
         report.adjacentBefore = median(adjacent.map(\.0)); report.adjacentAfter = median(adjacent.map(\.1))
@@ -240,8 +284,17 @@ nonisolated enum PhotometricPoseValidator {
         report.adjacentDelta = median(adjacent.map { $0.1 - $0.0 })
         report.wideDelta = median(wide.map { $0.1 - $0.0 })
         report.adjacentWorse = adjacent.filter { $0.1 - $0.0 < -worseDrop }.count
+        report.adjacentEffectiveDelta = median(adjacentEffective)
+        report.wideEffectiveDelta = median(wideEffective)
+        let totalRetention = Float(report.retainedSamples ?? 0) / Float(max(1,report.baselineSamples ?? 0))
+        if (report.evaluatedPairs ?? 0) > 0 {
+            guard totalRetention >= minimumTotalRetainedFraction,
+                  Float(report.lowRetentionPairs ?? 0) <= Float(report.evaluatedPairs ?? 0)*maxLowRetentionFraction else {
+                return finish("rejected")
+            }
+        }
         guard adjacent.count >= minimumPairs, wide.count >= minimumPairs,
-              let adjacentDelta = report.adjacentDelta, let wideDelta = report.wideDelta else {
+              let adjacentDelta = report.adjacentEffectiveDelta, let wideDelta = report.wideEffectiveDelta else {
             return finish("insufficientPairs")
         }
         let adjacentKept = adjacentDelta >= -adjacentTolerance

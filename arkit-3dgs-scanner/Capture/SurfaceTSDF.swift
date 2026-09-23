@@ -32,13 +32,20 @@ nonisolated final class SurfaceTSDF {
         var blockWrites = 0
         var diskBytes = 0
         var fallbackPoints = 0
+        // Optional for compatibility with scans saved before packed paging.
+        var storageReadOperations: Int? = 0
+        var storageWriteOperations: Int? = 0
+        var storageReadSeconds: Double? = 0
+        var storageWriteSeconds: Double? = 0
     }
     private var blocks: [Key: Block] = [:]
     private var surfaceBlocks = Set<Key>()
     private final class Mask { var bits = [UInt64](repeating:0,count:8) }
     private var supportedCells: [Key:Mask] = [:]
     private var knownBlocks = Set<Key>()
-    private var savedBlocks = Set<Key>()
+    // Fixed-size slots in one private scratch file; overwriting a dirty slot never grows disk use.
+    private var savedSlots: [Key: Int] = [:]
+    private var backing: FileHandle?
     private var tick = 0
     private var scratch: URL?
     private let diskBudgetBytes: Int
@@ -57,8 +64,59 @@ nonisolated final class SurfaceTSDF {
         truncation = self.voxel * 3
         maxBlocks = max(0, budgetBytes / Self.blockBytes)
     }
-    deinit { if let scratch { try? FileManager.default.removeItem(at:scratch) } }
-    private func file(_ key: Key, root: URL) -> URL { root.appendingPathComponent("\(key.x)_\(key.y)_\(key.z).bin") }
+    deinit {
+        try? backing?.close()
+        if let scratch { try? FileManager.default.removeItem(at:scratch) }
+    }
+    private static var payloadBytes: Int { 512 * MemoryLayout<Cell>.stride }
+
+    /// One eviction batch is at most 32 blocks. Contiguous slots share a single write; live
+    /// blocks, pending data and slot metadata remain bounded. This file is disposable, not a
+    /// persisted scan: any short read/write error invalidates the entire TSDF and uses the grid.
+    private func spill(_ victims: [(key: Key, value: Block)]) throws -> Bool {
+        if backing == nil {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("surface-blocks-"+UUID().uuidString)
+            try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
+            scratch = directory
+            let url = directory.appendingPathComponent("blocks.bin")
+            guard FileManager.default.createFile(atPath:url.path,contents:nil) else { return false }
+            backing = try FileHandle(forUpdating:url)
+        }
+        guard let backing else { return false }
+        var writes: [(slot: Int, block: Block)] = []
+        for (key, block) in victims where block.dirty || savedSlots[key] == nil {
+            let slot: Int
+            if let existing = savedSlots[key] { slot = existing }
+            else {
+                guard savedSlots.count < diskBudgetBytes / Self.blockBytes else {
+                    report.status = "diskBudgetFallback"; return false
+                }
+                slot = savedSlots.count; savedSlots[key] = slot
+            }
+            writes.append((slot,block))
+        }
+        writes.sort { $0.slot < $1.slot }
+        var i = 0
+        while i < writes.count {
+            let start = writes[i].slot
+            var data = Data()
+            data.reserveCapacity(min(32,writes.count-i) * Self.payloadBytes)
+            repeat {
+                writes[i].block.cells.withUnsafeBytes { data.append(contentsOf:$0) }
+                i += 1
+            } while i < writes.count && writes[i].slot == start + data.count / Self.payloadBytes
+            let started = Date()
+            try backing.seek(toOffset:UInt64(start * Self.payloadBytes))
+            try backing.write(contentsOf:data)
+            report.storageWriteSeconds = (report.storageWriteSeconds ?? 0) + Date().timeIntervalSince(started)
+            report.storageWriteOperations = (report.storageWriteOperations ?? 0) + 1
+            report.blockWrites += data.count / Self.payloadBytes
+        }
+        for (key, _) in victims { blocks.removeValue(forKey:key) }
+        report.spilledBlocks = savedSlots.count
+        report.diskBytes = savedSlots.count * Self.blockBytes
+        return true
+    }
     private func block(_ key: Key, create: Bool) -> Block? {
         tick += 1
         if let existing = blocks[key] { existing.accessed = tick; return existing }
@@ -67,26 +125,11 @@ nonisolated final class SurfaceTSDF {
         if blocks.count >= maxBlocks {
             guard pagingEnabled else { report.status = "capacityFallback"; return nil }
             do {
-                if scratch == nil {
-                    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("surface-blocks-"+UUID().uuidString)
-                    try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
-                    scratch = directory
+                let victims = Array(blocks.sorted { $0.value.accessed < $1.value.accessed }.prefix(min(32,maxBlocks)))
+                guard try spill(victims) else {
+                    if report.status == "integrating" { report.status = "storageFallback" }
+                    return nil
                 }
-                // Evict a small batch to amortize LRU selection. No dense volume copy is created.
-                let victims = blocks.sorted { $0.value.accessed < $1.value.accessed }.prefix(min(32,maxBlocks))
-                for (key,block) in victims {
-                    if block.dirty || !savedBlocks.contains(key) {
-                        guard (savedBlocks.count + (savedBlocks.contains(key) ? 0 : 1))*Self.blockBytes <= diskBudgetBytes else {
-                            report.status = "diskBudgetFallback"; return nil
-                        }
-                        let data = block.cells.withUnsafeBytes { Data($0) }
-                        try data.write(to:file(key,root:scratch!),options:.atomic)
-                        savedBlocks.insert(key); report.blockWrites += 1
-                    }
-                    blocks.removeValue(forKey:key)
-                }
-                report.spilledBlocks = savedBlocks.count
-                report.diskBytes = savedBlocks.count * Self.blockBytes
             } catch { report.status = "storageFallback"; return nil }
         }
         // Bound the metadata/index as well as the backing data, even when the scan spans new blocks.
@@ -94,11 +137,19 @@ nonisolated final class SurfaceTSDF {
             report.status = "diskBudgetFallback"; return nil
         }
         let block = Block()
-        if savedBlocks.contains(key) {
-            guard let scratch,let data = try? Data(contentsOf:file(key,root:scratch)),data.count == 512*MemoryLayout<Cell>.stride else {
-                report.status = "storageFallback"; return nil
-            }
-            _ = block.cells.withUnsafeMutableBytes { data.copyBytes(to:$0) }; report.blockReads += 1
+        if let slot = savedSlots[key] {
+            do {
+                guard let backing else { report.status = "storageFallback"; return nil }
+                let started = Date()
+                try backing.seek(toOffset:UInt64(slot * Self.payloadBytes))
+                guard let data = try backing.read(upToCount:Self.payloadBytes),data.count == Self.payloadBytes else {
+                    report.status = "storageFallback"; return nil
+                }
+                _ = block.cells.withUnsafeMutableBytes { data.copyBytes(to:$0) }
+                report.storageReadSeconds = (report.storageReadSeconds ?? 0) + Date().timeIntervalSince(started)
+                report.storageReadOperations = (report.storageReadOperations ?? 0) + 1
+                report.blockReads += 1
+            } catch { report.status = "storageFallback"; return nil }
         }
         block.accessed = tick; blocks[key] = block; knownBlocks.insert(key)
         report.peakBlocks = max(report.peakBlocks,blocks.count)
@@ -247,9 +298,12 @@ nonisolated final class SurfaceTSDF {
                 for axis in 0..<3 {
                     var next = v; next[axis] += 1
                     let (nk,ni,_) = address(next)
-                    guard let neighbor = self.block(nk,create:false) else {
-                        if report.status != "integrating" { return nil }; continue
-                    }
+                    let neighbor: Block
+                    if nk == key {
+                        // Same values and LRU access order, without a hash lookup per interior edge.
+                        tick += 1; block.accessed = tick; neighbor = block
+                    } else if let nextBlock = self.block(nk,create:false) { neighbor = nextBlock }
+                    else { if report.status != "integrating" { return nil }; continue }
                     let b = neighbor.cells[ni]
                     guard b.views >= 2,
                           (a.distance < 0) != (b.distance < 0), abs(a.distance-b.distance) > 1e-7 else { continue }
