@@ -197,7 +197,20 @@ import simd
         let candidate = candidateURL == baselineURL ? byID(baseline) : byID(try records(candidateURL))
         guard !baseline.isEmpty, !reference.isEmpty, !candidate.isEmpty else { print("Empty pose file"); exit(2) }
         try fm.createDirectory(at: work, withIntermediateDirectories: true)
-        let config = CaptureConfig()   // camera-only: baRounds 0, no surface reconstruction, MVS enabled
+        var config = CaptureConfig()   // camera-only: baRounds 0, no surface reconstruction, MVS enabled
+        // Diagnostic MVS overrides (MVS_DIM, MVS_REFS, MVS_STRIDE, MVS_SOURCES, MVS_ITERS, MVS_STD,
+        // MVS_COST, MVS_VIEWS, MVS_RATIO, MVS_UNIQUE); the report records the values used.
+        let env = ProcessInfo.processInfo.environment
+        if let v = env["MVS_DIM"].flatMap(Int.init) { config.rgbMaxImageDimension = v }
+        if let v = env["MVS_REFS"].flatMap(Int.init) { config.rgbMaxReferenceFrames = v }
+        if let v = env["MVS_STRIDE"].flatMap(Int.init) { config.rgbPixelStride = v }
+        if let v = env["MVS_SOURCES"].flatMap(Int.init) { config.rgbSourceViews = v }
+        if let v = env["MVS_ITERS"].flatMap(Int.init) { config.rgbPatchMatchIterations = v }
+        if let v = env["MVS_STD"].flatMap(Float.init) { config.rgbMinPatchStd = v }
+        if let v = env["MVS_COST"].flatMap(Float.init) { config.rgbMaxMatchCost = v }
+        if let v = env["MVS_VIEWS"].flatMap(Int.init) { config.rgbConsistentViews = v }
+        if let v = env["MVS_RATIO"].flatMap(Float.init) { config.rgbConsistencyDepthRatio = v }
+        if let v = env["MVS_UNIQUE"].flatMap(Float.init) { config.rgbUniquenessMargin = v }
         var report = Report(scan: scan.path, referencePoses: referenceURL.path, baselinePoses: baselineURL.path,
                             candidatePoses: candidateURL.path, allFrames: allFrames, mvsEnabled: runMVS)
         report.timings.loadSeconds = Date().timeIntervalSince(started)

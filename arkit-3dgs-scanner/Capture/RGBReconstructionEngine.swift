@@ -5,10 +5,14 @@ import simd
 
 /// Bounded CPU multi-view stereo using saved RGB frames and corrected ARKit poses.
 /// It estimates geometry; it does not modify poses or create measured-depth sidecars.
+///
+/// Up to `rgbMaxReferenceFrames` frames are decoded once at `rgbMaxImageDimension`. Each gets
+/// sources chosen by triangulation geometry and a PatchMatch depth map (`RGBStereoMatcher`);
+/// depths confirmed by neighbouring maps are fused into the voxel grid.
 nonisolated enum RGBReconstructionEngine {
     struct Report: Codable, Sendable {
-        var version = 1
-        var method = "known-pose-rgb-patch-stereo"
+        var version = 2
+        var method = "known-pose-patchmatch-mvs"
         var status = "insufficientViews"
         var eligibleFrames = 0
         var attemptedReferences = 0
@@ -22,15 +26,36 @@ nonisolated enum RGBReconstructionEngine {
         var maxImageDimension: Int
         var pixelStride: Int
         var maxReferenceFrames: Int
+        var sourceViews: Int?
+        var iterations: Int?
+        var minPatchStd: Float?
+        var maxMatchCost: Float?
+        var consistentViews: Int?
+        var consistencyDepthRatio: Float?
+        var uniquenessMargin: Float?
+        /// Depth-map pixels with enough texture, passing the photo check, and confirmed by
+        /// neighbouring depth maps.
+        var texturedPixels: Int?
+        var photoConsistentPixels: Int?
+        var ambiguousPixels: Int?
+        var geometricallyConsistentPixels: Int?
         var seconds: Double = 0
     }
     struct Result: Sendable { var points: [CloudPoint]; var report: Report }
 
     static func reconstruct(records: [FrameRecord], sessionDir: URL, config: CaptureConfig,
-                            progress: @Sendable (Double) -> Void = { _ in }) -> Result {
+                            progress: @Sendable (Double) -> Void = { _ in },
+                            isCancelled: @Sendable () -> Bool = { false }) -> Result {
         let start = Date()
         var report = Report(maxImageDimension: config.rgbMaxImageDimension, pixelStride: config.rgbPixelStride,
                             maxReferenceFrames: config.rgbMaxReferenceFrames)
+        report.sourceViews = config.rgbSourceViews
+        report.iterations = config.rgbPatchMatchIterations
+        report.minPatchStd = config.rgbMinPatchStd
+        report.maxMatchCost = config.rgbMaxMatchCost
+        report.consistentViews = config.rgbConsistentViews
+        report.consistencyDepthRatio = config.rgbConsistencyDepthRatio
+        report.uniquenessMargin = config.rgbUniquenessMargin
         // Reject malformed/non-rigid poses before inversion and never match a duplicated camera/image.
         var imagesSeen = Set<String>(), idsSeen = Set<Int>()
         let frames = records.filter { record in
@@ -56,53 +81,101 @@ nonisolated enum RGBReconstructionEngine {
             return true
         }.sorted { $0.timestamp == $1.timestamp ? $0.id < $1.id : $0.timestamp < $1.timestamp }
         report.eligibleFrames = frames.count
-        guard frames.count >= 3 else { progress(1); return Result(points: [], report: report) }
-        let poses = frames.map { RefusionEngine.float4x4(rowMajor: $0.transform) }
-        func center(_ i: Int) -> SIMD3<Float> { SIMD3(poses[i].columns.3.x, poses[i].columns.3.y, poses[i].columns.3.z) }
-        func forward(_ i: Int) -> SIMD3<Float> { -SIMD3(poses[i].columns.2.x, poses[i].columns.2.y, poses[i].columns.2.z) }
-        let count = min(frames.count, max(1, config.rgbMaxReferenceFrames))
-        let references = (0..<count).map { count == 1 ? 0 : $0 * (frames.count - 1) / (count - 1) }
-        var grid = FusedVoxelGrid(voxelSize: config.refuseVoxelSizeM, maxCells: config.exportMaxPoints)
-        for (index, referenceIndex) in references.enumerated() {
-            // Full sequence remains available for neighbors even when reference frames are subsampled.
-            // Prefer moderate baselines; large translations and rotations lose patch overlap.
-            let neighbors = frames.indices.filter { i in
-                let baseline = simd_distance(center(i), center(referenceIndex))
-                return i != referenceIndex && baseline >= config.cameraOnlyMinBaselineM && baseline <= 0.3
-                    && simd_dot(forward(i), forward(referenceIndex)) > 0.94
-            }.sorted { a, b in
-                let da = abs(simd_distance(center(a), center(referenceIndex)) - 0.12)
-                let db = abs(simd_distance(center(b), center(referenceIndex)) - 0.12)
-                return da == db ? a < b : da < db
-            }
-            if let first = neighbors.first,
-               let second = neighbors.dropFirst().first(where: { simd_distance(center($0), center(first)) >= config.cameraOnlyMinBaselineM }) {
-                report.attemptedReferences += 1
-                // Only three small images are resident; no full-scan image cache or dense cost volume.
-                let decoded = [referenceIndex, first, second].compactMap { i -> RGBStereoMatcher.Image? in
-                    guard let image = load(record: frames[i], sessionDir: sessionDir, maxDimension: config.rgbMaxImageDimension) else {
-                        report.failedImageLoads += 1; return nil
-                    }
-                    report.decodedImages += 1
-                    return image
-                }
-                if decoded.count == 3 {
-                    let points = RGBStereoMatcher.reconstruct(reference: decoded[0], sources: Array(decoded.dropFirst()), config: config)
-                    if !points.isEmpty {
-                        report.contributingReferences += 1
-                        report.referenceFrameIDs.append(frames[referenceIndex].id)
-                        report.acceptedObservations += points.count
-                        grid.insert(points, measured: false)
-                    }
-                }
-            }
-            progress(Double(index + 1) / Double(references.count))
+        guard frames.count >= 3 else { progress(1); return finish(report, points: [], start: start) }
+
+        // The shutter already spaces frames by motion, so even index spacing covers the path.
+        let count = min(frames.count, max(3, config.rgbMaxReferenceFrames))
+        let chosen = Array(Set((0..<count).map { $0 * (frames.count - 1) / (count - 1) })).sorted()
+        let slots = RGBStereoMatcher.Slots<RGBStereoMatcher.Image?>(repeating: nil, count: chosen.count)
+        DispatchQueue.concurrentPerform(iterations: chosen.count) { i in
+            guard !isCancelled() else { return }
+            slots.set(i, load(record: frames[chosen[i]], sessionDir: sessionDir, maxDimension: config.rgbMaxImageDimension))
         }
-        let points = grid.exportPoints(target: config.exportMaxPoints, minNeighbors: 0)
+        let decoded = slots.values
+        report.decodedImages = decoded.compactMap { $0 }.count
+        report.failedImageLoads = isCancelled() ? 0 : chosen.count - report.decodedImages
+        progress(0.1)
+        let loaded = chosen.indices.filter { decoded[$0] != nil }
+        let views = loaded.map { decoded[$0]! }
+        let ids = loaded.map { frames[chosen[$0]].id }
+        guard views.count >= 3, !isCancelled() else { progress(1); return finish(report, points: [], start: start) }
+
+        let sources = selectSources(views, config: config)
+        report.attemptedReferences = sources.filter { $0.count >= 2 }.count
+        guard report.attemptedReferences > 0 else {
+            report.status = "insufficientBaseline"; progress(1)
+            return finish(report, points: [], start: start, status: "insufficientBaseline")
+        }
+        let result = RGBStereoMatcher.reconstruct(views: views, sources: sources, config: config,
+                                                  seeds: ids.map { UInt64(bitPattern: Int64($0)) &+ 1 },
+                                                  isCancelled: isCancelled,
+                                                  progress: { progress(0.1 + $0 * 0.85) })
+        report.texturedPixels = result.statistics.texturedPixels
+        report.photoConsistentPixels = result.statistics.photoConsistentPixels
+        report.ambiguousPixels = result.statistics.ambiguousPixels
+        report.geometricallyConsistentPixels = result.statistics.geometricallyConsistentPixels
+        var grid = FusedVoxelGrid(voxelSize: config.refuseVoxelSizeM, maxCells: config.exportMaxPoints)
+        for (i, points) in result.points.enumerated() where !points.isEmpty {
+            report.contributingReferences += 1
+            report.referenceFrameIDs.append(ids[i])
+            report.acceptedObservations += points.count
+            grid.insert(points, measured: false)
+        }
+        let points = isCancelled() ? [] : grid.exportPoints(target: config.exportMaxPoints, minNeighbors: 0)
+        progress(1)
+        return finish(report, points: points, start: start,
+                      status: points.isEmpty ? "noReliableMatches" : "reconstructed")
+    }
+
+    private static func finish(_ report: Report, points: [CloudPoint], start: Date,
+                               status: String = "insufficientViews") -> Result {
+        var report = report
         report.outputPoints = points.count
-        report.status = points.isEmpty ? (report.attemptedReferences == 0 ? "insufficientBaseline" : "noReliableMatches") : "reconstructed"
+        report.status = status
         report.seconds = Date().timeIntervalSince(start)
         return Result(points: points, report: report)
+    }
+
+    /// Up to `rgbSourceViews` sources per view. Candidates must share the viewing direction
+    /// (within 45°) and see sample points of the reference at typical indoor depths with a useful
+    /// triangulation angle (weight rises from 1° to 5°, stays flat to 25°, falls to 0 at 45°).
+    /// Near-duplicate camera positions are skipped so the sources span different baselines.
+    static func selectSources(_ views: [RGBStereoMatcher.Image], config: CaptureConfig) -> [[Int]] {
+        func weight(_ degrees: Float) -> Float {
+            if degrees < 1 || degrees > 45 { return 0 }
+            if degrees < 5 { return (degrees - 1) / 4 }
+            return degrees <= 25 ? 1 : (45 - degrees) / 20
+        }
+        let depths: [Float] = [0.7, 1.4, 2.8]
+        return views.indices.map { r -> [Int] in
+            let reference = views[r]
+            var samples = [SIMD3<Float>]()
+            for gy in 0..<3 { for gx in 0..<4 {
+                let pixel = SIMD2(Float(reference.width) * (Float(gx) + 0.5) / 4,
+                                  Float(reference.height) * (Float(gy) + 0.5) / 3)
+                for depth in depths { samples.append(reference.world(pixel, depth: depth)) }
+            } }
+            var scored = [(index: Int, score: Float)]()
+            for s in views.indices where s != r {
+                let source = views[s]
+                guard simd_distance(source.center, reference.center) >= config.cameraOnlyMinBaselineM,
+                      simd_dot(source.forward, reference.forward) >= 0.707 else { continue }
+                var score: Float = 0
+                for point in samples where source.project(point) != nil {
+                    let a = simd_normalize(point - reference.center), b = simd_normalize(point - source.center)
+                    score += weight(acos(max(-1, min(1, simd_dot(a, b)))) * 180 / .pi)
+                }
+                if score > 0 { scored.append((s, score)) }
+            }
+            var chosen = [Int]()
+            for candidate in scored.sorted(by: { $0.score == $1.score ? $0.index < $1.index : $0.score > $1.score }) {
+                guard chosen.count < max(2, config.rgbSourceViews) else { break }
+                let center = views[candidate.index].center
+                if chosen.contains(where: { simd_distance(views[$0].center, center) < config.cameraOnlyMinBaselineM * 0.5 }) { continue }
+                chosen.append(candidate.index)
+            }
+            return chosen
+        }
     }
 
     /// Preserve sparse coverage outside the sampled RGB surfaces. RGB owns its nearby voxels,
@@ -129,7 +202,7 @@ nonisolated enum RGBReconstructionEngine {
     static func load(record: FrameRecord, sessionDir: URL, maxDimension: Int) -> RGBStereoMatcher.Image? {
         let k = record.intrinsics
         guard k.width > 0, k.height > 0, record.transform.count == 16 else { return nil }
-        let scale = min(1, Double(max(32, min(512, maxDimension))) / Double(max(k.width, k.height)))
+        let scale = min(1, Double(max(32, min(640, maxDimension))) / Double(max(k.width, k.height)))
         let w = max(8, Int(Double(k.width) * scale)), h = max(8, Int(Double(k.height) * scale))
         let url = sessionDir.appendingPathComponent("images").appendingPathComponent(record.imageFile)
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),

@@ -79,7 +79,7 @@ Surface reconstruction explicitly includes pose refinement; disable reconstructi
 | LiDAR enabled | RGB, camera poses, depth and confidence; optional mesh support, RoomPlan, and LiDAR-assisted pose refinement |
 | LiDAR disabled | RGB, camera poses, verified sparse features, and optional image-based reconstruction; no saved LiDAR depth |
 
-The toggle controls depth features requested and used by this app. It is not a sensor power switch and does not guarantee that ARKit itself avoids LiDAR internally. Camera-only reconstruction depends on texture, sharpness, and parallax.
+The toggle controls depth features requested and used by this app. It is not a sensor power switch and does not guarantee that ARKit itself avoids LiDAR internally. Camera-only reconstruction depends on texture, sharpness, and parallax. After a camera-only scan stops, PatchMatch multi-view stereo estimates a depth map for up to 48 views. Only depths that neighbouring views confirm are kept. In desktop replays of two scans with the app's own camera-only poses, it produced 11,000–14,500 points, 15–53 times the earlier image reconstruction, and covered 10–24% of the LiDAR surface within 5 cm (previously under 8%). See [camera-only reconstruction](docs/CAMERA_ONLY_ACCURACY.md).
 
 ## Fusion quality and memory
 
