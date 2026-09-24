@@ -466,7 +466,7 @@ nonisolated enum BundleAdjuster {
 
             // 深度殘差：預測深度(−Z) vs 實測深度。約束重投影看不到的「沿光軸平移」。
             // 權重 fx/d 把公尺換算成同尺度的像素，故可與上面兩列直接相加。
-            if kDepthWeight > 0 {
+            if kDepthWeight > 0, o.depth > 0 {
                 let d = -Z
                 let (scale, huber) = options.depthScale(observed: o.depth, predicted: d, fx: fx)
                 let rd = (d - o.depth) * scale
@@ -513,14 +513,23 @@ nonisolated enum BundleAdjuster {
         return SIMD3<Float>(xc, -yc, -o.depth)
     }
 
+    /// Track points: the mean LiDAR back-projection, or, for tracks observed without depth
+    /// (`depth <= 0`, camera-only scans), the least-squares intersection of their viewing rays.
     static func trackPointsFor(_ poses: [Int: simd_float4x4], order: [Int],
                                intr: [Int: CameraIntrinsics],
                                obsByFrame: [Int: [FeatureObservation]]) -> [Int: SIMD3<Float>] {
         var sum: [Int: SIMD3<Float>] = [:]
         var cnt: [Int: Int] = [:]
+        var rays: [Int: [(origin: SIMD3<Float>, direction: SIMD3<Float>)]] = [:]
         for id in order {
             guard let c2w = poses[id], let K = intr[id], let obs = obsByFrame[id] else { continue }
             for o in obs {
+                guard o.depth > 0 else {
+                    let local = SIMD4<Float>((o.u - Float(K.cx)) / Float(K.fx), -(o.v - Float(K.cy)) / Float(K.fy), -1, 0)
+                    let d = c2w * local
+                    rays[o.trackID, default: []].append((center(c2w), simd_normalize(SIMD3(d.x, d.y, d.z))))
+                    continue
+                }
                 let w = c2w * SIMD4<Float>(cameraLocal(of: o, K: K), 1)
                 sum[o.trackID, default: .zero] += SIMD3(w.x, w.y, w.z)
                 cnt[o.trackID, default: 0] += 1
@@ -528,7 +537,35 @@ nonisolated enum BundleAdjuster {
         }
         var out: [Int: SIMD3<Float>] = [:]
         for (t, s) in sum { out[t] = s / Float(cnt[t] ?? 1) }
+        for (t, list) in rays where out[t] == nil {
+            if let point = triangulate(list) { out[t] = point }
+        }
         return out
+    }
+
+    /// Least-squares ray intersection. Needs two rays at least `minParallaxDeg` apart and a point
+    /// in front of every camera; otherwise the track has no reliable position.
+    static func triangulate(_ rays: [(origin: SIMD3<Float>, direction: SIMD3<Float>)],
+                            minParallaxDeg: Float = 1) -> SIMD3<Float>? {
+        guard rays.count >= 2 else { return nil }
+        var maxAngle: Float = 0
+        for i in rays.indices { for j in (i + 1)..<rays.count {
+            maxAngle = max(maxAngle, acos(max(-1, min(1, simd_dot(rays[i].direction, rays[j].direction)))))
+        } }
+        guard maxAngle >= minParallaxDeg * .pi / 180 else { return nil }
+        var a = simd_double3x3(0), b = SIMD3<Double>.zero
+        for ray in rays {
+            let d = SIMD3<Double>(Double(ray.direction.x), Double(ray.direction.y), Double(ray.direction.z))
+            let c = SIMD3<Double>(Double(ray.origin.x), Double(ray.origin.y), Double(ray.origin.z))
+            let m = matrix_identity_double3x3 - simd_double3x3(rows: [d * d.x, d * d.y, d * d.z])
+            a += m; b += m * c
+        }
+        guard abs(a.determinant) > 1e-12 else { return nil }
+        let x = a.inverse * b
+        let point = SIMD3<Float>(Float(x.x), Float(x.y), Float(x.z))
+        guard point.x.isFinite, point.y.isFinite, point.z.isFinite,
+              rays.allSatisfy({ simd_dot(point - $0.origin, $0.direction) > 0.05 }) else { return nil }
+        return point
     }
 
     /// 目標函數的 RMS（像素）。含深度項 —— 否則自我驗證看不到深度約束帶來的改善，
@@ -578,7 +615,7 @@ nonisolated enum BundleAdjuster {
                 var m2 = r2
                 var d2: Double = 0
                 var depthHuber = kDepthHuberPx
-                if kDepthWeight > 0 {
+                if kDepthWeight > 0, o.depth > 0 {
                     let (scale, huber) = options.depthScale(observed: o.depth, predicted: d, fx: fx)
                     let rd = Double((d - o.depth) * scale)
                     d2 = rd * rd
@@ -592,7 +629,7 @@ nonisolated enum BundleAdjuster {
                 robust += mag <= kHuberPx
                     ? Double(mag * mag)
                     : Double(kHuberPx * (2 * mag - kHuberPx))
-                if kDepthWeight > 0 {
+                if kDepthWeight > 0, o.depth > 0 {
                     let dm = Float(d2.squareRoot())
                     robust += dm <= depthHuber
                         ? Double(dm * dm)
@@ -715,7 +752,7 @@ nonisolated enum BundleAdjuster {
             add(ru * sw)
             for i in 0..<3 { row[i] = Double(simd_dot(jv, dOmega[i]) * sw); row[i + 3] = Double(simd_dot(jv, dT[i]) * sw) }
             add(rv * sw)
-            if kDepthWeight > 0 {
+            if kDepthWeight > 0, o.depth > 0 {
                 let d = -Z
                 let (scale, huber) = options.depthScale(observed: o.depth, predicted: d, fx: fx)
                 let rd = (d - o.depth) * scale
@@ -745,7 +782,7 @@ nonisolated enum BundleAdjuster {
                 let mag = (du * du + dv * dv).squareRoot()
                 if mag > kMaxResidualPx { continue }
                 cost += mag <= kHuberPx ? Double(mag * mag) : Double(kHuberPx * (2 * mag - kHuberPx))
-                if kDepthWeight > 0 {
+                if kDepthWeight > 0, o.depth > 0 {
                     let (scale, huber) = options.depthScale(observed: o.depth, predicted: d, fx: fx)
                     let dm = abs((d - o.depth) * scale)
                     cost += dm <= huber ? Double(dm * dm) : Double(huber * (2 * dm - huber))
@@ -786,7 +823,7 @@ nonisolated enum BundleAdjuster {
                     let dv = SIMD3<Double>(Double(gv.x), Double(gv.y), Double(gv.z))
                     h += w * (simd_double3x3(rows: [du * du.x, du * du.y, du * du.z]) + simd_double3x3(rows: [dv * dv.x, dv * dv.y, dv * dv.z]))
                     g += w * (du * Double(ru) + dv * Double(rv))
-                    if kDepthWeight > 0 {
+                    if kDepthWeight > 0, view.o.depth > 0 {
                         let d = -Z
                         let (scale, huber) = options.depthScale(observed: view.o.depth, predicted: d, fx: fx)
                         let rd = (d - view.o.depth) * scale

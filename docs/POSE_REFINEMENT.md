@@ -12,6 +12,8 @@ After capture, the phone refines ARKit camera poses for the exported 3DGS datase
 4. **Local pilot** (only with experimental surface reconstruction). Try at most 48 intermediate frames spread across the full route, using the same fixed anchors and depth point-to-plane solve as the full [surface alignment](SURFACE_RECONSTRUCTION.md). If no correction is reliable, or the pilot fails the photo check (including insufficient overlap), keep the accepted feature poses. The pilot never becomes a partially corrected output trajectory.
 5. **Full local stage and final photo check.** Run the complete local pass only after the pilot passes; it must then pass a separate photo check. A pilot already covering every eligible frame is reused. TSDF reconstruction still runs if the local pose stage is skipped or rejected. Fusion, preview and COLMAP export use the same final poses.
 
+Camera-only scans (LiDAR off) have no depth for this pipeline. They run an image-only variant: Lucas-Kanade feature tracks, and the same joint bundle adjustment on triangulated tracks. Held-out tracks decide whether it applies; there is no photo check. See [pose refinement without depth](CAMERA_ONLY_ACCURACY.md#pose-refinement-without-depth).
+
 ## Photo-alignment check
 
 Held-out feature tracks share the matcher and LiDAR depth used by the solver, so they cannot see errors that the solver itself introduces. In replays of the previous pipeline, bundle adjustment passed its holdout (5.78 → 5.42 px), yet photos of adjacent frames lined up worse. `PhotometricPoseValidator` therefore measures whether image texture agrees between overlapping frames. Its NCC score is a proxy for photo alignment, not the complete loss used by a 3DGS trainer.

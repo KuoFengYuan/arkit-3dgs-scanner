@@ -324,6 +324,10 @@ nonisolated struct CaptureConfig: Sendable {
     /// 每次掃描各自判定，過門檻才套用。baRounds = 0 時本欄無作用。
     var baApplyPoses = true
 
+    /// 相機模式（無 LiDAR）停止後的姿態精修：純影像特徵追蹤＋聯合 BA（ARKit 逐幀運動先驗），
+    /// 同樣只有保留集改善才套用。沒有深度可做照片對齊檢查。
+    var cameraOnlyPoseRefinement = true
+
     // MARK: - 迴環閉合（降低累積漂移，投報率最高的一項）
     /// 走多遠之後開始提示「回起點閉環」（公尺）。
     ///

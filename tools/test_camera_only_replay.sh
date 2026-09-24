@@ -16,3 +16,14 @@ swiftc -O -module-cache-path "$cache" \
 usage=$("$work/replay_camera_only" 2>&1 || true)
 [[ "$usage" == "Usage: replay_camera_only "* ]] || { echo "FAIL: replay_camera_only usage"; exit 1; }
 echo "PASS: replay_camera_only builds and prints usage"
+# Camera-only tracking and bundle adjustment, and the refinement replay CLI.
+swiftc -O -module-cache-path "$cache" \
+  $C/{Localization,Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,SurfaceTSDF,FeatureTracker,PoseRefiner,BundleAdjuster,RGBStereoMatcher,RGBReconstructionEngine,CameraOnlyTracker}.swift \
+  tools/test_camera_only_bundle.swift -o "$work/camera_only_bundle_test"
+"$work/camera_only_bundle_test" | grep -v "^BA:\|^  "
+swiftc -O -module-cache-path "$cache" \
+  $C/{Localization,Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,SurfaceTSDF,FeatureTracker,PoseRefiner,BundleAdjuster,RGBStereoMatcher,RGBReconstructionEngine,CameraOnlyTracker}.swift \
+  tools/camera_only_metrics.swift tools/refine_camera_only.swift -o "$work/refine_camera_only"
+usage=$("$work/refine_camera_only" 2>&1 || true)
+[[ "$usage" == "Usage: refine_camera_only "* ]] || { echo "FAIL: refine_camera_only usage"; exit 1; }
+echo "PASS: refine_camera_only builds and prints usage"
