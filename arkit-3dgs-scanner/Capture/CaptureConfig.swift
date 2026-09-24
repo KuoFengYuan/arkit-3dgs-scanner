@@ -148,6 +148,9 @@ nonisolated struct CaptureConfig: Sendable {
     var surfaceBudgetMB = 32
     /// Bounded route-wide free-space check for completed experimental surfaces.
     var surfaceVisibilityValidation = true
+    /// Experimental edge/hole protection. Disabled until plane-ROI replay validates accuracy:
+    /// added far coverage can increase local thickness. Does not alter poses or global scale.
+    var surfaceCoverageProtection = false
     var refuseSampleStride = 1
     /// 重融合 voxel 尺寸：比即時預覽（1cm）略粗，把遠距深度雜訊造成的「厚牆」塌成薄面。
     /// 想要最高細節設 0.01；房間尺度 3DGS 初始化 2cm 已足夠且更乾淨。
@@ -207,7 +210,8 @@ nonisolated struct CaptureConfig: Sendable {
     /// 1-5 cm range-dependent LiDAR offsets beyond ~2.5-3 m, larger than a voxel, so weights
     /// cannot merge them into the near surface. 0 (or >= pointMaxDepthM) keeps legacy fusion.
     var fusionNearRangeM: Float = 3.0
-    /// A far-range cell within this distance of a near measured surface is a biased repeat.
+    /// Spherical near-grid exclusion in the default path. With experimental coverage
+    /// protection, maximum separation from a covered compatible final near surface (<=15 cm).
     var fusionFarExclusionM: Float = 0.15
     /// Far cells use this multiple of refuseVoxelSizeM so noisy far data cannot exhaust the
     /// cell budget and coarsen the whole scene.

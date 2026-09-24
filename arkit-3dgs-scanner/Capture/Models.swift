@@ -145,6 +145,11 @@ nonisolated struct ScanSummary: Sendable {
 nonisolated struct CloudPoint: Sendable {
     var x: Float, y: Float, z: Float
     var r: UInt8, g: UInt8, b: UInt8
+    // Transient provenance, not serialized to PLY. 1 = near/TSDF, 2 = far;
+    // bit 2 = precise support within 1 cm from two independent validation views;
+    // bit 3 = local visibility safeguard (coverage protection only).
+    var fusionSource: UInt8 = 0
+    var packedNormal: UInt16 = 0
     var score: Float = 1
 }
 
@@ -159,4 +164,31 @@ nonisolated struct Keyframe: @unchecked Sendable {
     let depthHeight: Int
     let c2w: simd_float4x4
     var record: FrameRecord
+}
+
+/// Octahedral direction encoding. Zero means unavailable; coordinates/RGB are unaffected.
+/// A point grows by four aligned bytes, while grid/TSDF cells use existing padding.
+nonisolated enum PackedSurfaceNormal {
+    static func encode(_ input: SIMD3<Float>) -> UInt16 {
+        let sum = abs(input.x)+abs(input.y)+abs(input.z)
+        guard sum.isFinite,sum > 1e-12 else { return 0 }
+        var v = input/sum
+        if v.z < 0 {
+            let x = (1-abs(v.y))*(v.x >= 0 ? Float(1) : -1)
+            v.y = (1-abs(v.x))*(v.y >= 0 ? Float(1) : -1); v.x = x
+        }
+        let x = UInt16(max(0,min(255,Int(((v.x+1)*127.5).rounded()))))
+        let y = UInt16(max(0,min(255,Int(((v.y+1)*127.5).rounded()))))
+        return max(1,x | (y << 8))
+    }
+    static func decode(_ code: UInt16) -> SIMD3<Float>? {
+        guard code != 0 else { return nil }
+        let x = Float(code & 255)/127.5-1, y = Float(code >> 8)/127.5-1
+        var v = SIMD3(x,y,1-abs(x)-abs(y))
+        if v.z < 0 {
+            v.x = (1-abs(y))*(x >= 0 ? Float(1) : -1)
+            v.y = (1-abs(x))*(y >= 0 ? Float(1) : -1)
+        }
+        return simd_normalize(v)
+    }
 }
