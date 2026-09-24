@@ -613,6 +613,29 @@ final class CaptureController: NSObject, ObservableObject {
             if result.report.status != "validated" {
                 scanNotice = result.report.notice
             }
+        } else if !hasLiDAR, config.cameraOnlyPoseRefinement {
+            // Camera-only: image-only tracks and the joint bundle adjustment; held-out tracks decide.
+            stage(L10n.text("逐張匹配拍攝影像…"), 0.10, .aligning)
+            let records = BlurFilter.annotate(refinedRecords)
+            let onProgress: @Sendable (Double) -> Void = { p in
+                Task { @MainActor [weak self] in
+                    guard let self, self.phase == .processing, self.processingStage == .aligning, self.scanGeneration == generation else { return }
+                    self.exportProgress = 0.10 + p * 0.24
+                    self.statusText = p < 0.9 ? L10n.text("逐張匹配拍攝影像… \(Int(p / 0.9 * 100))%") : L10n.text("驗證相機位置修正…")
+                }
+            }
+            let result = await Task.detached(priority: .userInitiated) {
+                CameraOnlyPoseRefinement.run(records: records, directory: dir,
+                                             isCancelled: { cancel.isCancelled }, progress: onProgress)
+            }.value
+            guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
+            if config.baApplyPoses { refinedRecords = result.records }
+            baResult = result.ba
+            do {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                try encoder.encode(result.report).write(to: dir.appendingPathComponent("camera-pose-refinement.json"), options: .atomic)
+            } catch { print("相機模式姿態精修報告儲存失敗：\(error.localizedDescription)") }
         }
 
         // 模糊幀全域複核。必須在姿態修正**之後**：BlurFilter 靠位置/朝向找「看同一片表面」
