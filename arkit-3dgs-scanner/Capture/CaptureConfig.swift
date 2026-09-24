@@ -35,12 +35,16 @@ nonisolated struct CaptureConfig: Sendable {
     var rgbSourceViews = 4
     var rgbPatchMatchIterations = 4
     /// 參考 patch 的最低亮度標準差（0...1）；白牆不產生深度。
-    var rgbMinPatchStd: Float = 0.02
+    var rgbMinPatchStd: Float = 0.012
     /// 聚合後 1 − ZNCC 上限。
     var rgbMaxMatchCost: Float = 0.35
     /// 至少幾張相鄰深度圖要獨立得到同一表面（重投影與深度皆一致）。
     var rgbConsistentViews = 2
     var rgbConsistencyDepthRatio: Float = 0.01
+    /// 唯一性：最佳來源的極線上 ±rgbUniquenessRadiusPx 像素內，其他深度的成本須至少差這麼多；
+    /// 重複紋理（磁磚、格柵）才不會產生雙層表面。0 關閉。
+    var rgbUniquenessMargin: Float = 0.05
+    var rgbUniquenessRadiusPx = 16
 
     // MARK: - 智慧快門（基於位移 / 轉角，而非固定時間）
     /// 相對上一關鍵幀平移超過此距離（公尺）即觸發抓幀

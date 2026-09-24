@@ -27,25 +27,55 @@ Live sparse checks are not independent RGB triangulation and cannot remove all s
 
 With LiDAR disabled, Image depth reconstruction defaults to enabled and can be disabled for a sparse-only comparison. The choice is fixed for the active scan, including resumed capture. After anchor-pose correction and blur review, `RGBReconstructionEngine` reads photos in the background. Only `.keep` frames participate; `.drop` and `.demote` are excluded.
 
-Each batch retains three small images: one reference and two sources. Up to 24 references are uniformly selected; sources can come from the full eligible sequence. Cameras need 4 cm baseline, at most 30 cm source-to-reference distance, and roughly 20° maximum viewing-direction difference, preferring 12 cm baseline. This is conservative pose-neighborhood selection without global retrieval; no reliable overlap means no points for that reference.
+`RGBReconstructionEngine` runs known-pose PatchMatch multi-view stereo (MVS). Earlier versions used a sampled two-source matcher with frontoparallel patches; see the comparison under [measured results](#measured-on-two-iphone-17-pro-scans).
 
-Images are reduced to a 256-pixel long edge without upscaling, with scaled intrinsics and original sensor orientation. Dimension/calibration mismatch is rejected. Every five pixels, inverse-depth search spans 0.25–5 m, also constrained by point-cloud limits. Epipolar span determines 96–384 candidates followed by local refinement; excessively large searches are rejected rather than allocating a dense cost volume.
+### Views and sources
 
-### Point acceptance
+1. **Views.** Up to 48 frames (`rgbMaxReferenceFrames`) are chosen evenly along the eligible sequence. The capture shutter already spaces frames by motion. Each is decoded once at a 320-pixel long edge (`rgbMaxImageDimension`) without upscaling, with scaled intrinsics and the original sensor orientation. Dimension/calibration mismatches are rejected. Decoding runs in parallel.
+2. **Sources.** Every view is both a reference and a source for the others. Its up to four sources (`rgbSourceViews`) are chosen by geometry, without image retrieval:
+   - candidates must be at least 4 cm away and face within 45°;
+   - they are scored on 36 sample points of the reference (a 4×3 pixel grid at 0.7, 1.4 and 2.8 m) that they see: the triangulation-angle weight rises from 1° to 5°, stays flat to 25°, and falls to 0 at 45°;
+   - near-duplicate positions (within 2 cm of a chosen source) are skipped, so the sources span different baselines.
 
-1. Reference/source 5×5 patches need brightness variance at least 0.0009 and reference texture in two directions. A single edge or stripe cannot sufficiently constrain a match.
-2. Patches are projected through a frontoparallel reference plane and scored using ZNCC. Best NCC must reach 0.88, and cost separation from a competitor more than 1.5 pixels / 4% depth away must reach 0.06. Search endpoints and parallax below 1.5° are rejected.
-3. Independently estimated depths from both sources must agree within 4%; the fused depth may shift projected source positions by at most 0.8 pixels.
-4. Both sources must match back to the reference within 4% depth and 0.8 pixels. This rejects some occlusions, repeated textures, and inconsistent geometry.
-5. Accepted points take reference-image color and confidence/distance weights for voxel fusion. Sparse points within one cell of RGB surfaces are omitted; other validated sparse coverage remains. Output respects `exportMaxPoints`.
+   A view with fewer than two sources produces no depth.
 
-Results feed `review.ply`, history, photo/path playback, COLMAP/PLY export, and training initialization. No artificial LiDAR depth files or depth-dependent BA are created. Deletion removes the entire scan, including the reconstruction report.
+### Depth maps (PatchMatch)
 
-`capture-meta.json` includes optional `rgbReconstructionEnabled`; older metadata remain readable. `rgb-reconstruction.json` stores method, eligible frames, attempted/successful references, failures, observations, RGB/total point counts, reference IDs, sampling settings, and duration. Status can be `insufficientViews`, `insufficientBaseline`, `noReliableMatches`, or `reconstructed`. `decodedImages` counts decode operations, including repeated decodes of the same file.
+For every second pixel (`rgbPixelStride`), a depth and a surface normal are estimated.
+- **Texture gate.** A pixel needs a 5×5-sample patch (9×9 pixels, samples two pixels apart) with a brightness standard deviation of at least 0.012 (`rgbMinPatchStd`) and gradients in two directions. White walls and single stripes produce no depth.
+- **Cost.** The patch is warped into each source through the hypothesised plane (a homography), so slanted floors and walls match. Each source is scored by bilateral-weighted zero-mean normalized cross-correlation (ZNCC); the weights keep a foreground edge from pulling in the background. The cost is the mean of the best half of the sources, so one occluded source does not veto a visible surface.
+- **Search.** Hypotheses start random within 0.25–5 m, facing the camera within 75°. Four sweeps alternate direction. Each pixel tries its already-visited neighbours' planes (propagation), then coarse and fine depth steps, a normal perturbation, and both combined, with steps halving every sweep. Every view has its own random seed, and results do not depend on thread scheduling.
+- **Photo acceptance.**
+  - The aggregated cost must be at most 0.35 (`rgbMaxMatchCost`).
+  - At least two sources must match individually with at least 1.5° of parallax.
+  - Uniqueness: along the best source's epipolar line, within ±16 pixels of the match (excluding ±2 pixels), no other depth may score within 0.05 (`rgbUniquenessMargin`). This rejects repeated textures such as tiles and grilles, which otherwise produce layered ghost surfaces.
+
+### Multi-view consistency and fusion
+
+- **Neighbours.** A view's depth is kept only where at least two neighbouring depth maps (`rgbConsistentViews`) reach the same surface independently. The neighbours are the view's sources and the views that used it as a source.
+- **Check.** The point is projected into the neighbour, and the neighbour's depth at that pixel is projected back. It must land within stride + 1 pixels and within 1% depth (`rgbConsistencyDepthRatio`).
+- **Fusion.**
+  - Accepted points are the average of the agreeing estimates. They take the reference color and are weighted by match quality, the number of agreeing views, and distance.
+  - They are inserted view by view into the 2 cm voxel grid. Sparse points within one cell of RGB surfaces are omitted; other validated sparse coverage remains. Output respects `exportMaxPoints`.
+
+### Output, reports and cost
+
+Results feed `review.ply`, history, photo/path playback, COLMAP/PLY export and training initialization. No artificial LiDAR depth files or depth-dependent BA are created. Deletion removes the entire scan, including the reconstruction report.
+
+`capture-meta.json` includes optional `rgbReconstructionEnabled`; older metadata remain readable. `rgb-reconstruction.json` (version 2, method `known-pose-patchmatch-mvs`) stores:
+- eligible frames and decoded images;
+- attempted and contributing references and their IDs;
+- the pixel funnel: textured, photo-consistent, ambiguous (rejected by uniqueness) and multi-view-consistent pixels;
+- observations, RGB and total point counts;
+- all MVS settings and the duration.
+
+Status can be `insufficientViews`, `insufficientBaseline`, `noReliableMatches` or `reconstructed`. Tearing down the capture screen cancels a running reconstruction, as it does LiDAR fusion.
+
+Memory is bounded by the view budget. 48 views at 320×240 hold about 29 MB of RGBA and grayscale images and about 7 MB of depth and cost maps. Each worker thread also holds one 0.3 MB normal map while its view is being matched. On an 8-core Mac, one run takes 2–3 s on these scans.
 
 ### Limits
 
-This is low-resolution, sampled, fixed-pose mobile MVS. It has no full SfM, global RGB BA, normal optimization, per-pixel depth maps, or hole-filling mesh. Beyond the 24 references, large scenes mainly retain sparse coverage. Reflections, white walls, motion, occlusion, perspective changes, and pose errors can still create gaps or false points. Frontoparallel patches reduce acceptance on steep surfaces. Device runtime, heat, and physical accuracy need measurement.
+This is fixed-pose MVS at 320 pixels. It has no SfM or RGB bundle adjustment, so pose errors pass directly into the points (compare the reference-pose and camera-only-pose runs below). Views beyond the 48-view budget are not matched, so large scenes keep gaps. Low-texture surfaces (plain walls, ceilings), reflections, motion blur and occlusion leave holes. The uniqueness check removes some correct matches on fine regular texture. Phone runtime, heat and physical accuracy need device measurement.
 
 ## Desktop replay against LiDAR
 
@@ -91,19 +121,57 @@ Default settings. The reference poses came from `replay_pose_refinement refine -
 | Photo NCC, camera-only → reference poses: adjacent; wide | 0.964 → 0.978 (+0.006); 0.848 → 0.895 (+0.023) | 0.988 → 0.990 (+0.003); 0.885 → 0.923 (+0.021) |
 | Photo gate status on these frames | accepted | rejected (15 of 80 pairs lost too many samples; limit 12) |
 | LiDAR reference cloud; median point spacing | 162,014 points; 1.32 cm | 620,246 points; 1.36 cm |
-| MVS points; contributing references of 24 | 1,129 / 995; 23 / 22 | 218 / 216; 21 / 22 |
-| MVS accuracy median / P90 | 1.25 / 4.44 cm vs 2.56 / 7.49 cm | 2.48 / 7.20 cm vs 3.10 / ≥10 cm (cap) |
-| MVS points within 2 cm; beyond 10 cm | 70.3%, 2.4% vs 40.8%, 4.8% | 44.0%, 4.6% vs 35.6%, 11.6% |
-| Completeness at 2 / 5 / 10 cm, all LiDAR points | 1.7 / 11.6 / 26.8% vs 0.8 / 7.6 / 24.3% | 0.05 / 0.7 / 3.4% vs 0.04 / 0.6 / 2.9% |
-| Completeness at 2 / 5 / 10 cm, viewed points only | 1.9 / 12.2 / 28.2% vs 0.9 / 8.2 / 26.0% | 0.05 / 0.7 / 3.4% vs 0.04 / 0.6 / 3.0% |
-| LiDAR points viewed by the contributing references | 91.5% / 90.2% | 94.3% / 95.1% |
-| Mac replay time (8 cores): total; fusion; photo; MVS per run | about 7 s; 2.4 s; 1.7 s; 0.9 s | about 12 s; 5.9 s; 1.8 s; 0.6 s |
+| MVS points; contributing views of 48 | 19,076 / 14,474; 48 / 45 | 20,770 / 11,365; 45 / 46 |
+| MVS accuracy median / P90 | 1.16 / 4.18 cm vs 1.95 / 8.78 cm | 1.34 / 5.27 cm vs 2.95 / 9.28 cm |
+| MVS points within 2 cm; beyond 10 cm | 73.6%, 2.0% vs 50.9%, 7.7% | 65.0%, 1.6% vs 39.0%, 8.2% |
+| Completeness at 2 / 5 / 10 cm, all LiDAR points | 15.0 / 36.9 / 56.6% vs 7.7 / 23.7 / 42.0% | 4.6 / 17.3 / 32.5% vs 1.6 / 10.1 / 25.8% |
+| Completeness at 2 / 5 / 10 cm, viewed points only | 15.1 / 37.2 / 56.9% vs 7.8 / 24.2 / 42.7% | 4.7 / 17.5 / 32.8% vs 1.6 / 10.2 / 26.0% |
+| LiDAR points viewed by the contributing views | 98.9% / 98.0% | 98.5% / 98.7% |
+| Mac replay time (8 cores): total; fusion; photo; MVS per run | about 12 s; 2.7 s; 2.0 s; 2.9–3.0 s | about 16 s; 6.7 s; 2.0 s; 2.1 s |
 
 **Poses.** Camera-only poses differ from the LiDAR reference by 1–2 cm (median), up to about 4 cm, and about 0.3° (median). The difference per metre travelled is 1.2–1.4 cm. Over 5 m it is only 1.8–2.7 cm, so on these 16–20 m paths the difference does not grow steadily with distance. Photo alignment improves under the reference poses on both scans, mostly for wide-baseline pairs. On 9F8040 the validator's sample-retention rule still marks the subset "rejected", although its medians improve. The full 569-frame refinement passed that check.
 
-**Points.** MVS density is the larger gap. The run produced about 1,000 points at close range and about 200 at room scale, and completeness within 5 cm stays at about 12% of the LiDAR surface or less. The contributing references view over 90% of that surface, so the limit is points per reference view, not the number of reference views. With reference poses, MVS points lie closer to the LiDAR surface (median 1.25 vs 2.56 cm and 2.48 vs 3.10 cm). At close range more matches also pass (1,129 vs 995 points). The pose differences therefore cost accuracy, and at close range also density. Part of the accuracy gap comes from scoring against a cloud built with the reference poses.
+**Points.** The earlier sampled two-source matcher was the main gap: about 1,000 points at close range and about 200 at room scale, with at most 12% completeness within 5 cm, although its views saw over 90% of the surface. PatchMatch multiplies the points by 15–95 and raises 5 cm completeness about three times at close range and 15–25 times at room scale:
 
-**`--all-frames` (7F2187).** Using all 399 saved frames (280 eligible) instead of the simulated 277 hardly changes the pose differences (RPE 1 m 1.3 cm, ATE RMSE 1.3 cm). MVS with reference poses gains points: 1,601 instead of 1,129, with 5 cm completeness of 14.8% instead of 11.6%. With camera-only poses the result stays at 1,003 points and 7.4% (was 995 and 7.6%). The accuracy medians stay about the same (1.26 and 2.44 cm).
+| Reference poses / camera-only poses | 7F2187 earlier | 7F2187 PatchMatch | 9F8040 earlier | 9F8040 PatchMatch |
+| --- | --- | --- | --- | --- |
+| Points | 1,129 / 995 | 19,076 / 14,474 | 218 / 216 | 20,770 / 11,365 |
+| Accuracy median | 1.25 / 2.56 cm | 1.16 / 1.95 cm | 2.48 / 3.10 cm | 1.34 / 2.95 cm |
+| Accuracy P90 | 4.44 / 7.49 cm | 4.18 / 8.78 cm | 7.20 / ≥10 cm | 5.27 / 9.28 cm |
+| Points beyond 10 cm | 2.4 / 4.8% | 2.0 / 7.7% | 4.6 / 11.6% | 1.6 / 8.2% |
+| Completeness within 5 cm | 11.6 / 7.6% | 36.9 / 23.7% | 0.7 / 0.6% | 17.3 / 10.1% |
+| MVS time per run (Mac) | 0.9 s | 2.9–3.0 s | 0.6 s | 2.1 s |
+
+- **Reference poses.** With them, which isolate MVS, all accuracy measures improve.
+- **Camera-only poses.** Here the pose differences dominate. The median improves, but at close range the share beyond 10 cm rises from 4.8 to 7.7% as many more points come from surfaces where pose errors show. Part of that gap also comes from scoring against a cloud built with the reference poses.
+- **Where the gap is now.** The contributing views see about 99% of the LiDAR surface, so the remaining gap is per view:
+  - Low-texture surfaces fail the texture gate: 48% of 9F8040's grid pixels, against 31% at close range.
+  - The multi-view check keeps 19–21% of photo-consistent pixels with reference poses, and 10–16% with camera-only poses.
+
+### Choosing the defaults
+
+Parameters were varied on both scans; the sweep command is under [regression commands](#regression-commands). Values are with reference poses, as 5 cm completeness / points beyond 10 cm / P90 accuracy.
+
+| Variant (differences from the defaults) | 7F2187 | 9F8040 |
+| --- | --- | --- |
+| **Defaults** (48 views, texture 0.012, uniqueness 0.05) | 36.9% / 2.0% / 4.18 cm | 17.3% / 1.6% / 5.27 cm |
+| Texture threshold 0.02 | 33.4% / 1.8% / 4.25 cm | 10.1% / 3.1% / 6.62 cm |
+| No uniqueness check | 39.8% / 2.5% / 4.63 cm | 19.7% / 2.0% / 5.48 cm |
+| 72 views | 43.9% / 2.2% / 4.31 cm | 23.3% / 2.5% / 5.50 cm |
+| 96 views | 49.0% / 2.8% / 5.14 cm | 29.0% / 2.8% / 5.82 cm |
+
+- **Why these defaults.**
+  - Lowering the texture threshold helps both completeness and accuracy on the plain-walled room.
+  - The uniqueness check gives up 3 percentage points of completeness for fewer outliers and no repeated-texture ghosts.
+  - More views add completeness, but raise outliers and cost. With camera-only poses, 72 views raised the share beyond 10 cm on 7F2187 from 7.7 to 12.1%. 96 views take 2.3 times as long.
+- **Rejected earlier variants** (texture 0.02, without the uniqueness check). None helped enough:
+  - 1% → 2% depth tolerance: 9F8040 5 cm completeness 11.3 → 16.1%, but beyond 10 cm 3.6 → 5.2%.
+  - One agreeing view instead of two: 21.9% and 7.4%.
+  - Six sources: 13.0% and 4.9%.
+  - A 448-pixel image: 12.2% and 3.8%, 1.6× slower.
+  - Match cost 0.45: 11.6% and 3.8%.
+
+**`--all-frames` (7F2187, earlier matcher).** Using all 399 saved frames (280 eligible) instead of the simulated 277 hardly changes the pose differences (RPE 1 m 1.3 cm, ATE RMSE 1.3 cm). MVS with reference poses gains points: 1,601 instead of 1,129, with 5 cm completeness of 14.8% instead of 11.6%. With camera-only poses the result stays at 1,003 points and 7.4% (was 995 and 7.6%). The accuracy medians stay about the same (1.26 and 2.44 cm).
 
 **Reference spacing.** The default 2 cm fusion voxel leaves a median LiDAR point spacing of 1.3 cm, which is not far below the accuracy values. With `--reference-voxel 0.01` the spacing is 0.73 cm (7F2187, 714,180 points) and 0.81 cm (9F8040, which reached the 2,000,000-point cap). The accuracy medians then fall to 0.87 vs 2.25 cm (7F2187) and 2.21 vs 3.04 cm (9F8040), and completeness changes by less than 2 percentage points. Accuracy differences at the 1 cm level are therefore partly set by the reference density, not only by MVS.
 
@@ -117,7 +185,7 @@ Default settings. The reference poses came from `replay_pose_refinement refine -
 - Subsampling approximates the RGB shutter (`SmartShutter` with `cameraOnly`). It omits the depth-scaled 4–5 cm translation threshold, the 3° rotation trigger, and the feature and pose-continuity gates. It can only choose among frames that the LiDAR shutter saved. `estimatedBlurPx`, which drives the blur review, was computed with LiDAR depth, whereas the live camera-only path uses feature depth or 0.5 m.
 - Accuracy uses point-to-point distances, which include the reference point spacing (see above). Completeness depends on the reference point density.
 - Candidate clouds are scored in their own world frame without alignment, and poses are compared both raw and aligned. A candidate whose gauge moves (for example a free RGB-only BA) is charged for the move in the raw values and in the MVS scores.
-- The results cover two scans from one device. Statistics from about 200 MVS points (9F8040) are coarse.
+- The results cover two scans from one device, and the MVS defaults were chosen on the same two scans.
 
 ## Regression commands
 
@@ -133,7 +201,12 @@ swiftc -O -module-cache-path /tmp/fable-swift-cache \
 /tmp/fable-rgb-test
 
 bash tools/test_camera_only_replay.sh   # replay metrics (32 checks) and a replay tool build
+
+# Diagnostic MVS sweep: environment overrides for the replay tool (recorded in the report)
+MVS_STD=0.02 MVS_REFS=72 /tmp/replay_camera_only SCAN WORK_DIR --reference /tmp/ref.jsonl
 ```
+
+`MVS_DIM`, `MVS_REFS`, `MVS_STRIDE`, `MVS_SOURCES`, `MVS_ITERS`, `MVS_STD`, `MVS_COST`, `MVS_VIEWS`, `MVS_RATIO` and `MVS_UNIQUE` override the corresponding `rgb*` settings for one replay.
 
 The replay metric checks cover the following synthetic cases:
 - Identical, rigidly moved (30° and 150°), 2% scaled and 1 cm/m drifting trajectories.
@@ -142,9 +215,18 @@ The replay metric checks cover the following synthetic cases:
 - The viewed mask: visible, occluded, tolerance, out of image, low confidence and too near.
 - Shutter subsampling.
 
-Historical validation passed 29 RGB reconstruction checks, 26 camera-only quality/shutter checks, 18 fusion checks, and unsigned device/Simulator Debug builds. A pre-existing parallel refusion Sendable warning remains.
+The RGB reconstruction test has 33 checks. A pre-existing parallel refusion Sendable warning remains.
 
-RGB fixtures render a textured 1.5 m plane under varying camera translations/rotations and brightness. Cases include slopes, pure rotation, white walls, one-/two-direction periodic texture, third-view occlusion/inconsistency, JPEG resizing/orientation, voxel merge, sparse fill, budgets, missing files, calibration mismatch, malformed poses, blur, duplicate frames, and legacy metadata.
+RGB fixtures render a textured 1.5 m plane under varying camera translations/rotations and brightness. The cases are:
+- slopes, pure rotation, white walls, and one- and two-direction periodic texture (rejected by the texture gate and the uniqueness check);
+- third-view occlusion and inconsistent geometry;
+- identical results across runs of the concurrent depth maps;
+- source selection that skips opposite-facing and near-duplicate cameras and respects the source budget;
+- the report's pixel funnel;
+- JPEG resizing and orientation, voxel merge, sparse fill and view budgets;
+- missing files, calibration mismatch, malformed poses, blur verdicts, duplicate frames and legacy metadata.
+
+On the ideal plane PatchMatch reaches a median depth error of 1.7 mm, and 1.6 mm on the sloped plane.
 
 Synthetic thresholds are median depth error below 1.5 cm, P95 below 4 cm, and sloped-plane median residual below 2.5 cm. These ideal known-pose regression limits do not predict device accuracy. Sparse tests verify acceptance/rejection, epochs, capacity, and shutter behavior rather than physical measurement.
 

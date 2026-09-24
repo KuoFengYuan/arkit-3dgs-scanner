@@ -28,10 +28,16 @@ nonisolated enum RGBReconstructionEngine {
         var maxReferenceFrames: Int
         var sourceViews: Int?
         var iterations: Int?
+        var minPatchStd: Float?
+        var maxMatchCost: Float?
+        var consistentViews: Int?
+        var consistencyDepthRatio: Float?
+        var uniquenessMargin: Float?
         /// Depth-map pixels with enough texture, passing the photo check, and confirmed by
         /// neighbouring depth maps.
         var texturedPixels: Int?
         var photoConsistentPixels: Int?
+        var ambiguousPixels: Int?
         var geometricallyConsistentPixels: Int?
         var seconds: Double = 0
     }
@@ -45,6 +51,11 @@ nonisolated enum RGBReconstructionEngine {
                             maxReferenceFrames: config.rgbMaxReferenceFrames)
         report.sourceViews = config.rgbSourceViews
         report.iterations = config.rgbPatchMatchIterations
+        report.minPatchStd = config.rgbMinPatchStd
+        report.maxMatchCost = config.rgbMaxMatchCost
+        report.consistentViews = config.rgbConsistentViews
+        report.consistencyDepthRatio = config.rgbConsistencyDepthRatio
+        report.uniquenessMargin = config.rgbUniquenessMargin
         // Reject malformed/non-rigid poses before inversion and never match a duplicated camera/image.
         var imagesSeen = Set<String>(), idsSeen = Set<Int>()
         let frames = records.filter { record in
@@ -101,6 +112,7 @@ nonisolated enum RGBReconstructionEngine {
                                                   progress: { progress(0.1 + $0 * 0.85) })
         report.texturedPixels = result.statistics.texturedPixels
         report.photoConsistentPixels = result.statistics.photoConsistentPixels
+        report.ambiguousPixels = result.statistics.ambiguousPixels
         report.geometricallyConsistentPixels = result.statistics.geometricallyConsistentPixels
         var grid = FusedVoxelGrid(voxelSize: config.refuseVoxelSizeM, maxCells: config.exportMaxPoints)
         for (i, points) in result.points.enumerated() where !points.isEmpty {

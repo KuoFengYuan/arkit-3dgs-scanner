@@ -708,8 +708,10 @@ final class CaptureController: NSObject, ObservableObject {
                 }
             }
             let result = await Task.detached(priority: .userInitiated) {
-                RGBReconstructionEngine.reconstruct(records: records, sessionDir: dir, config: cfg, progress: onProgress)
+                RGBReconstructionEngine.reconstruct(records: records, sessionDir: dir, config: cfg, progress: onProgress,
+                                                    isCancelled: { cancel.isCancelled })
             }.value
+            guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
             let sparse = await accumulator.bestPoints(target: cfg.exportMaxPoints, anchorTransforms: latestTileTransforms)
             points = await Task.detached(priority: .userInitiated) {
                 RGBReconstructionEngine.supplement(rgb: result.points, sparse: sparse, config: cfg)

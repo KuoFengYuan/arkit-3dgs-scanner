@@ -84,6 +84,18 @@ struct RGBReconstructionTests {
         check(tilted.count > 30 && tiltedErrors[tiltedErrors.count / 2] < 0.025,
               "rotated cameras reconstruct a slanted plane with < 2.5 cm median plane residual")
 
+        let again = RGBStereoMatcher.reconstruct(reference: reference, sources: [left, right], config: cfg)
+        check(again.count == points.count && zip(again, points).allSatisfy { $0.x == $1.x && $0.y == $1.y && $0.z == $1.z },
+              "concurrent depth maps give identical points on every run")
+        let behind = render(pose(0.06, yaw: .pi))
+        let nearDuplicate = render(pose(0.125))
+        let wide = render(pose(0.24))
+        var selectionConfig = cfg; selectionConfig.rgbSourceViews = 2
+        let selected = RGBReconstructionEngine.selectSources([reference, left, right, behind, nearDuplicate, wide], config: selectionConfig)
+        check(!selected[0].contains(3) && selected[0].count == 2 && Set(selected[0]).isSubset(of: [1, 2, 4, 5]),
+              "sources exclude opposite-facing views and respect the per-view budget")
+        check(!(selected[0].contains(2) && selected[0].contains(4)), "near-duplicate camera positions are not both chosen as sources")
+
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("fable-rgb-tests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir.appendingPathComponent("images"), withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -126,10 +138,14 @@ struct RGBReconstructionTests {
         var capped = cfg; capped.rgbMaxReferenceFrames = 1
         let result = RGBReconstructionEngine.reconstruct(records: records, sessionDir: dir, config: capped)
         check(result.points.count > 30 && result.report.status == "reconstructed", "disk pipeline reconstructs and voxel-fuses RGB geometry")
-        check(result.report.attemptedReferences == 1 && result.report.decodedImages == 3,
-              "reference budget limits work while retaining neighboring views")
+        check(result.report.attemptedReferences == 3 && result.report.decodedImages == 3,
+              "a budget below three views still decodes the minimum three, each matched against the others")
         let report = try JSONDecoder().decode(RGBReconstructionEngine.Report.self, from: JSONEncoder().encode(result.report))
-        check(report.outputPoints == result.points.count && report.method == "known-pose-rgb-patch-stereo", "report preserves RGB provenance and output statistics")
+        check(report.outputPoints == result.points.count && report.method == "known-pose-patchmatch-mvs", "report preserves RGB provenance and output statistics")
+        check((report.texturedPixels ?? 0) >= (report.photoConsistentPixels ?? 0)
+              && (report.photoConsistentPixels ?? 0) >= (report.geometricallyConsistentPixels ?? 0)
+              && (report.geometricallyConsistentPixels ?? 0) == report.acceptedObservations && report.acceptedObservations > 0,
+              "report funnel: textured ≥ photo-consistent ≥ multi-view consistent observations")
         let seed = CloudPoint(x: 0, y: 0, z: -1.5, r: 200, g: 100, b: 50)
         let nearby = CloudPoint(x: 0.001, y: 0, z: -1.5, r: 0, g: 0, b: 0)
         let far = CloudPoint(x: 2, y: 0, z: -1.5, r: 30, g: 40, b: 50)

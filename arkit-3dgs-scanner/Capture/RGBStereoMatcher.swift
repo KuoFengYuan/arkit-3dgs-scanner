@@ -113,6 +113,8 @@ nonisolated enum RGBStereoMatcher {
     struct Statistics: Sendable {
         var texturedPixels = 0
         var photoConsistentPixels = 0
+        /// Photo-consistent but rejected because another depth on the epipolar line matched as well.
+        var ambiguousPixels = 0
         var geometricallyConsistentPixels = 0
     }
 
@@ -364,23 +366,54 @@ nonisolated enum RGBStereoMatcher {
             let depth = map.depth[index], normal = map.normal[index]
             guard map.cost[index] <= config.rgbMaxMatchCost else { map.depth[index] = 0; continue }
             let point = ray * depth, offset = simd_dot(normal, point)
-            var supported = 0
+            var supported = 0, unique = true
             if offset < -1e-6 {
                 patch.centered.withUnsafeBufferPointer { centered in
                     patch.weights.withUnsafeBufferPointer { weights in
-                        for g in geometry {
-                            let n = normal / offset
+                        func cost(_ g: Source, _ d: Float) -> Float {
+                            let p = ray * d, o = simd_dot(normal, p)
+                            guard o < -1e-6 else { return invalidCost }
+                            let n = normal / o
                             let a = g.rotation + simd_float3x3(g.translation * n.x, g.translation * n.y, g.translation * n.z)
-                            let c = sourceCost(g, homography: g.k * a * kInverse, pixel: pixel,
-                                               patch: centered.baseAddress!, weights: weights.baseAddress!,
-                                               weightSum: patch.weightSum, variance: patch.variance)
-                            let angle = simd_dot(simd_normalize(point), simd_normalize(point - g.center))
-                            if c <= config.rgbMaxMatchCost, angle <= minParallax { supported += 1 }
+                            return sourceCost(g, homography: g.k * a * kInverse, pixel: pixel,
+                                              patch: centered.baseAddress!, weights: weights.baseAddress!,
+                                              weightSum: patch.weightSum, variance: patch.variance)
                         }
+                        var best = -1, bestCost = Float.infinity
+                        for (s, g) in geometry.enumerated() {
+                            let c = cost(g, depth)
+                            let angle = simd_dot(simd_normalize(point), simd_normalize(point - g.center))
+                            if c <= config.rgbMaxMatchCost, angle <= minParallax {
+                                supported += 1
+                                if c < bestCost { bestCost = c; best = s }
+                            }
+                        }
+                        // Uniqueness: along the best source's epipolar line, no other depth within
+                        // rgbUniquenessRadiusPx may match almost as well (repeated texture, ghosts).
+                        guard supported >= 2, best >= 0, config.rgbUniquenessMargin > 0 else { return }
+                        let g = geometry[best], inverse = 1 / depth
+                        func location(_ w: Float) -> SIMD2<Float>? {
+                            let p = g.rotation * (ray / w) + g.translation
+                            guard p.z > 1e-6 else { return nil }
+                            let h = g.k * p
+                            return SIMD2(h.x / h.z, h.y / h.z)
+                        }
+                        guard let here = location(inverse), let there = location(inverse * 1.01) else { return }
+                        let pixelsPerInverse = simd_distance(here, there) / (inverse * 0.01)
+                        guard pixelsPerInverse.isFinite, pixelsPerInverse > 1e-3 else { return }
+                        let step = 1 / pixelsPerInverse
+                        var runnerUp = Float.infinity
+                        for k in -config.rgbUniquenessRadiusPx...config.rgbUniquenessRadiusPx where abs(k) > 2 {
+                            let trial = inverse + Float(k) * step
+                            guard trial >= invMin, trial <= invMax else { continue }
+                            runnerUp = min(runnerUp, cost(g, 1 / trial))
+                        }
+                        unique = runnerUp - bestCost >= config.rgbUniquenessMargin
                     }
                 }
             }
-            if supported >= 2 { statistics.photoConsistentPixels += 1 } else { map.depth[index] = 0 }
+            if supported >= 2, !unique { statistics.ambiguousPixels += 1 }
+            if supported >= 2, unique { statistics.photoConsistentPixels += 1 } else { map.depth[index] = 0 }
         }
         // Consistency checks need depths only; release the normals of stored maps.
         map.normal = []
@@ -464,6 +497,7 @@ nonisolated enum RGBStereoMatcher {
         for s in statistics.values {
             total.texturedPixels += s.texturedPixels
             total.photoConsistentPixels += s.photoConsistentPixels
+            total.ambiguousPixels += s.ambiguousPixels
             total.geometricallyConsistentPixels += s.geometricallyConsistentPixels
         }
         progress(1)
