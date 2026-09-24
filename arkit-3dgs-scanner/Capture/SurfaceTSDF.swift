@@ -12,6 +12,7 @@ nonisolated final class SurfaceTSDF {
         var b: Float = 0
         var lastFrame: Int32 = -1
         var views: UInt16 = 0
+        var packedNormal: UInt16 = 0
     }
     final class Block { var cells = [Cell](repeating: Cell(), count: 512); var accessed = 0; var dirty = false }
     struct Key: Hashable, Comparable {
@@ -32,6 +33,8 @@ nonisolated final class SurfaceTSDF {
         var blockWrites = 0
         var diskBytes = 0
         var fallbackPoints = 0
+        var farReservePoints: Int?
+        var peakMergePoints: Int?
         // Optional for compatibility with scans saved before packed paging.
         var storageReadOperations: Int? = 0
         var storageWriteOperations: Int? = 0
@@ -51,13 +54,15 @@ nonisolated final class SurfaceTSDF {
     private let diskBudgetBytes: Int
     private let pagingEnabled: Bool
     private let cacheBlockLookups: Bool
+    private let recordNormals: Bool
     private(set) var report = Report()
     let voxel: Float
     let truncation: Float
     let maxBlocks: Int
     static var blockBytes: Int { 512 * MemoryLayout<Cell>.stride + 256 }
 
-    init(voxel: Float = 0.02, budgetBytes: Int = 32 * 1_048_576, diskBudgetBytes: Int = 256 * 1_048_576, pagingEnabled: Bool = true, cacheBlockLookups: Bool = true) {
+    init(voxel: Float = 0.02, budgetBytes: Int = 32 * 1_048_576, diskBudgetBytes: Int = 256 * 1_048_576, pagingEnabled: Bool = true, cacheBlockLookups: Bool = true, recordNormals: Bool = false) {
+        self.recordNormals = recordNormals
         self.cacheBlockLookups = cacheBlockLookups
         self.diskBudgetBytes = max(0,diskBudgetBytes); self.pagingEnabled = pagingEnabled
         self.voxel = max(0.01, min(0.05, voxel.isFinite ? voxel : 0.02))
@@ -189,6 +194,7 @@ nonisolated final class SurfaceTSDF {
                 guard let n = Self.normal(at:position,view:view) else { continue }
                 normal = simd_dot(n,-ray) >= 0 ? n : -n
             } else { normal = -ray }
+            let packedNormal = recordNormals ? PackedSurfaceNormal.encode(normal) : 0
             surfaceBlocks.insert(surface.0)
             // Half-voxel normal steps avoid holes along diagonals. A cell receives at most one
             // observation per frame, so higher sampling density cannot inflate confidence.
@@ -217,6 +223,7 @@ nonisolated final class SurfaceTSDF {
                 guard abs(sdf) <= truncation else { continue }
                 let weight = max(0.05,min(1,p.score))
                 let old = min(cell.weight, 24), sum = old+weight
+                if cell.packedNormal == 0 { cell.packedNormal = packedNormal }
                 cell.distance = (cell.distance*old + sdf*weight)/sum
                 cell.r = (cell.r*old + Float(p.r)*weight)/sum
                 cell.g = (cell.g*old + Float(p.g)*weight)/sum
@@ -272,10 +279,14 @@ nonisolated final class SurfaceTSDF {
     /// Keep the original fused samples in holes and unsupported regions. Never fill those holes
     /// by relaxing the two-view surface rule. Reservoir uses the same fixed output limit.
     func preservingUnsupported(_ surface: [CloudPoint], fallback: [CloudPoint], limit: Int,
+                               farExclusion: Float = 0,
                                shouldContinue: () -> Bool = {true}) -> [CloudPoint]? {
         var out = surface, seen = surface.count, random: UInt64 = 0x425ae
         for (i,point) in fallback.enumerated() {
             if i%1024 == 0, !shouldContinue() { report.status = "interrupted"; return nil }
+            // Defer far points: duplicates that will be discarded must not evict near
+            // crossings from the reservoir. Their final eligibility is tested later.
+            if farExclusion > 0, (point.fusionSource & 3) == 2 { continue }
             guard !covers(point) else { continue }
             report.fallbackPoints += 1; seen += 1
             if out.count < limit { out.append(point) }
@@ -283,6 +294,43 @@ nonisolated final class SurfaceTSDF {
                 random = random &* 6364136223846793005 &+ 1442695040888963407
                 let index = Int(random%UInt64(seen)); if index < limit { out[index] = point }
             }
+        }
+        if farExclusion > 0 {
+            guard let near = SurfaceCoverageIndex(points:out,include:{ (out[$0].fusionSource & 3) == 1 },shouldContinue:shouldContinue) else {
+                report.status = "interrupted"; return nil
+            }
+            var expectedFill = 0, farCount = 0
+            for (i,p) in fallback.enumerated() {
+                if i%256 == 0, !shouldContinue() { report.status = "interrupted"; return nil }
+                guard (p.fusionSource & 3) == 2 else { continue }
+                farCount += 1
+                let normal = PackedSurfaceNormal.decode(p.packedNormal)
+                if normal == nil || !near.covers(SurfaceCoverageIndex.position(p),normal:normal,radius:min(0.15,farExclusion),points:out) {
+                    expectedFill += 1
+                }
+            }
+            // Estimate capacity only; do not discard any far geometry on this provisional
+            // coverage. The final near survivors may change during visibility validation.
+            let reserve = min(limit/2,expectedFill)
+            report.farReservePoints = reserve
+            let nearLimit = max(0,limit-reserve)
+            if out.count > nearLimit {
+                let total = out.count
+                var written = 0
+                for i in out.indices where (i+1)*nearLimit/total > i*nearLimit/total {
+                    if written != i { out[written] = out[i] }; written += 1
+                }
+                out.removeLast(total-written)
+            }
+            for (i,p) in fallback.enumerated() {
+                if i%1024 == 0, !shouldContinue() { report.status = "interrupted"; return nil }
+                guard (p.fusionSource & 3) == 2 else { continue }
+                out.append(p)
+            }
+            report.fallbackPoints += farCount
+            // At most two capped clouds; final coverage then caps only far fill so near
+            // points used as replacement evidence cannot disappear in another reservoir.
+            report.peakMergePoints = out.count
         }
         if report.fallbackPoints > 0 { report.status = "completedWithFallback" }
         return out
@@ -319,7 +367,7 @@ nonisolated final class SurfaceTSDF {
                     let p = center(v)*(1-t) + center(next)*t
                     let color = SIMD3(a.r,a.g,a.b)*(1-t) + SIMD3(b.r,b.g,b.b)*t
                     let point = CloudPoint(x:p.x,y:p.y,z:p.z,r:UInt8(clamping:Int(color.x.rounded())),
-                        g:UInt8(clamping:Int(color.y.rounded())),b:UInt8(clamping:Int(color.z.rounded())),score:min(1,(a.weight+b.weight)*0.25))
+                        g:UInt8(clamping:Int(color.y.rounded())),b:UInt8(clamping:Int(color.z.rounded())),fusionSource:1,packedNormal:a.packedNormal,score:min(1,(a.weight+b.weight)*0.25))
                     markSurface(p)
                     covered.insert(key); covered.insert(nk); seen += 1
                     if output.count < limit { output.append(point) }

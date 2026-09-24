@@ -6,6 +6,11 @@ nonisolated enum DepthSampleFilter {
     static func incidenceWeight(depth: UnsafeBufferPointer<Float>, confidence: [UInt8]?,
                                 u: Int, v: Int, width: Int, height: Int,
                                 K: CameraIntrinsics, config: CaptureConfig) -> Float? {
+        incidenceSample(depth:depth,confidence:confidence,u:u,v:v,width:width,height:height,K:K,config:config)?.weight
+    }
+    static func incidenceSample(depth: UnsafeBufferPointer<Float>, confidence: [UInt8]?,
+                                u: Int, v: Int, width: Int, height: Int,
+                                K: CameraIntrinsics, config: CaptureConfig) -> (weight: Float, normal: SIMD3<Float>)? {
         guard u > 0, v > 0, u + 1 < width, v + 1 < height,
               depth.count >= width * height, K.fx > 0, K.fy > 0 else { return nil }
         let i = v * width + u
@@ -40,7 +45,7 @@ nonisolated enum DepthSampleFilter {
         guard denominator.isFinite, denominator > 1e-10 else { return nil }
         let cosine = min(1, abs(simd_dot(normal, ray)) / denominator)
         guard cosine >= cos(config.depthMaxIncidenceDeg * .pi / 180) else { return nil }
-        return cosine * cosine
+        return (cosine * cosine, normal)
     }
 }
 
@@ -306,6 +311,8 @@ nonisolated enum SurfaceVisibilityValidator {
         var candidateRemovals = 0
         var removedPoints = 0
         var protectedPoints = 0
+        var locallyProtectedPoints: Int?
+        var coverageWorkspaceBytesEstimate: Int?
         var peakDepthFrames = 0
         var counterBytes = 0
         var seconds = 0.0
@@ -331,8 +338,8 @@ nonisolated enum SurfaceVisibilityValidator {
         return (0..<maximumReferences).map { selected[$0*(selected.count-1)/(maximumReferences-1)] }
     }
 
-    /// `load` is injected for tests. Only one owned map and two UInt8 counters per output
-    /// point are needed. No coordinates, colors, poses or raw depth values are changed.
+    /// `load` is injected for tests. One owned map and two UInt8 counters per output point.
+    /// Experimental coverage adds one counter and compact indices; surviving XYZ/RGB stay intact.
     static func validate(_ points: inout [CloudPoint], references: [Int], config: CaptureConfig,
                          load: (Int) -> DepthConsistencyView?, shouldContinue: () -> Bool = { true },
                          progress: (Double) -> Void = { _ in }) -> Report {
@@ -346,7 +353,8 @@ nonisolated enum SurfaceVisibilityValidator {
         guard shouldContinue() else { return finish("interrupted") }
         var supports = [UInt8](repeating:0,count:points.count)
         var contradictions = supports
-        report.counterBytes = points.count*2
+        var preciseSupports = config.surfaceCoverageProtection ? supports : []
+        report.counterBytes = points.count*(config.surfaceCoverageProtection ? 3 : 2)
         var strict = config
         strict.minDepthConfidence = 2
         strict.pointMaxDepthM = min(3, config.pointMaxDepthM)
@@ -362,7 +370,10 @@ nonisolated enum SurfaceVisibilityValidator {
                     let p = points[i]
                     guard let sample = view.sample(SIMD3(p.x,p.y,p.z),config:strict) else { continue }
                     let residual = sample.measuredDepth-sample.projectedDepth
-                    if abs(residual) <= sample.tolerance { supports[i] += 1 }
+                    if abs(residual) <= sample.tolerance {
+                        supports[i] += 1
+                        if config.surfaceCoverageProtection, abs(residual) <= min(0.01,sample.tolerance) { preciseSupports[i] += 1 }
+                    }
                     // Two agreement bands protect quantization/noise close to the real wall.
                     else if residual > 2*sample.tolerance { contradictions[i] += 1 }
                 }
@@ -379,14 +390,285 @@ nonisolated enum SurfaceVisibilityValidator {
         // Keep the complete input instead of presenting a heavily erased model as repaired.
         guard report.candidateRemovals <= points.count/10 else { return finish("excessiveConflictFallback") }
         guard shouldContinue() else { return finish("interrupted") }
+        if config.surfaceCoverageProtection {
+            // A global percentage cannot protect a small local wall or thin structure. Only
+            // reconsider clusters that would empty over 60% of the local occupied subcells.
+            // Small contradicted shells still follow the depth evidence, rather than restoring
+            // every rejected point simply because a sparse export cannot fit its neighborhood.
+            guard let retained = SurfaceCoverageIndex(points:points,include:{ supports[$0] >= 2 || contradictions[$0] < 3 },shouldContinue:shouldContinue),
+                  let candidates = SurfaceCoverageIndex(points:points,include:{ supports[$0] < 2 && contradictions[$0] >= 3 },shouldContinue:shouldContinue) else {
+                return finish("interrupted")
+            }
+            report.coverageWorkspaceBytesEstimate = retained.workspaceBytesEstimate+candidates.workspaceBytesEstimate
+            report.locallyProtectedPoints = 0
+            var visited = 0
+            for i in points.indices where supports[i] < 2 && contradictions[i] >= 3 {
+                if visited % 256 == 0, !shouldContinue() { return finish("interrupted") }
+                visited += 1
+                let p = SurfaceCoverageIndex.position(points[i])
+                let patch = candidates.patch(p,points:points,allowRough:true)
+                let normal = PackedSurfaceNormal.decode(points[i].packedNormal) ?? patch?.normal
+                let isThin = candidates.isThinStructure(p,points:points)
+                let largeLocalLoss = candidates.lostCoverageFraction(around:p,retained:retained) > 0.60
+                if isThin || (largeLocalLoss && !retained.covers(p,normal:normal,radius:0.15,points:points)) {
+                    contradictions[i] = 0
+                    // Votes use at most 64; the high bit carries the local safeguard
+                    // through compaction without allocating another per-point array.
+                    preciseSupports[i] |= 128
+                    report.locallyProtectedPoints! += 1
+                }
+            }
+        }
+        guard shouldContinue() else { return finish("interrupted") }
         // Compact only after the complete decision succeeds. This avoids a second point array.
         var written = 0
         for i in points.indices where supports[i] >= 2 || contradictions[i] < 3 {
             if written != i { points[written] = points[i] }
+            if config.surfaceCoverageProtection {
+                if preciseSupports[i] & 127 >= 2 { points[written].fusionSource |= 4 }
+                if preciseSupports[i] & 128 != 0 { points[written].fusionSource |= 8 }
+            }
             written += 1
         }
         report.removedPoints = points.count-written
         points.removeLast(report.removedPoints)
         return finish("completed")
+    }
+}
+
+/// Compact linked spatial index over the bounded export, never over all source depth frames.
+/// The index borrows point coordinates at query time, so in-place compaction cannot cause a
+/// second full cloud allocation. Neighborhoods keep at most 24 samples in deterministic order.
+nonisolated struct SurfaceCoverageIndex {
+    private struct Bucket { var first: Int32 = -1; var occupancy: UInt32 = 0 }
+    private var heads: [Int64: Bucket] = [:]
+    private var next: [Int32]
+    private let cell: Float = 0.10
+    var indexedPoints = 0
+    var workspaceBytesEstimate: Int { next.count * 4 + heads.count * 48 }
+
+    init?(points: [CloudPoint], include: (Int) -> Bool, shouldContinue: () -> Bool = { true }) {
+        guard points.count < Int(Int32.max) else { return nil }
+        next = [Int32](repeating:-1,count:points.count)
+        for i in points.indices {
+            if i % 4096 == 0, !shouldContinue() { return nil }
+            guard include(i), let key = PointCloudMath.voxelKey(Self.position(points[i]),size:cell) else { continue }
+            var bucket = heads[key] ?? Bucket()
+            next[i] = bucket.first; bucket.first = Int32(i)
+            let local = (Self.position(points[i])/cell-floor(Self.position(points[i])/cell))*3
+            let x = min(2,max(0,Int(local.x))), y = min(2,max(0,Int(local.y))), z = min(2,max(0,Int(local.z)))
+            bucket.occupancy |= 1 << (x+3*y+9*z)
+            heads[key] = bucket; indexedPoints += 1
+        }
+    }
+    static func position(_ p: CloudPoint) -> SIMD3<Float> { SIMD3(p.x,p.y,p.z) }
+
+    func samples(_ p: SIMD3<Float>, radius: Float, points: [CloudPoint]) -> [(position: SIMD3<Float>,normal:UInt16)] {
+        guard p.x.isFinite,p.y.isFinite,p.z.isFinite,radius.isFinite,radius > 0 else { return [] }
+        let lo = floor((p-radius)/cell), hi = floor((p+radius)/cell)
+        guard abs(lo.x) < 1_000_000,abs(lo.y) < 1_000_000,abs(lo.z) < 1_000_000 else { return [] }
+        var nearest: [(distance:Float,position:SIMD3<Float>,key:Int64,normal:UInt16)] = []
+        nearest.reserveCapacity(24)
+        for x in Int(lo.x)...Int(hi.x) { for y in Int(lo.y)...Int(hi.y) { for z in Int(lo.z)...Int(hi.z) {
+            guard let key = PointCloudMath.voxelKey((SIMD3(Float(x),Float(y),Float(z))+0.5)*cell,size:cell) else { continue }
+            var i = heads[key]?.first ?? -1
+            while i >= 0 {
+                let point = points[Int(i)]
+                let q = Self.position(point), d = simd_length_squared(q-p)
+                i = next[Int(i)]
+                guard d <= radius*radius,
+                      let sampleKey = PointCloudMath.voxelKey(q,size:0.02) else { continue }
+                // TSDF edges can emit several almost coincident samples. Count spatial
+                // coverage, not repeated crossings concentrated in one tiny footprint.
+                if let old = nearest.firstIndex(where:{ $0.key == sampleKey }) {
+                    let previous = nearest[old]
+                    guard d < previous.distance || (d == previous.distance &&
+                        (q.x,q.y,q.z) < (previous.position.x,previous.position.y,previous.position.z)) else { continue }
+                    nearest.remove(at:old)
+                }
+                let at = nearest.firstIndex { d < $0.distance || (d == $0.distance &&
+                    (q.x,q.y,q.z) < ($0.position.x,$0.position.y,$0.position.z)) } ?? nearest.count
+                if at < 24 {
+                    nearest.insert((d,q,sampleKey,point.packedNormal),at:at)
+                    if nearest.count > 24 { nearest.removeLast() }
+                }
+            }
+        } } }
+        return nearest.map { ($0.position,$0.normal) }
+    }
+    func neighbors(_ p: SIMD3<Float>,radius: Float,points: [CloudPoint]) -> [SIMD3<Float>] {
+        samples(p,radius:radius,points:points).map(\.position)
+    }
+
+    /// Occupancy, not point density: repeated TSDF crossings cannot hide a locally erased
+    /// region. Shared occupied subcells survive regardless of how many points were removed.
+    func lostCoverageFraction(around p: SIMD3<Float>,retained: Self) -> Float {
+        let base = floor(p/cell)
+        var original = 0, lost = 0
+        for x in -2...2 { for y in -2...2 { for z in -2...2 {
+            guard let key = PointCloudMath.voxelKey((base+SIMD3(Float(x),Float(y),Float(z))+0.5)*cell,size:cell) else { continue }
+            let candidate = heads[key]?.occupancy ?? 0, kept = retained.heads[key]?.occupancy ?? 0
+            original += (candidate | kept).nonzeroBitCount
+            lost += (candidate & ~kept).nonzeroBitCount
+        } } }
+        return original > 0 ? Float(lost)/Float(original) : 1
+    }
+
+    struct Patch {
+        let center: SIMD3<Float>
+        let normal: SIMD3<Float>
+        let tangent: SIMD3<Float>
+        let samples: [SIMD3<Float>]
+    }
+    /// PCA rejects lines, corners and thick/mixed neighborhoods instead of inventing a plane.
+    func patch(_ p: SIMD3<Float>, points: [CloudPoint], allowRough: Bool = false) -> Patch? {
+        let neighborhood = self.samples(p,radius:allowRough ? 0.12 : 0.085,points:points)
+        func sourcePatch() -> Patch? {
+            if let first = neighborhood.first,let normal = PackedSurfaceNormal.decode(first.normal) {
+                let aligned = neighborhood.filter { sample in
+                    guard let n = PackedSurfaceNormal.decode(sample.normal) else { return false }
+                    return abs(simd_dot(normal,n)) >= 0.94 && abs(simd_dot(sample.position-first.position,normal)) <= 0.02
+                }.map(\.position)
+                if aligned.count >= 4 {
+                    let center = aligned.reduce(SIMD3<Float>.zero,+)/Float(aligned.count)
+                    let axis = abs(normal.x) < 0.8 ? SIMD3<Float>(1,0,0) : SIMD3<Float>(0,1,0)
+                    return Patch(center:center,normal:normal,tangent:simd_normalize(simd_cross(normal,axis)),samples:aligned)
+                }
+            }
+            return nil
+        }
+        let samples = neighborhood.map(\.position)
+        guard samples.count >= 6 else { return sourcePatch() }
+        let center = samples.reduce(SIMD3<Float>.zero,+)/Float(samples.count)
+        var covariance = simd_float3x3()
+        for q in samples {
+            let d = q-center
+            covariance += simd_float3x3(d*d.x,d*d.y,d*d.z)
+        }
+        covariance *= 1/Float(samples.count)
+        var vectors = matrix_identity_float3x3
+        for _ in 0..<12 {
+            var a = 0, b = 1
+            if abs(covariance[0][2]) > abs(covariance[a][b]) { a = 0; b = 2 }
+            if abs(covariance[1][2]) > abs(covariance[a][b]) { a = 1; b = 2 }
+            if abs(covariance[a][b]) < 1e-10 { break }
+            let angle = 0.5*atan2(2*covariance[a][b],covariance[b][b]-covariance[a][a])
+            let c = cos(angle), s = sin(angle)
+            var rotation = matrix_identity_float3x3
+            rotation[a][a] = c; rotation[b][b] = c
+            rotation[a][b] = -s; rotation[b][a] = s
+            covariance = rotation.transpose*covariance*rotation
+            vectors = vectors*rotation
+        }
+        let order = (0..<3).sorted { covariance[$0][$0] < covariance[$1][$1] }
+        let minimum = max(0,covariance[order[0]][order[0]]), middle = covariance[order[1]][order[1]]
+        guard middle >= 0.000035,minimum <= min(allowRough ? 0.0004 : 0.000144,middle*(allowRough ? 0.35 : 0.15)) else { return sourcePatch() }
+        return Patch(center:center,normal:simd_normalize(vectors[order[0]]),
+                     tangent:simd_normalize(vectors[order[2]]),samples:samples)
+    }
+
+    func isThinStructure(_ p: SIMD3<Float>, points: [CloudPoint]) -> Bool {
+        let samples = neighbors(p,radius:0.085,points:points)
+        guard samples.count >= 4 else { return false }
+        var a = samples[0], b = a, span: Float = 0
+        for i in samples.indices { for j in samples.indices where j > i {
+            let length = simd_length_squared(samples[i]-samples[j])
+            if length > span { span = length; a = samples[i]; b = samples[j] }
+        } }
+        guard span > 0.04*0.04 else { return false }
+        let direction = simd_normalize(b-a)
+        return samples.allSatisfy { simd_length_squared(simd_cross($0-a,direction)) < 0.01*0.01 }
+    }
+
+    /// A nearby plane is insufficient: the candidate's projection must have close samples
+    /// on all four tangent quadrants. This protects boundaries, holes and perpendicular walls.
+    func covers(_ p: SIMD3<Float>, normal: SIMD3<Float>?, radius: Float, points: [CloudPoint]) -> Bool {
+        guard let nearest = neighbors(p,radius:radius,points:points).first,
+              let patch = patch(nearest,points:points) else { return false }
+        if let normal, abs(simd_dot(normal,patch.normal)) < 0.94 { return false }
+        let offset = simd_dot(p-patch.center,patch.normal)
+        guard abs(offset) <= radius else { return false }
+        let projected = p-patch.normal*offset
+        let u = patch.tangent, v = simd_cross(patch.normal,u)
+        var quadrants: UInt8 = 0, closest = Float.infinity
+        for sample in patch.samples {
+            let d = sample-projected, x = simd_dot(d,u), y = simd_dot(d,v)
+            let distance = x*x+y*y
+            closest = min(closest,distance)
+            guard distance <= 0.065*0.065,abs(x) >= 0.003,abs(y) >= 0.003 else { continue }
+            quadrants |= 1 << ((x > 0 ? 1 : 0)+(y > 0 ? 2 : 0))
+        }
+        return quadrants == 15 && closest <= 0.035*0.035
+    }
+}
+
+nonisolated enum SurfaceCoverageFilter {
+    struct Report: Codable, Sendable {
+        var candidatePoints = 0
+        var budgetRemovedPoints = 0
+        var removedPoints = 0
+        var protectedPoints = 0
+        var supportedPoints = 0
+        var workspaceBytesEstimate = 0
+        var seconds = 0.0
+    }
+    /// Uniform deterministic thinning of far fill only. The near output was bounded before
+    /// visibility/coverage; preserving it here keeps all replacement evidence valid.
+    static func capFarPreservingNear(_ points: inout [CloudPoint], limit: Int) -> Int {
+        guard points.count > limit else { return 0 }
+        let far = points.reduce(0) { $0 + (($1.fusionSource & 3) == 2 ? 1 : 0) }
+        let near = points.count-far, keep = max(0,limit-near)
+        precondition(near <= limit,"Near output must be bounded before far coverage")
+        var ordinal = 0, written = 0
+        for i in points.indices {
+            if (points[i].fusionSource & 3) == 2 {
+                let selected = (ordinal+1)*keep/far > ordinal*keep/far
+                ordinal += 1
+                if !selected { continue }
+            }
+            if written != i { points[written] = points[i] }; written += 1
+        }
+        let removed = points.count-written
+        points.removeLast(removed)
+        return removed
+    }
+
+    /// No synthesized geometry, snapping or smoothing. All surviving XYZ/RGB values are exact.
+    /// nil signals cancellation/pressure and leaves the complete input unchanged.
+    static func filterFar(_ points: inout [CloudPoint], radius: Float,
+                          shouldContinue: () -> Bool = { true }) -> Report? {
+        let start = Date()
+        var report = Report()
+        guard shouldContinue() else { return nil }
+        report.candidatePoints = points.reduce(0) { $0 + (($1.fusionSource & 3) == 2 ? 1 : 0) }
+        guard radius.isFinite,radius > 0,report.candidatePoints > 0 else { return report }
+        // A malformed configuration must never create unbounded spatial queries.
+        let radius = min(0.15,radius)
+        guard let near = SurfaceCoverageIndex(points:points,include:{ (points[$0].fusionSource & 3) == 1 },shouldContinue:shouldContinue),
+              let far = SurfaceCoverageIndex(points:points,include:{ (points[$0].fusionSource & 3) == 2 },shouldContinue:shouldContinue) else { return nil }
+        var remove = [UInt8](repeating:0,count:points.count)
+        report.workspaceBytesEstimate = near.workspaceBytesEstimate+far.workspaceBytesEstimate+remove.count
+        var visited = 0
+        for i in points.indices where (points[i].fusionSource & 3) == 2 {
+            if visited % 256 == 0, !shouldContinue() { return nil }
+            visited += 1
+            if points[i].fusionSource & 4 != 0 { report.supportedPoints += 1; continue }
+            if points[i].fusionSource & 8 != 0 { report.protectedPoints += 1; continue }
+            let p = SurfaceCoverageIndex.position(points[i])
+            let normal = far.patch(p,points:points)?.normal ?? PackedSurfaceNormal.decode(points[i].packedNormal)
+            guard let normal, near.covers(p,normal:normal,radius:radius,points:points) else {
+                report.protectedPoints += 1; continue
+            }
+            remove[i] = 1; report.removedPoints += 1
+        }
+        guard shouldContinue() else { return nil }
+        var written = 0
+        for i in points.indices where remove[i] == 0 {
+            if written != i { points[written] = points[i] }
+            written += 1
+        }
+        points.removeLast(points.count-written)
+        report.seconds = Date().timeIntervalSince(start)
+        return report
     }
 }

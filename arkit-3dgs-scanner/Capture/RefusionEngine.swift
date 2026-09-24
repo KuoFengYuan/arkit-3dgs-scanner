@@ -149,6 +149,7 @@ nonisolated struct FusedVoxelGrid {
         /// 3DGS 的高斯深度/形狀靠視差約束（同 SfM 三角化），視角相依外觀靠角度多樣性，
         /// 兩者都不是次數能取代的。popcount 也天然涵蓋次數（1 次不可能有 3 個方向）。
         var dirMask: UInt16 = 0
+        var packedNormal: UInt16 = 0
     }
 
     /// 分片字典。
@@ -298,19 +299,20 @@ nonisolated struct FusedVoxelGrid {
                     if var cell = shards[s][key] {
                         if !cell.measured || measured {
                             if !cell.measured && measured {
-                                cell = Cell(mean: pos, color: rgb, weight: w, bestScore: pt.score)
+                                cell = Cell(mean: pos, color: rgb, weight: w, bestScore: pt.score, packedNormal:pt.packedNormal)
                             } else {
                                 let total = cell.weight + w
                                 cell.mean += (pos - cell.mean) * (w / total)
                                 cell.color += (rgb - cell.color) * (w / total)
                                 cell.weight = min(total, weightCap)
+                                if pt.score > cell.bestScore,pt.packedNormal != 0 { cell.packedNormal = pt.packedNormal }
                                 cell.bestScore = max(cell.bestScore, pt.score)
                             }
                             shards[s][key] = cell
                         }
                     } else {
                         shards[s][key] = Cell(mean: pos, color: rgb, weight: w,
-                                             bestScore: pt.score, measured: measured)
+                                             bestScore: pt.score, measured: measured, packedNormal:pt.packedNormal)
                     }
                 }
                 if (index + 1) % 1024 == 0, count > maxCells, !reduceCapacity(to: maxCells, shouldContinue: shouldContinue) { return false }
@@ -339,7 +341,7 @@ nonisolated struct FusedVoxelGrid {
                         if cell.measured && !measured { continue }
                         if !cell.measured && measured {
                             buf[s][key] = Cell(mean: pos, color: rgb, weight: max(0.01, pt.score),
-                                               bestScore: pt.score, measured: true)
+                                               bestScore: pt.score, measured: true, packedNormal:pt.packedNormal)
                             continue
                         }
                         let w = max(0.01, pt.score)
@@ -347,13 +349,14 @@ nonisolated struct FusedVoxelGrid {
                         cell.mean += (pos - cell.mean) * (w / total)
                         cell.color += (rgb - cell.color) * (w / total)
                         cell.weight = min(total, cap)
+                        if pt.score > cell.bestScore,pt.packedNormal != 0 { cell.packedNormal = pt.packedNormal }
                         cell.bestScore = max(cell.bestScore, pt.score)
                         cell.measured = cell.measured || measured
                         buf[s][key] = cell
                     } else {
                         buf[s][key] = Cell(mean: pos, color: rgb,
                                            weight: max(0.01, pt.score), bestScore: pt.score,
-                                           measured: measured)
+                                           measured: measured, packedNormal:pt.packedNormal)
                     }
                 }
             }
@@ -426,6 +429,7 @@ nonisolated struct FusedVoxelGrid {
                     m.mean += (cell.mean - m.mean) * (cell.weight / total)
                     m.color += (cell.color - m.color) * (cell.weight / total)
                     m.weight = min(total, weightCap)
+                    if cell.bestScore > m.bestScore,cell.packedNormal != 0 { m.packedNormal = cell.packedNormal }
                     m.bestScore = max(m.bestScore, cell.bestScore)
                     m.measured = m.measured || cell.measured
                     merged[s][key] = m
@@ -531,7 +535,7 @@ nonisolated struct FusedVoxelGrid {
                 let point = chosen.cell
                 if Self.isFar(chosen.key) { lastExport.farExported += 1 }
                 output.append(CloudPoint(x:point.mean.x,y:point.mean.y,z:point.mean.z,
-                    r:color(point.color.x),g:color(point.color.y),b:color(point.color.z),score:quality(point)))
+                    r:color(point.color.x),g:color(point.color.y),b:color(point.color.z),fusionSource:Self.isFar(chosen.key) ? 2 : (point.measured ? 1 : 0),packedNormal:point.packedNormal,score:quality(point)))
                 best = nil
             }
             shards[shardIndex] = [:]
@@ -593,7 +597,7 @@ nonisolated struct FusedVoxelGrid {
                 if far { stats.farExported += 1 }
                 points.append(CloudPoint(x: cell.mean.x, y: cell.mean.y, z: cell.mean.z,
                                          r: c8(cell.color.x), g: c8(cell.color.y),
-                                         b: c8(cell.color.z),
+                                         b: c8(cell.color.z), fusionSource:far ? 2 : (cell.measured ? 1 : 0), packedNormal:cell.packedNormal,
                                          score: cell.bestScore * min(1, cell.weight / 1.5)))
             }
         }
@@ -665,7 +669,7 @@ nonisolated enum RefusionEngine {
     }
 
     struct Report: Codable, Sendable {
-        var version = 9
+        var version = 10
         var debugAssertionsEnabled: Bool? = ProcessingBuild.debugAssertionsEnabled
         var status = "running"
         var stage = "frames"
@@ -701,6 +705,8 @@ nonisolated enum RefusionEngine {
         var wallSeconds: Double?
         var surface: SurfaceTSDF.Report?
         var surfaceValidation: SurfaceVisibilityValidator.Report?
+        var rangeCoverage: SurfaceCoverageFilter.Report?
+        var coverageProtectionEnabled: Bool?
         /// Range priority (v7). nil in reports written before it existed or when disabled.
         var nearRangeM: Float?
         var farExclusionM: Float?
@@ -729,6 +735,7 @@ nonisolated enum RefusionEngine {
         let jobStarted = Date()
         let warning = FusionMemoryWarning()
         var report = Report(totalFrames: records.count)
+        report.coverageProtectionEnabled = config.surfaceCoverageProtection
         report.diverseReferences = config.depthConsistencyEnabled && config.depthDiverseReferences
         report.rayConsensus = config.depthConsistencyEnabled && config.depthConsensusEnabled
         report.preparedDepthSampling = config.preparedDepthSampling
@@ -799,7 +806,7 @@ nonisolated enum RefusionEngine {
         // 重投影誤差沒有這個盲點，那條路走 BundleAdjuster。
 
         var surface: SurfaceTSDF? = config.surfaceReconstruction
-            ? SurfaceTSDF(voxel:config.refuseVoxelSizeM, budgetBytes:max(0,min(64,config.surfaceBudgetMB))*1_048_576) : nil
+            ? SurfaceTSDF(voxel:config.refuseVoxelSizeM, budgetBytes:max(0,min(64,config.surfaceBudgetMB))*1_048_576,recordNormals:config.surfaceCoverageProtection) : nil
         var grid = FusedVoxelGrid(voxelSize: config.refuseVoxelSizeM,
                                   maxCells: initialLimit, farVoxelScale: farScale)
         let depthDir = sessionDir.appendingPathComponent("depth", isDirectory: true)
@@ -1044,7 +1051,7 @@ nonisolated enum RefusionEngine {
         if boundedMemory {
             var lastPersisted = -1
             guard let exported = grid.consumeExportPoints(target: outputLimit,
-                minNeighbors: config.refuseMinNeighbors, farExclusion: farExclusion,
+                minNeighbors: config.refuseMinNeighbors, farExclusion: config.surfaceCoverageProtection ? 0 : farExclusion,
                 shouldContinue: canContinue, progress: { fraction in
                     report.exportFraction = fraction
                     report.stage = fraction < 0.5 ? "exportFilter" : "exportPoints"
@@ -1057,7 +1064,7 @@ nonisolated enum RefusionEngine {
             exportStats = grid.lastExport
         } else {
             let exported = grid.exportPointsWithStats(target: outputLimit, minNeighbors: config.refuseMinNeighbors,
-                                                      farExclusion: farExclusion)
+                                                      farExclusion: config.surfaceCoverageProtection ? 0 : farExclusion)
             out = exported.points
             exportStats = exported.stats
         }
@@ -1070,7 +1077,7 @@ nonisolated enum RefusionEngine {
         if let volume = surface {
             report.stage = "surfaceExport"; persistReport(); progress(0.95)
             if let extracted = volume.extract(limit:outputLimit,shouldContinue:canContinue),
-               let reconstructed = volume.preservingUnsupported(extracted,fallback:out,limit:outputLimit,shouldContinue:canContinue),
+               let reconstructed = volume.preservingUnsupported(extracted,fallback:out,limit:outputLimit,farExclusion:config.surfaceCoverageProtection ? farExclusion : 0,shouldContinue:canContinue),
                reconstructed.count >= max(1,Int(Float(out.count)*0.35)) {
                 out = reconstructed; outputVoxel = volume.voxel
             } else if volume.report.status.hasPrefix("completed") {
@@ -1088,6 +1095,18 @@ nonisolated enum RefusionEngine {
                 load:{ storedDepthView(records[$0],directory:depthDir) },shouldContinue:canContinue,
                 progress:{progress(0.97+$0*0.025)})
             guard canContinue() else { return interrupted(status:interruptionStatus) }
+        }
+        // Decide only against final survivors: no unsampled grid cell, discarded TSDF
+        // crossing or visibility-rejected near point may erase a far-range fill sample.
+        if config.surfaceCoverageProtection, farExclusion > 0 {
+            guard let coverage = SurfaceCoverageFilter.filterFar(&out,radius:farExclusion,
+                shouldContinue:canContinue) else { return interrupted(status:interruptionStatus) }
+            report.rangeCoverage = coverage
+            report.rangeCoverage?.budgetRemovedPoints = SurfaceCoverageFilter.capFarPreservingNear(&out,limit:outputLimit)
+            exportStats.farExcludedNearSurface = coverage.removedPoints
+            exportStats.farExported = out.reduce(0) { $0 + (($1.fusionSource & 3) == 2 ? 1 : 0) }
+            report.farExcludedNearSurface = coverage.removedPoints
+            report.farExportedPoints = exportStats.farExported
         }
         report.exportSeconds = Date().timeIntervalSince(tE)
         print(String(format: "  匯出擇優 %.2fs（%d 格 → %d 點）",
@@ -1244,12 +1263,14 @@ nonisolated enum RefusionEngine {
                     let z = d[i]
                     let cv = conf?[i] ?? 2
                     if z.isFinite, z > minD, z < maxD, cv >= minConf {
-                        if let incidence = DepthSampleFilter.incidenceWeight(
+                        if let incidence = DepthSampleFilter.incidenceSample(
                             depth: d, confidence: conf, u: u, v: v, width: dw, height: dh,
                             K: K, config: config) {
                             let xc = (Float(u) - cx) / fx * z
                             let yc = (Float(v) - cy) / fy * z
                             let w4 = c2w * SIMD4<Float>(xc, -yc, -z, 1)
+                            let n = incidence.normal
+                            let worldNormal = c2w * SIMD4<Float>(n.x,-n.y,-n.z,0)
                             let px = i * 4
                             let ru = (Float(u) - cx) / Float(dw)
                             let rv = (Float(v) - cy) / Float(dh)
@@ -1258,11 +1279,12 @@ nonisolated enum RefusionEngine {
                             let confW: Float = cv >= 2 ? 1 : config.mediumConfidenceWeight
                             out.append(CloudPoint(x: w4.x, y: w4.y, z: w4.z,
                                                   r: rgba[px], g: rgba[px + 1], b: rgba[px + 2],
+                                                  packedNormal:config.surfaceCoverageProtection ? PackedSurfaceNormal.encode(SIMD3(worldNormal.x,worldNormal.y,worldNormal.z)) : 0,
                                                   // cos²θ：掠射樣本降到 3% 左右
                                                   // （80° → cos²=0.03），正面觀測因此
                                                   // 一進來就主導這一格的加權平均
                                                   score: central * near * sharpness
-                                                         * confW * incidence))
+                                                         * confW * incidence.weight))
                         }
                     }
                     u += stride

@@ -178,7 +178,9 @@ import ImageIO
                 intrinsics:vk,c2w:matrix_identity_float4x4)!
         }
         func sample(_ z: Float) -> CloudPoint { CloudPoint(x:0,y:0,z:-z,r:21,g:55,b:89) }
-        let realWall = [CloudPoint](repeating:sample(2),count:100)
+        let realWall = (0..<100).map { i in
+            CloudPoint(x:(Float(i%10)-4.5)*0.01,y:(Float(i/10)-4.5)*0.01,z:-2,r:21,g:55,b:89)
+        }
         let visibilityInput = realWall + [sample(1.9),sample(2.1),sample(4),
             CloudPoint(x:10,y:0,z:-2,r:1,g:2,b:3)]
         var visible = visibilityInput

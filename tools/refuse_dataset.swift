@@ -5,8 +5,8 @@ import Foundation
     static func main() throws {
         let args = CommandLine.arguments
         let flags = Set(args.dropFirst(3))
-        guard args.count >= 3, flags.isSubset(of: ["--legacy-depth", "--no-range-priority"]) else {
-            print("Usage: refuse_dataset SOURCE NEW_OUTPUT [--legacy-depth] [--no-range-priority]"); exit(2)
+        guard args.count >= 3, flags.isSubset(of: ["--legacy-depth", "--no-range-priority", "--surface", "--coverage-protection"]) else {
+            print("Usage: refuse_dataset SOURCE NEW_OUTPUT [--legacy-depth] [--no-range-priority] [--surface] [--coverage-protection]"); exit(2)
         }
         let fm = FileManager.default, source = URL(fileURLWithPath: CommandLine.arguments[1])
         let output = URL(fileURLWithPath: CommandLine.arguments[2])
@@ -34,6 +34,8 @@ import Foundation
             if fm.fileExists(atPath: url.path) { try fm.copyItem(at: url, to: output.appendingPathComponent(name)) }
         }
         var config = CaptureConfig()
+        config.surfaceReconstruction = flags.contains("--surface")
+        config.surfaceCoverageProtection = flags.contains("--coverage-protection")
         if flags.contains("--legacy-depth") {
             // Reproduces the earlier temporal-neighbor check and single-range fusion.
             config.depthDiverseReferences = false
