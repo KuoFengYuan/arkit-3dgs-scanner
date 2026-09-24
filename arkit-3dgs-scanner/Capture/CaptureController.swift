@@ -127,7 +127,13 @@ final class CaptureController: NSObject, ObservableObject {
     private var sparseTrackingEpoch = 0
     let supportsLiDAR = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
     @Published private(set) var useLiDAR = true
+    #if DEBUG
+    /// UI previews only: render LiDAR-mode controls on a Simulator without LiDAR.
+    var previewLiDAR = false
+    var hasLiDAR: Bool { (supportsLiDAR || previewLiDAR) && useLiDAR }
+    #else
     var hasLiDAR: Bool { supportsLiDAR && useLiDAR }
+    #endif
 
     /// 僅能在開拍前切換；以新 session 移除既有深度／網格，避免混合兩種實驗資料。
     func setLiDAREnabled(_ enabled: Bool) {
@@ -1607,3 +1613,60 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
         }
     }
 }
+
+#if DEBUG
+extension CaptureController {
+    /// UI-only review state for `--preview-review`: synthetic points, no AR session or scan files.
+    func previewReviewState() {
+        var points = [CloudPoint]()
+        var seed: UInt32 = 7
+        func noise() -> Float { seed = seed &* 1_664_525 &+ 1_013_904_223; return Float(seed >> 8) / Float(1 << 24) - 0.5 }
+        for i in 0..<60_000 {
+            let u = Float(i % 300) / 300, v = Float(i / 300) / 200
+            let (x, y, z): (Float, Float, Float)
+            switch i % 3 {
+            case 0: (x, y, z) = (u * 4 - 2, -1.3, v * 3 - 1.5)            // floor
+            case 1: (x, y, z) = (u * 4 - 2, v * 2.5 - 1.3, -1.5)          // back wall
+            default: (x, y, z) = (-2, v * 2.5 - 1.3, u * 3 - 1.5)         // side wall
+            }
+            let shade = UInt8(120 + 90 * (0.5 + 0.5 * sin(x * 5) * cos(z * 4)))
+            points.append(CloudPoint(x: x + noise() * 0.01, y: y + noise() * 0.01, z: z + noise() * 0.01,
+                                     r: shade, g: UInt8(Int(shade) * 9 / 10), b: UInt8(Int(shade) * 8 / 10)))
+        }
+        reviewPoints = points
+        reviewTrajectory = (0..<60).map { i in
+            let a = Float(i) / 60 * 2.4 - 1.2
+            var pose = simd_float4x4(simd_quatf(angle: a + .pi, axis: SIMD3(0, 1, 0)))
+            pose.columns.3 = SIMD4(sin(a) * 1.1, 0, cos(a) * 1.1 + 0.4, 1)
+            return pose
+        }
+        keyframeCount = reviewTrajectory.count
+        pointCount = points.count
+        refinedRecords = [FrameRecord(id: 1, timestamp: 0, transform: RefusionEngine.rowMajor(matrix_identity_float4x4),
+                                      intrinsics: CameraIntrinsics(fx: 1000, fy: 1000, cx: 960, cy: 720, width: 1920, height: 1440),
+                                      exposureDuration: 0.01, exposureOffsetEV: 0, estimatedBlurPx: 0, imageFile: "preview.jpg")]
+        var report = RGBReconstructionEngine.Report(maxImageDimension: config.rgbMaxImageDimension,
+                                                    pixelStride: config.rgbPixelStride,
+                                                    maxReferenceFrames: config.rgbMaxReferenceFrames)
+        report.outputPoints = 1_129; report.contributingReferences = 23
+        imageReconstructionReport = report
+        statusText = L10n.text("表面重建未達容量或涵蓋要求，已使用完整原融合結果。")
+        phase = .review
+    }
+
+    /// UI-only busy scanning state for `--preview-scanning`: warning, motion meter, heat map, coverage ring.
+    func previewScanningState() {
+        previewLiDAR = true
+        sessionState = .ready
+        keyframeCount = 124
+        pointCount = 186_000
+        fusionCompleteness = 0.46
+        colorMode = .fusionQuality
+        var assessment = QualityAssessment()
+        assessment.blurPixels = config.maxBlurPixels * 0.9
+        assessment.issues = [.tooDark]
+        self.assessment = assessment
+        phase = .scanning
+    }
+}
+#endif

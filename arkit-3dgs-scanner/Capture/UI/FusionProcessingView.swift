@@ -34,7 +34,7 @@ struct FusionProcessingView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     @ScaledMetric(relativeTo: .largeTitle) private var progressFont = 48.0
-    private let cyan = Color(red: 0.26, green: 0.91, blue: 0.94)
+    private let cyan = DS.Palette.accent
     private var fraction: Double { progress.isFinite ? min(1, max(0, progress)) : 0 }
 
     var body: some View {
@@ -138,7 +138,7 @@ private struct FusionSynthesisGraphic: View {
         Canvas { context, size in
             let center = CGPoint(x: size.width / 2, y: size.height / 2)
             let radius = min(size.width * 0.36, size.height * 0.45)
-            let tint = Color(red: 0.26, green: 0.91, blue: 0.94)
+            let tint = DS.Palette.accent
             for ring in 0..<3 {
                 let r = radius * (1 + Double(ring) * 0.12)
                 let rect = CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2)

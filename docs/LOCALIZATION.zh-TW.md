@@ -4,7 +4,7 @@
 
 文件英文優先，每份 Markdown 有 .zh-TW.md 繁中對照並互相連結。範例、行為、限制與維護修改需同步。
 
-App 不依裝置語言，預設**繁體中文**。首頁可選繁體中文或 English，以 UserDefaults 的 app.language 記住偏好；沒有設定或值無效時回退繁中。SwiftUI 使用所選 locale，不重建掃描 session。請在首頁切換，再進入掃描或歷史。
+App 不依裝置語言，預設**繁體中文**。首頁的語言選單（地球圖示）可選繁體中文或 English，以 UserDefaults 的 app.language 記住偏好；沒有設定或值無效時回退繁中。SwiftUI 使用所選 locale，不重建掃描 session。請在首頁切換，再進入掃描或歷史。
 
 Capture/Localization.swift 提供 AppLanguage、LocalizedMessage、L10n。UI 標籤、動態錯誤／進度、品質提示、無障礙及內建房間名皆使用 L10n.text；資源位於 en.lproj/Localizable.strings 與 zh-Hant.lproj/Localizable.strings。
 

@@ -33,12 +33,12 @@ struct ScanRoutePlaybackView: View {
                     }
                 }
                 .background(Color.black)
-                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .clipShape(RoundedRectangle(cornerRadius: DS.Radius.l, style: .continuous))
             }
             controls
         }
         .padding(.horizontal, 12)
-        .background(Color(uiColor: .systemBackground))
+        .background(DS.Palette.canvas)
         .task(id: playing ? playbackFPS : 0) {
             guard playing, frames.count > 1 else { return }
             while !Task.isCancelled {
@@ -76,15 +76,15 @@ struct ScanRoutePlaybackView: View {
             .overlay(alignment: .topLeading) { badge(L10n.text("拍攝影像"), icon: "photo") }
             .overlay(alignment: .bottomLeading) {
                 if let time = relativeTime {
-                    Text(time).font(.caption.monospacedDigit()).padding(8)
-                        .background(.black.opacity(0.65), in: Capsule()).foregroundStyle(.white).padding(10)
+                    Text(time).font(.caption.monospacedDigit()).padding(.horizontal, 10).padding(.vertical, 7)
+                        .hudGlass(Capsule()).foregroundStyle(.white).padding(10)
                 }
             }
     }
 
     private var cloudPane: some View {
         ZStack {
-            Color(red: 0.035, green: 0.055, blue: 0.065)
+            Color(uiColor: ReviewPointCloudView.canvas)
             if preview.points.isEmpty && preview.trajectory.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "point.3.connected.trianglepath.dotted").font(.title)
@@ -104,34 +104,36 @@ struct ScanRoutePlaybackView: View {
             HStack(spacing: 8) {
                 Button { following.toggle() } label: {
                     Image(systemName: following ? "location.fill" : "location")
-                        .foregroundStyle(following ? Color.orange : .white)
-                        .frame(width: 44, height: 44)
                 }
+                .buttonStyle(DSIconButtonStyle(isSelected: following, tint: DS.Palette.warning))
                 .accessibilityLabel(following ? L10n.text("離開第一人稱") : L10n.text("第一人稱視角"))
                 .accessibilityValue(following ? L10n.text("已開啟") : L10n.text("已關閉"))
                 Button { playing = false; following = false; resetCameraToken += 1 } label: {
-                    Image(systemName: "scope").frame(width: 44, height: 44)
-                }.accessibilityLabel(L10n.text("查看完整路線"))
+                    Image(systemName: "scope")
+                }
+                .buttonStyle(DSIconButtonStyle())
+                .accessibilityLabel(L10n.text("查看完整路線"))
                 if allowsFullscreen {
                     Button { playing = false; expanded = true } label: {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right").frame(width: 44, height: 44)
-                    }.accessibilityLabel(L10n.text("全螢幕預覽"))
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    }
+                    .buttonStyle(DSIconButtonStyle())
+                    .accessibilityLabel(L10n.text("全螢幕預覽"))
                 }
             }
-            .buttonStyle(.plain).foregroundStyle(.white)
-            .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 12)).padding(8)
+            .padding(8)
         }
         .overlay(alignment: .bottomLeading) {
             Text(displayedFrame?.pose == nil ? L10n.text("此影像沒有對應位置") : (following ? L10n.text("第一人稱 · 同步拍攝位置與方向") : L10n.text("橘色：目前視角 · 綠色：拍攝路線")))
                 .font(.caption2).foregroundStyle(.white)
-                .padding(8).background(.black.opacity(0.65), in: Capsule()).padding(8)
+                .padding(.horizontal, 10).padding(.vertical, 7).hudGlass(Capsule()).padding(8)
                 .allowsHitTesting(false)
         }
     }
 
     private func badge(_ title: String, icon: String) -> some View {
         Label(title, systemImage: icon).font(.caption.weight(.medium))
-            .padding(8).background(.black.opacity(0.65), in: Capsule()).foregroundStyle(.white)
+            .padding(.horizontal, 10).padding(.vertical, 7).hudGlass(Capsule()).foregroundStyle(.white)
             .padding(8).allowsHitTesting(false)
     }
 
@@ -153,8 +155,9 @@ struct ScanRoutePlaybackView: View {
                     playing.toggle()
                 } label: {
                     Image(systemName: playing ? "pause.fill" : "play.fill")
-                        .font(.title2).frame(width: 48, height: 48)
-                        .foregroundStyle(.white).background(Color.accentColor, in: Circle())
+                        .font(.title2).frame(width: 52, height: 52)
+                        .foregroundStyle(DS.Palette.onAccent).background(DS.Palette.accent, in: Circle())
+                        .contentShape(Circle())
                 }
                 .disabled(frames.count < 2)
                 .accessibilityLabel(playing ? L10n.text("暫停回放") : (index == frames.count - 1 ? L10n.text("重新播放") : L10n.text("播放拍攝路線")))

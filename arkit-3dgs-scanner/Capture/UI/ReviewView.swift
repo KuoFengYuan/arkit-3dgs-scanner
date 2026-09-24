@@ -51,7 +51,7 @@ struct ReviewPointCloudView: UIViewRepresentable {
         view.allowsCameraControl = true          // 內建軌道相機：旋轉/縮放/平移
         view.autoenablesDefaultLighting = false
         view.antialiasingMode = .none
-        view.backgroundColor = UIColor(white: 0.07, alpha: 1)
+        view.backgroundColor = Self.canvas
         view.pointOfView = Self.fittedCamera(for: points, trajectory: trajectory)
         view.defaultCameraController.target = SCNVector3(Self.sceneCenter(points: points, trajectory: trajectory))
         context.coordinator.resetCameraToken = resetCameraToken
@@ -159,6 +159,9 @@ struct ReviewPointCloudView: UIViewRepresentable {
         if let highlightedPose { marker.simdTransform = highlightedPose }
     }
 
+
+    /// Matches DS.Palette.canvas so the viewport and the app chrome read as one surface.
+    static let canvas = UIColor(red: 0.039, green: 0.043, blue: 0.051, alpha: 1)
 
     private static func buildScene(points: [CloudPoint], trajectory: [simd_float4x4]) -> SCNScene {
         let scene = SCNScene()

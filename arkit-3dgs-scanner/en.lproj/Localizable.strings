@@ -87,7 +87,6 @@
 "對焦" = "Focus";
 "尚未取得可用影像，請繼續掃描並緩慢移動" = "No usable images yet. Continue scanning and move slowly.";
 "尚無可用影像，請繼續掃描後再匯出" = "No usable images yet. Continue scanning before exporting.";
-"已儲存於裝置" = "Saved on device";
 "已刪除 %@ 筆，另有 %@ 筆未能完整刪除。請重新整理後重試。\n%@" = "Deleted %@ scans; %@ could not be fully deleted. Refresh and retry.\n%@";
 "已匹配 %@ 張影像，%@ 張位置通過驗證並修正。" = "Matched %@ images; validated and corrected %@ camera positions.";
 "已另存優化版本，原始掃描仍保留" = "Saved as an optimized copy. The original scan is preserved.";
@@ -277,7 +276,6 @@
 "跟隨拍攝位置" = "Follow camera position";
 "跨影格匹配不足（%@ 張達到求解需求），保留原本位置。" = "Not enough cross-frame matches (%@ frames meet the solver requirements). Original poses preserved.";
 "較長曝光會增加運動模糊風險" = "Longer exposures increase motion blur risk";
-"返回開始掃描" = "Back to scanning";
 "追蹤不穩，請放慢並對準紋理豐富的區域" = "Tracking is unstable. Slow down and aim at a textured area.";
 "追蹤恢復中・請保持畫面穩定" = "Recovering tracking · Keep the view steady";
 "追蹤暫時不穩，請放慢並對準有紋理的表面" = "Tracking is unstable. Slow down and aim at a textured surface.";
@@ -304,7 +302,6 @@
 "離開掃描" = "Leave scan";
 "離開掃描檢視？" = "Leave scan review?";
 "靠近牆面一點" = "Move closer to the wall";
-"預覽、分享或刪除之前的掃描" = "Preview, share, or delete previous scans";
 "預覽內容" = "Preview content";
 "顯示掃描品質熱圖" = "Show scan quality heatmap";
 "顯示點雲" = "Show point cloud";
@@ -503,3 +500,8 @@
 "照片對齊檢查已通過。" = "The photo alignment check passed.";
 "照片對齊檢查未確認改善，保留原本相機位置。" = "The photo alignment check did not confirm an improvement. Original camera positions preserved.";
 "重疊照片不足以確認修正，保留原本相機位置。" = "Too few overlapping photos to confirm the correction. Original camera positions preserved.";
+"%@ 個點" = "%@ points";
+"相機模式" = "Camera mode";
+"移動速度" = "Motion speed";
+"影像重建 %@ 點" = "%@ image points";
+"顯示家具" = "Show furniture";

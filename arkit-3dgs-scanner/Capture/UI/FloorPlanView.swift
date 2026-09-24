@@ -35,7 +35,7 @@ struct FloorPlanView: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            DS.Palette.canvas.ignoresSafeArea()
             VStack(spacing: 0) {
                 topBar
                 summary
@@ -80,22 +80,17 @@ struct FloorPlanView: View {
     private var topBar: some View {
         HStack {
             Button(action: onClose) {
-                Image(systemName: "chevron.left")
-                    .font(.headline)
-                    .padding(10)
-                    .background(.ultraThinMaterial, in: Circle())
+                Label(L10n.text("回到點雲"), systemImage: "chevron.left")
             }
-            .foregroundStyle(.white)
+            .buttonStyle(DSIconButtonStyle())
             Spacer()
             Text(L10n.text("平面圖")).font(.headline).foregroundStyle(.white)
             Spacer()
             Button { showFurniture.toggle() } label: {
-                Image(systemName: showFurniture ? "chair.lounge.fill" : "chair.lounge")
-                    .font(.headline)
-                    .padding(10)
-                    .background(.ultraThinMaterial, in: Circle())
+                Label(L10n.text("顯示家具"), systemImage: showFurniture ? "chair.lounge.fill" : "chair.lounge")
             }
-            .foregroundStyle(showFurniture ? .orange : .white)
+            .buttonStyle(DSIconButtonStyle(isSelected: showFurniture, tint: DS.Palette.warning))
+            .accessibilityValue(showFurniture ? L10n.text("已開啟") : L10n.text("已關閉"))
         }
         .padding(.horizontal, 12)
         .padding(.top, 6)

@@ -10,6 +10,7 @@ import ARKit
 struct CaptureView: View {
     @StateObject private var controller = CaptureController()
     @Environment(\.scenePhase) private var scenePhase
+    @State private var reviewCameraReset = 0
 
     var body: some View {
         ZStack {
@@ -18,7 +19,8 @@ struct CaptureView: View {
             // review / exporting / done 期間以 3D 檢視器覆蓋 AR 畫面（AR view 保持存活以便續掃）
             if showReview {
                 ReviewPointCloudView(points: controller.reviewPoints,
-                                     trajectory: controller.reviewTrajectory)
+                                     trajectory: controller.reviewTrajectory,
+                                     resetCameraToken: reviewCameraReset)
                     .ignoresSafeArea()
                     .id(controller.reviewPoints.count)   // 續掃後重新處理 → 重建場景
             }
@@ -29,7 +31,8 @@ struct CaptureView: View {
                                      frameCount: controller.keyframeCount,
                                      startedAt: controller.processingStartedAt)
             } else {
-                HUDOverlay(controller: controller)
+                HUDOverlay(controller: controller,
+                           onResetView: showReview ? { reviewCameraReset += 1 } : nil)
             }
         }
         .statusBarHidden()
