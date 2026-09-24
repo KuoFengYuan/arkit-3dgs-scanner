@@ -34,7 +34,7 @@ Camera state and dataset phase are distinct. `scanning + relocalizing` retains t
 
 ## User flow
 
-The home screen is the scan history, with a floating start button. With no scans it explains Scan → Review/rescan → Export/share. Advanced capture settings open from one **Scan settings** button. See [interface design](INTERFACE_DESIGN.md). Permission denial offers Settings. Export requires usable photos; zero-point data may still export calibrated images. Invalid tracking cannot append a new coordinate system to an existing scan.
+The home screen has a floating start button and a **Scan history** card that opens the history. Until the first scan it explains Scan → Review/rescan → Export/share. Advanced capture settings open from one **Scan settings** button. See [interface design](INTERFACE_DESIGN.md). Permission denial offers Settings. Export requires usable photos; zero-point data may still export calibrated images. Invalid tracking cannot append a new coordinate system to an existing scan.
 
 Capture, processing, and export prevent closing the screen directly. Leaving an unexported review explains where files remain and that the live session cannot be restored from history.
 

@@ -1,13 +1,11 @@
 import SwiftUI
 import ImageIO
 
-/// Home library: a grid of saved scans with one prominent capture action.
+/// Scan history, opened from the home screen: a grid of saved scans.
 struct ScanHistoryView: View {
     /// Changes when capture closes, so a newly saved scan appears without pulling to refresh.
     let revision: Int
-    let hasLiDAR: Bool
-    let canScan: Bool
-    let onStartScan: () -> Void
+    @Environment(\.dismiss) private var dismiss
     @State private var entries: [ScanEntry] = []
     @State private var loading = true
     @State private var error: String?
@@ -55,6 +53,7 @@ struct ScanHistoryView: View {
         .dsCanvas()
         .navigationTitle(selecting ? L10n.text("已選取 \(selectedIDs.count) 筆") : L10n.text("掃描紀錄"))
         .navigationBarTitleDisplayMode(selecting ? .inline : .large)
+        .toolbarBackground(DS.Palette.canvas.opacity(0.9), for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 if !entries.isEmpty {
@@ -69,6 +68,8 @@ struct ScanHistoryView: View {
             }
         }
         .safeAreaInset(edge: .bottom) { bottomBar }
+        .animation(DS.springy, value: selecting)
+        .animation(DS.springy, value: deleting)
         .task(id: revision) {
             await reload()
             #if DEBUG
@@ -107,13 +108,7 @@ struct ScanHistoryView: View {
     private var library: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: DS.Space.m) {
-                HStack(spacing: DS.Space.xs) {
-                    DSMetric(value: hasLiDAR ? "LiDAR" : L10n.text("標準相機"),
-                             symbol: hasLiDAR ? "sensor.tag.radiowaves.forward" : "camera",
-                             tone: hasLiDAR ? .accent : .neutral)
-                    Text(L10n.text("共 \(entries.count) 筆")).font(.subheadline).foregroundStyle(DS.Palette.textSecondary)
-                    Spacer()
-                }
+                Text(L10n.text("共 \(entries.count) 筆")).font(.subheadline).foregroundStyle(DS.Palette.textSecondary)
                 LazyVGrid(columns: columns, spacing: DS.Space.l) {
                     ForEach(entries) { entry in
                         if selecting {
@@ -151,68 +146,32 @@ struct ScanHistoryView: View {
         .disabled(deleting)
     }
 
-    // MARK: - Empty state (first run)
+    // MARK: - Empty state
 
     private var emptyLibrary: some View {
         ScrollView {
-            VStack(spacing: DS.Space.xl) {
-                ZStack {
-                    Circle().fill(DS.Palette.accent.opacity(0.10)).frame(width: 148, height: 148)
-                    Circle().strokeBorder(DS.Palette.accent.opacity(0.25), lineWidth: 1).frame(width: 112, height: 112)
-                    Image(systemName: "cube.transparent")
-                        .font(.system(size: 46, weight: .light))
-                        .foregroundStyle(DS.Palette.accent)
-                    Image(systemName: "viewfinder")
-                        .font(.system(size: 96, weight: .ultraLight))
-                        .foregroundStyle(DS.Palette.accent.opacity(0.55))
-                }
-                .accessibilityHidden(true)
-                .padding(.top, DS.Space.l)
-                VStack(spacing: DS.Space.s) {
-                    Text(L10n.text("把眼前的空間，\n留下來。"))
-                        .font(.system(.largeTitle, design: .rounded, weight: .bold))
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(L10n.text("走一圈、檢查點雲與拍攝路線，再匯出空間掃描資料。"))
-                        .font(.body)
+            VStack(spacing: DS.Space.l) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 44, weight: .light))
+                    .foregroundStyle(DS.Palette.accent)
+                    .frame(width: 112, height: 112)
+                    .background(DS.Palette.accent.opacity(0.10), in: Circle())
+                    .accessibilityHidden(true)
+                VStack(spacing: DS.Space.xs) {
+                    Text(L10n.text("還沒有掃描紀錄")).font(.title3.weight(.semibold))
+                    Text(L10n.text("完成掃描後會自動保留在這裡，之後可預覽、分享或刪除。"))
+                        .font(.subheadline)
                         .foregroundStyle(DS.Palette.textSecondary)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                // The home screen is the scan history; say so while it is still empty.
-                HStack(alignment: .top, spacing: DS.Space.s) {
-                    Image(systemName: "clock.arrow.circlepath")
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(DS.Palette.accent)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(L10n.text("還沒有掃描紀錄")).font(.headline)
-                        Text(L10n.text("完成掃描後會自動保留在這裡，之後可預覽、分享或刪除。"))
-                            .font(.subheadline)
-                            .foregroundStyle(DS.Palette.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer(minLength: 0)
+                Button { dismiss() } label: {
+                    Label(L10n.text("返回開始掃描"), systemImage: "record.circle")
                 }
-                .dsCard()
-                .accessibilityElement(children: .combine)
-                ScanGuideSteps()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .dsCard(padding: DS.Space.l)
-                Label(L10n.text("多走動、少原地旋轉，讓同一個表面被不同角度看見。"), systemImage: "figure.walk")
-                    .font(.subheadline)
-                    .foregroundStyle(DS.Palette.textSecondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                if !hasLiDAR {
-                    Label(L10n.text("此裝置可擷取影像與稀疏點雲；完整幾何與平面圖建議使用 LiDAR 裝置。"), systemImage: "info.circle")
-                        .font(.footnote)
-                        .foregroundStyle(DS.Palette.textTertiary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                .buttonStyle(DSPrimaryButtonStyle(fill: false))
             }
-            .padding(.horizontal, DS.Space.xl)
-            .padding(.bottom, DS.Space.xl)
+            .padding(DS.Space.xl)
+            .padding(.top, DS.Space.xxl)
             .frame(maxWidth: DS.Size.panelMaxWidth)
             .frame(maxWidth: .infinity)
         }
@@ -221,67 +180,43 @@ struct ScanHistoryView: View {
 
     // MARK: - Bottom actions
 
+    /// Selection and deletion actions; nothing floats over the grid otherwise.
     @ViewBuilder
     private var bottomBar: some View {
-        Group {
-            if deleting {
-                ProgressView(L10n.text("正在刪除照片與模型…"))
-                    .tint(.white)
-                    .foregroundStyle(DS.Palette.textPrimary)
-                    .padding(.horizontal, DS.Space.l).frame(minHeight: DS.Size.primaryHeight)
-                    .dsFloatingPanel(radius: DS.Radius.l)
-            } else if selecting {
-                HStack(spacing: DS.Space.s) {
-                    Button(selectedIDs.count == entries.count ? L10n.text("取消全選") : L10n.text("全選")) {
-                        selectedIDs = selectedIDs.count == entries.count ? [] : Set(entries.map(\.id))
+        if deleting || selecting {
+            Group {
+                if deleting {
+                    ProgressView(L10n.text("正在刪除照片與模型…"))
+                        .tint(.white)
+                        .foregroundStyle(DS.Palette.textPrimary)
+                        .padding(.horizontal, DS.Space.l).frame(minHeight: DS.Size.primaryHeight)
+                        .dsFloatingPanel(radius: DS.Radius.l)
+                } else {
+                    HStack(spacing: DS.Space.s) {
+                        Button(selectedIDs.count == entries.count ? L10n.text("取消全選") : L10n.text("全選")) {
+                            selectedIDs = selectedIDs.count == entries.count ? [] : Set(entries.map(\.id))
+                        }
+                        .buttonStyle(DSSecondaryButtonStyle())
+                        Spacer(minLength: 0)
+                        Button(role: .destructive) {
+                            pendingDelete = DeletionRequest(entries: selectedEntries, all: selectedIDs.count == entries.count)
+                        } label: {
+                            Label(L10n.text("刪除所選（\(selectedIDs.count)）"), systemImage: "trash")
+                        }
+                        .buttonStyle(DSPrimaryButtonStyle(fill: false, tint: DS.Palette.danger))
+                        .disabled(selectedIDs.isEmpty)
                     }
-                    .buttonStyle(DSSecondaryButtonStyle())
-                    Spacer(minLength: 0)
-                    Button(role: .destructive) {
-                        pendingDelete = DeletionRequest(entries: selectedEntries, all: selectedIDs.count == entries.count)
-                    } label: {
-                        Label(L10n.text("刪除所選（\(selectedIDs.count)）"), systemImage: "trash")
-                    }
-                    .buttonStyle(DSPrimaryButtonStyle(fill: false, tint: DS.Palette.danger))
-                    .disabled(selectedIDs.isEmpty)
-                }
-                .padding(DS.Space.s)
-                .dsFloatingPanel(radius: DS.Radius.xl + 4)
-            } else {
-                VStack(spacing: DS.Space.xs) {
-                    Button(action: onStartScan) {
-                        Label(L10n.text("開始掃描"), systemImage: "record.circle")
-                            .padding(.horizontal, DS.Space.xs)
-                    }
-                    .buttonStyle(DSPrimaryButtonStyle(fill: false))
-                    .shadow(color: DS.Palette.accent.opacity(canScan ? 0.35 : 0), radius: 16, y: 6)
-                    .disabled(!canScan)
-                    .accessibilityIdentifier("startScan")
-                    if !canScan {
-                        Text(L10n.text("此裝置不支援 AR 掃描"))
-                            .font(.caption)
-                            .foregroundStyle(DS.Palette.textSecondary)
-                    }
+                    .padding(DS.Space.s)
+                    .dsFloatingPanel(radius: DS.Radius.xl + 4)
                 }
             }
+            .frame(maxWidth: DS.Size.panelMaxWidth)
+            .padding(.horizontal, DS.Space.m)
+            .padding(.bottom, DS.Space.xs)
+            .frame(maxWidth: .infinity)
+            .disabled(loading && !deleting)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
         }
-        .frame(maxWidth: DS.Size.panelMaxWidth)
-        .padding(.horizontal, DS.Space.m)
-        .padding(.top, DS.Space.l)
-        .padding(.bottom, DS.Space.xs)
-        .frame(maxWidth: .infinity)
-        .background {
-            // Fade the grid out under the floating actions instead of a hard toolbar edge.
-            LinearGradient(stops: [.init(color: DS.Palette.canvas.opacity(0), location: 0),
-                                   .init(color: DS.Palette.canvas.opacity(0.94), location: 0.45),
-                                   .init(color: DS.Palette.canvas, location: 1)],
-                           startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea()
-                .allowsHitTesting(false)
-        }
-        .disabled(loading && !deleting)
-        .animation(DS.springy, value: selecting)
-        .animation(DS.springy, value: deleting)
     }
 
     private func delete(_ targets: [ScanEntry]) async {
