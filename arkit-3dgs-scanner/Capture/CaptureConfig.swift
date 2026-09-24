@@ -24,10 +24,23 @@ nonisolated struct CaptureConfig: Sendable {
 
     // MARK: - 停止後的純 RGB 多視角重建（不產生 LiDAR depth sidecar）
     var reconstructFromImages = true
-    var rgbMaxImageDimension = 256
-    var rgbMaxReferenceFrames = 24
-    var rgbPixelStride = 5
+    /// 匹配影像長邊（像素）；內參等比縮放。
+    var rgbMaxImageDimension = 320
+    /// 參考視角上限：每個視角各算一張深度圖，也互為其他視角的來源與一致性檢查。
+    var rgbMaxReferenceFrames = 48
+    /// 深度圖取樣間隔（像素）。
+    var rgbPixelStride = 2
     var rgbMinDepthM: Float = 0.25
+    /// 每個視角的 PatchMatch 來源視角數；成本取最好的一半，遮擋的來源不會否決可見表面。
+    var rgbSourceViews = 4
+    var rgbPatchMatchIterations = 4
+    /// 參考 patch 的最低亮度標準差（0...1）；白牆不產生深度。
+    var rgbMinPatchStd: Float = 0.02
+    /// 聚合後 1 − ZNCC 上限。
+    var rgbMaxMatchCost: Float = 0.35
+    /// 至少幾張相鄰深度圖要獨立得到同一表面（重投影與深度皆一致）。
+    var rgbConsistentViews = 2
+    var rgbConsistencyDepthRatio: Float = 0.01
 
     // MARK: - 智慧快門（基於位移 / 轉角，而非固定時間）
     /// 相對上一關鍵幀平移超過此距離（公尺）即觸發抓幀
