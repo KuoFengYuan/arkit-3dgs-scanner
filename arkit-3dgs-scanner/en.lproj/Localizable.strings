@@ -73,6 +73,7 @@
 "單一角度 → 多角度" = "Single angle → Multiple angles";
 "單指旋轉・雙指縮放與平移" = "One finger to rotate · Two fingers to zoom and pan";
 "單指旋轉・雙指縮放，檢查是否有遺漏的區域" = "One finger to rotate · Two fingers to zoom. Check for missing areas.";
+"回到點雲" = "Back to point cloud";
 "回放速度" = "Playback speed";
 "地板 %.1f m²　·　外接 %.2f × %.2f m　·　樓高 %.2f m" = "Floor %.1f m² · Bounds %.2f × %.2f m · Height %.2f m";
 "外接 %.2f × %.2f m　·　最長牆 %.2f m　·　樓高 %.2f m" = "Bounds %.2f × %.2f m · Longest wall %.2f m · Height %.2f m";
@@ -81,6 +82,7 @@
 "姿態修正 中位數 %.0fcm / 最大 %.0fcm" = "Pose correction: median %.0fcm / maximum %.0fcm";
 "姿態已修正 %@ 幀（ARKit 地圖優化）" = "Corrected %@ frame poses (ARKit map optimization)";
 "完成" = "Done";
+"完成掃描後會自動保留在這裡，之後可預覽、分享或刪除。" = "Completed scans are saved here for preview, sharing, or deletion.";
 "客廳" = "Living room";
 "對焦" = "Focus";
 "尚未取得可用影像，請繼續掃描並緩慢移動" = "No usable images yet. Continue scanning and move slowly.";
@@ -131,6 +133,7 @@
 "掃描原始資料已保留，但歷史點雲預覽儲存失敗：%@" = "Raw scan data is saved, but saving the history point cloud preview failed: %@";
 "掃描已暫停，回到相機後會重新定位" = "Scanning paused. The camera will relocalize when you return.";
 "掃描影像" = "Scan image";
+"掃描會保留在首頁的「掃描紀錄」，之後可預覽、分享或刪除。離開後無法接續這次即時掃描。" = "This scan is saved in Scan history for preview, sharing, or deletion. You cannot resume this live scan session after leaving.";
 "掃描檔案已關閉" = "Scan files are closed";
 "掃描紀錄" = "Scan history";
 "掃描與資料優化都在裝置上進行" = "Capture and data refinement run on your device";
@@ -283,6 +286,7 @@
 "這次掃描沒有儲存點雲或深度資料，可切換查看影像。" = "This scan has no saved point cloud or depth data. Switch to images.";
 "這次掃描沒有可預覽的點雲，仍可查看拍攝影像。" = "No point cloud is available for this scan. Captured images can still be viewed.";
 "選取" = "Select";
+"還沒有掃描紀錄" = "No scans yet";
 "重新啟動相機" = "Restart camera";
 "重新定位中：請把鏡頭對準上次掃描過的區域" = "Relocalizing: aim at a previously scanned area";
 "重新播放" = "Replay";
@@ -500,8 +504,4 @@
 "相機模式" = "Camera mode";
 "移動速度" = "Motion speed";
 "影像重建 %@ 點" = "%@ image points";
-"回到點雲" = "Back to point cloud";
 "顯示家具" = "Show furniture";
-"掃描會保留在首頁的「掃描紀錄」，之後可預覽、分享或刪除。離開後無法接續這次即時掃描。" = "This scan is saved in Scan history for preview, sharing, or deletion. You cannot resume this live scan session after leaving.";
-"還沒有掃描紀錄" = "No scans yet";
-"完成掃描後會自動保留在這裡，之後可預覽、分享或刪除。" = "Completed scans are saved here for preview, sharing, or deletion.";
