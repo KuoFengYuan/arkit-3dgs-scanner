@@ -57,8 +57,17 @@ import Foundation
         if let v = env["BA_ITER"].flatMap(Int.init) { options.jointIterations = v }
         if let v = env["BA_ANCHORS"].flatMap(Int.init) { options.anchorFrames = v }
         if let v = env["BA_SUBPIXEL"] { options.subpixelFeatures = v == "1" }
+        // LOOP_MODE=rigidGuided|rigidDescriptor|off compares revisit handling (default bundleTracks).
+        var revisit = LoopClosureRefiner.RevisitOptions()
+        if let v = env["LOOP_DIST"].flatMap(Float.init) { revisit.maxDistanceM = v }
+        if let v = env["LOOP_FACING"].flatMap(Float.init) { revisit.minFacing = v }
+        if let v = env["LOOP_MIN_MATCHES"].flatMap(Int.init) { revisit.minMatches = v }
+        if let v = env["LOOP_MIN_INLIERS"].flatMap(Int.init) { revisit.minInliers = v }
+        if let v = env["LOOP_STRICT"] { revisit.requireImprovement = v == "1" }
+        let loopMode = env["LOOP_MODE"].flatMap(OfflinePoseRefinement.LoopMode.init(rawValue:)) ?? .bundleTracks
         let result = await OfflinePoseRefinement.run(records: input, directory: scan, rounds: 6,
-                                                     surfaceRefinement: surface, options: options)
+                                                     surfaceRefinement: surface, options: options,
+                                                     loopMode: loopMode, revisitOptions: revisit)
         print(json(result.report))
         print(String(format: "REPLAY %d frames, %.1f s, status %@", input.count, Date().timeIntervalSince(started), result.report.status))
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]

@@ -4,8 +4,13 @@ import simd
 /// On-device, disk-backed second pass. Rebuilds tracks from saved images instead of relying
 /// on the best-effort live worker. LiDAR supplies metric landmarks; no desktop SfM is required.
 nonisolated enum OfflinePoseRefinement {
+    /// How revisits enter the feature stage. `bundleTracks` adds pose-guided revisit matches to the
+    /// joint bundle adjustment. The rigid modes keep the earlier separate LiDAR-point correction after
+    /// BA (with guided or descriptor matching) for comparisons.
+    enum LoopMode: String, Codable, Sendable { case bundleTracks, rigidGuided, rigidDescriptor, off }
+
     struct Report: Codable, Sendable {
-        var version = 6
+        var version = 7
         var status = "pending"
         var inputFrames = 0
         var processedFrames = 0
@@ -26,6 +31,12 @@ nonisolated enum OfflinePoseRefinement {
         var localSurfacePilot: LocalSurfaceRefiner.Report?
         var localSurfaceSkippedReason: String?
         var loopClosure: LoopClosureRefiner.Report?
+        /// v7: revisit tracks added to the joint bundle adjustment (default loop mode).
+        var loopTracks: LoopClosureRefiner.TrackReport?
+        var loopMode: String?
+        /// v7: why revisit tracks were dropped and the stage re-solved without them
+        /// ("bundleRejected:<status>" or "photoRejected"); nil when they were kept or unused.
+        var revisitFallback: String?
         /// v5: independent photo-alignment check per candidate stage ("features", "localSurface").
         var photometric: [String: PhotometricPoseValidator.Report]?
         /// v5: stage whose poses were applied after the photo-alignment check; nil keeps input poses.
@@ -39,6 +50,13 @@ nonisolated enum OfflinePoseRefinement {
             return [featureNotice, extra, photo].filter { !$0.isEmpty }.joined(separator: "\n")
         }
         private var featureNotice: String {
+            if let loopTracks, loopTracks.candidatePairs > 0 {
+                let counts = L10n.text("閉環：\(loopTracks.candidatePairs) 組候選，\(loopTracks.verifiedPairs) 組通過幾何驗證。")
+                let outcome = loopTracks.observations > 0 && appliedStage != nil && revisitFallback == nil
+                    ? L10n.text("閉環修正已套用；參考距離仍需獨立驗證。")
+                    : L10n.text("未套用閉環修正，保留原本的姿態精修結果。")
+                return localNotice + "\n" + counts + " " + outcome
+            }
             guard let loopClosure, loopClosure.candidatePairs > 0 else { return localNotice }
             let counts = L10n.text("閉環：\(loopClosure.candidatePairs) 組候選，\(loopClosure.verifiedPairs) 組通過幾何驗證。")
             let outcome = loopClosure.status == "validated"
@@ -67,6 +85,8 @@ nonisolated enum OfflinePoseRefinement {
         var records: [FrameRecord]
         var ba: PoseRefineResult
         var report: Report
+        /// Re-solves the feature stage without revisit tracks; set only when they were added.
+        var withoutRevisits: (@Sendable () -> Result)? = nil
     }
 
     /// Feature BA with verified loops, then optional local surface alignment. Each stage that
@@ -75,12 +95,14 @@ nonisolated enum OfflinePoseRefinement {
     /// passing keeps the input poses.
     static func run(records: [FrameRecord], directory: URL, rounds: Int,
                     surfaceRefinement: Bool = false, options: BundleAdjuster.Options = BundleAdjuster.Options(),
+                    loopMode: LoopMode = .bundleTracks,
+                    revisitOptions: LoopClosureRefiner.RevisitOptions = LoopClosureRefiner.RevisitOptions(),
                     isCancelled: @escaping @Sendable () -> Bool = { false },
                     progress: @escaping @Sendable (Double) -> Void = { _ in }) async -> Result {
         let started = Date()
         let featureShare = surfaceRefinement ? 0.78 : 0.92
         let features = await runFeatures(records:records,directory:directory,rounds:rounds,options:options,
-            isCancelled:isCancelled,progress:{progress($0 * featureShare)})
+            loopMode:loopMode,revisitOptions:revisitOptions,isCancelled:isCancelled,progress:{progress($0 * featureShare)})
         var report = features.report
         func finish(_ result: Result) -> Result {
             var result = result
@@ -115,7 +137,21 @@ nonisolated enum OfflinePoseRefinement {
             photometric["features"] = check; report.photometric = photometric
             progress(surfaceRefinement ? 0.82 : 1)
             if check.status == "cancelled" || isCancelled() { return keepInput("cancelled") }
-            guard check.accepted else {
+            var passed = check.accepted
+            if !passed, let fallback = features.withoutRevisits {
+                // Revisit tracks must never cost a scan the correction it had without them.
+                let base = fallback()
+                if base.report.status == "validated", base.report.changedFrames > 0, !isCancelled() {
+                    let baseCheck = PhotometricPoseValidator.evaluate(input:records,candidate:base.records,
+                        directory:directory,isCancelled:isCancelled)
+                    photometric["featuresWithoutRevisits"] = baseCheck; report.photometric = photometric
+                    if baseCheck.status == "cancelled" || isCancelled() { return keepInput("cancelled") }
+                    if baseCheck.accepted {
+                        accepted = base; accepted.report.revisitFallback = "photoRejected"; passed = true
+                    }
+                }
+            }
+            guard passed else {
                 report.localSurfaceSkippedReason = "featurePhotoRejected"
                 return keepInput(check.status == "rejected" ? "photometricValidationRejected" : "photometricValidationInsufficient")
             }
@@ -165,14 +201,24 @@ nonisolated enum OfflinePoseRefinement {
     }
 
     private static func runFeatures(records: [FrameRecord], directory: URL, rounds: Int,
-                    options: BundleAdjuster.Options,
+                    options: BundleAdjuster.Options, loopMode: LoopMode,
+                    revisitOptions: LoopClosureRefiner.RevisitOptions,
                     isCancelled: @escaping @Sendable () -> Bool = { false },
                     progress: @escaping @Sendable (Double) -> Void = { _ in }) async -> Result {
         let started = Date()
-        let local = await runLocal(records: records, directory: directory, rounds: rounds, options: options,
+        var local = await runLocal(records: records, directory: directory, rounds: rounds, options: options,
+                                   revisitTracks: loopMode == .bundleTracks, revisitOptions: revisitOptions,
                                    isCancelled: isCancelled, progress: { progress($0 * 0.7) })
-        guard rounds > 0, !["cancelled", "memoryPressure", "observationBudgetExceeded", "insufficientDepthFrames"].contains(local.report.status) else { return local }
-        let loop = LoopClosureRefiner.run(records: local.records, directory: directory,
+        let terminal = ["cancelled", "memoryPressure", "observationBudgetExceeded", "insufficientDepthFrames"]
+        if local.report.status != "validated", !terminal.contains(local.report.status), let fallback = local.withoutRevisits {
+            // Revisit tracks must never cost a scan the bundle adjustment it had without them.
+            var base = fallback()
+            base.report.revisitFallback = "bundleRejected:" + local.report.status
+            local = base
+        }
+        guard rounds > 0, !terminal.contains(local.report.status),
+              loopMode == .rigidGuided || loopMode == .rigidDescriptor else { progress(1); return local }
+        let loop = LoopClosureRefiner.run(records: local.records, directory: directory, guided: loopMode == .rigidGuided,
                                          isCancelled: isCancelled, progress: { progress(0.7 + $0 * 0.3) })
         var report = local.report
         report.loopClosure = loop.report
@@ -197,16 +243,17 @@ nonisolated enum OfflinePoseRefinement {
     }
 
     private static func runLocal(records: [FrameRecord], directory: URL, rounds: Int,
-                                 options: BundleAdjuster.Options,
+                                 options: BundleAdjuster.Options, revisitTracks: Bool = false,
+                                 revisitOptions: LoopClosureRefiner.RevisitOptions = LoopClosureRefiner.RevisitOptions(),
                                  isCancelled: @escaping @Sendable () -> Bool,
                                  progress: @escaping @Sendable (Double) -> Void) async -> Result {
         let start = Date()
         var report = Report()
         report.inputFrames = records.count
-        var ba = PoseRefineResult()
+        report.loopMode = revisitTracks ? LoopMode.bundleTracks.rawValue : nil
         func finish(_ status: String, _ output: [FrameRecord]) -> Result {
             report.status = status; report.seconds = Date().timeIntervalSince(start)
-            return Result(records: output, ba: ba, report: report)
+            return Result(records: output, ba: PoseRefineResult(), report: report)
         }
         let usable = records.filter { r in
             r.blurVerdict != .drop && r.depthFile != nil && r.transform.count == 16
@@ -242,12 +289,49 @@ nonisolated enum OfflinePoseRefinement {
             report.peakDescriptorFrames = max(report.peakDescriptorFrames, state.descriptorFrames)
             progress(Double(i+1) / Double(usable.count) * 0.85)
         }
-        let observations = await tracker.observations()
+        let baseObservations = await tracker.observations()
+        var revisits = LoopClosureRefiner.TrackResult()
+        if revisitTracks {
+            // Revisit matches use the input poses only to predict where to search.
+            revisits = LoopClosureRefiner.bundleObservations(records: usable, directory: directory, existing: baseObservations,
+                options: revisitOptions, isCancelled: { isCancelled() || Task.isCancelled }, progress: { progress(0.85 + $0 * 0.05) })
+            if revisits.report.status == "cancelled" { return finish("cancelled", records) }
+            if revisits.report.status == "memoryPressure" { return finish("memoryPressure", records) }
+            revisits.report.heldOutBeforeM = LoopClosureRefiner.heldOutDistance(revisits.heldOut, records: records, poses: [:])
+            report.loopTracks = revisits.report
+        }
+        print(await tracker.stats())
+        await tracker.reset() // Release descriptors before solver allocations.
+        let collected = report
+        var result = solve(records: records, observations: baseObservations + revisits.observations, rounds: rounds,
+                           options: options, report: collected, revisits: revisitTracks ? revisits.heldOut : nil,
+                           started: start, isCancelled: isCancelled)
+        if !revisits.observations.isEmpty {
+            // Lazily re-solve without revisit tracks if their bundle adjustment is rejected later.
+            result.withoutRevisits = {
+                solve(records: records, observations: baseObservations, rounds: rounds, options: options,
+                      report: collected, revisits: nil, started: start, isCancelled: isCancelled)
+            }
+        }
+        progress(1)
+        return result
+    }
+
+    /// Bundle adjustment and its safety checks on collected observations. `input` carries the
+    /// collection statistics; `revisits` (held-out revisit tracks) adds their after-BA distance.
+    private static func solve(records: [FrameRecord], observations: [FeatureObservation], rounds: Int,
+                              options: BundleAdjuster.Options, report input: Report,
+                              revisits: [LoopClosureRefiner.RevisitTrack]?, started: Date,
+                              isCancelled: @escaping @Sendable () -> Bool) -> Result {
+        var report = input
+        var ba = PoseRefineResult()
+        func finish(_ status: String, _ output: [FrameRecord]) -> Result {
+            report.status = status; report.seconds = Date().timeIntervalSince(started)
+            return Result(records: output, ba: ba, report: report)
+        }
         report.observationCount = observations.count
         report.supportedFrames = Dictionary(grouping: observations.filter { $0.trackID % BundleAdjuster.kHoldoutEvery != BundleAdjuster.kHoldoutEvery - 1 }, by: \.frameID).values
             .filter { $0.count >= BundleAdjuster.kMinObsPerFrame }.count
-        print(await tracker.stats())
-        await tracker.reset() // Release descriptors before solver allocations.
         guard !isCancelled(), !Task.isCancelled else { return finish("cancelled", records) }
         guard RefusionEngine.hasOptionalProcessingHeadroom else { return finish("memoryPressure", records) }
         let solveStart = Date()
@@ -260,7 +344,10 @@ nonisolated enum OfflinePoseRefinement {
         if isCancelled() || Task.isCancelled { return finish("cancelled", records) }
         report.holdoutBefore = ba.holdoutMedianPx?.before
         report.holdoutAfter = ba.holdoutMedianPx?.after
-        guard !ba.poses.isEmpty else { progress(1); return finish(ba.rejectionReason ?? "validationRejectedOrInsufficientTracks", records) }
+        if let revisits, !ba.poses.isEmpty {
+            report.loopTracks?.heldOutAfterM = LoopClosureRefiner.heldOutDistance(revisits, records: records, poses: ba.poses)
+        }
+        guard !ba.poses.isEmpty else { return finish(ba.rejectionReason ?? "validationRejectedOrInsufficientTracks", records) }
         // Reject the entire correction if it exceeds a small ARKit refinement. Never clamp
         // poses independently: that would invalidate the held-out reprojection validation.
         for r in records {
@@ -280,7 +367,6 @@ nonisolated enum OfflinePoseRefinement {
             if zip(r.transform, out.transform).contains(where: { abs($0-$1) > 1e-6 }) { report.changedFrames += 1 }
             return out
         }
-        progress(1)
         return finish("validated", updated)
     }
 

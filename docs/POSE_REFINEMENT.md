@@ -7,8 +7,8 @@ After capture, the phone refines ARKit camera poses for the exported 3DGS datase
 ## Pipeline
 
 1. **ARKit anchors.** Each keyframe places an `ARAnchor`; stopping reads back the anchors that ARKit's map optimization moved. In one 569-frame replay this corrected poses by a median 38 mm (maximum 108 mm), and revisit surface offsets fell from about 45 mm to 11 mm. This stage is unchanged.
-2. **Feature stage.** Saved photos are matched against recent frames and four route anchors. A joint bundle adjustment with ARKit motion priors and verified loop closure follows (see below).
-3. **Feature photo check.** Validate the feature stage immediately, before computing anything from its candidate poses. Rejection preserves the input and skips the local stage.
+2. **Feature stage.** Saved photos are matched against recent frames and four route anchors. Revisited views are matched with pose-guided, plane-warped patches and added as tracks ([revisit refinement](LOOP_CLOSURE_AND_SCALE.md#revisit-refinement)). A joint bundle adjustment with ARKit motion priors follows (see below).
+3. **Feature photo check.** Validate the feature stage immediately, before computing anything from its candidate poses. If the stage with revisit tracks is rejected, here or by the bundle adjustment's held-out gate, it is solved and checked again without them. Rejection preserves the input and skips the local stage.
 4. **Local pilot** (only with experimental surface reconstruction). Try at most 48 intermediate frames spread across the full route, using the same fixed anchors and depth point-to-plane solve as the full [surface alignment](SURFACE_RECONSTRUCTION.md). If no correction is reliable, or the pilot fails the photo check (including insufficient overlap), keep the accepted feature poses. The pilot never becomes a partially corrected output trajectory.
 5. **Full local stage and final photo check.** Run the complete local pass only after the pilot passes; it must then pass a separate photo check. A pilot already covering every eligible frame is reused. TSDF reconstruction still runs if the local pose stage is skipped or rejected. Fusion, preview and COLMAP export use the same final poses.
 
@@ -22,7 +22,7 @@ Held-out feature tracks share the matcher and LiDAR depth used by the solver, so
 - **Decision for the first stage.** Per-pair NCC changes receive a `0.1 × lost fraction` penalty. A pair with fewer than 400 common samples gets a negative effective change of at least 0.02. The median effective adjacent change may drop by at most 0.002, no more than 15% of scored adjacent pairs may have raw NCC drops above 0.02, and the median effective wide-baseline gain must be at least +0.003. At least 8 adequately sampled pairs of each kind are required. Raw NCC and penalized changes are reported separately.
 - **Stage order.** The feature stage is checked against the input poses. The local surface stage is then checked against the accepted feature stage, and it only needs to avoid harm (wide change at least −0.002). If the feature stage is rejected, the local stage built on it is discarded as well.
 
-`pose-refinement.json` version 5 introduced `photometric` (per-stage pair counts, median NCC before and after, median changes, adjacent pairs worse, time) and `appliedStage`. The new statuses are `photometricValidationRejected` and `photometricValidationInsufficient`; both keep the original camera positions and show a localized notice. Version 6 adds `localSurfacePilot` and `localSurfaceSkippedReason`; photo reports add `baselineSamples`, `retainedSamples`, `minimumRetainedFraction`, `lowRetentionPairs`, `evaluatedPairs` and effective NCC deltas. Older reports remain readable. The pilot is a conservative shortcut: it can miss a useful local correction outside the sample; it preserves accepted input poses in that case.
+`pose-refinement.json` version 5 introduced `photometric` (per-stage pair counts, median NCC before and after, median changes, adjacent pairs worse, time) and `appliedStage`. The new statuses are `photometricValidationRejected` and `photometricValidationInsufficient`; both keep the original camera positions and show a localized notice. Version 6 adds `localSurfacePilot` and `localSurfaceSkippedReason`; photo reports add `baselineSamples`, `retainedSamples`, `minimumRetainedFraction`, `lowRetentionPairs`, `evaluatedPairs` and effective NCC deltas. Version 7 adds `loopMode`, `loopTracks` and `revisitFallback`, plus a `featuresWithoutRevisits` photo report when the fallback runs. Older reports remain readable. The pilot is a conservative shortcut: it can miss a useful local correction outside the sample; it preserves accepted input poses in that case.
 
 ## Bundle adjustment
 
@@ -65,7 +65,7 @@ swiftc -O -module-cache-path /tmp/fable-swift-cache \
 /tmp/replay_pose_refinement compare SCAN INPUT.jsonl CANDIDATE.jsonl
 ```
 
-The replay tool reads a scan without modifying it. The environment switches `BA_LEGACY`, `BA_JOINT`, `BA_TRACKS`, `BA_SUBPIXEL`, `BA_RECENT`, `BA_ANCHORS`, `BA_ITER`, `BA_PRIOR_T`, `BA_PRIOR_R_DEG`, `BA_PRIOR_FRACTION`, and `BA_HOLDOUT=0` reproduce the comparisons above.
+The replay tool reads a scan without modifying it. The environment switches `BA_LEGACY`, `BA_JOINT`, `BA_TRACKS`, `BA_SUBPIXEL`, `BA_RECENT`, `BA_ANCHORS`, `BA_ITER`, `BA_PRIOR_T`, `BA_PRIOR_R_DEG`, `BA_PRIOR_FRACTION`, and `BA_HOLDOUT=0` reproduce the comparisons above. `LOOP_MODE=off` removes revisit tracks; the other revisit switches are listed in [loop closure](LOOP_CLOSURE_AND_SCALE.md#validation-and-limits).
 
 - The BA tests keep the original per-frame cases under `.legacy`.
 - They add ARKit-like smooth drift (0.80 cm / 0.43° → 0.22 cm / 0.00°, with adjacent motion error 1.4 → 0.5 mm, compared with 2.9 mm for the per-frame solver) and an along-ray shift.
@@ -78,6 +78,7 @@ The replay tool reads a scan without modifying it. The environment switches `BA_
 - Intrinsics, lens distortion, and rolling shutter are not modeled.
 - The check needs overlapping, textured views; short or featureless scans keep ARKit poses.
 - iPhone timing and memory for the added iterations and checks have not been measured.
+- A dense LiDAR comparison of 9F8040 found that near-range walls observed 15–40 s apart disagree more after the bundle adjustment. The median along-ray difference grew from −18 to −41 mm, on a small subset of pixels, even though photo alignment improved. The cause is not yet understood.
 - The pilot may skip local refinement if its changes cannot be validated, while TSDF still reconstructs surfaces. Both a pilot and a full pass must pass checks before local poses are applied.
 
 ## Adaptive-stage replay (2026-09-23)
