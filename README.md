@@ -62,7 +62,7 @@ The interface supports Traditional Chinese (default) and English; switch languag
 ## Interface and controls
 
 The interface is dark and 3D-first. The camera feed or point cloud fills the screen, and controls float above it: one prominent action per screen, with secondary controls shown only when relevant.
-- **Home: scan history.** The home screen is the scan history, a grid of covers with a floating **Start scanning** button. **Select** enables multi-select deletion.
+- **Home and history.** The home screen introduces the app and has a floating **Start scanning** button. **Scan history** opens from a card as a grid of covers, where **Select** enables multi-select deletion.
 - **Capture HUD.**
   - One status pill and one prioritized guidance slot.
   - A tool rail that appears only while scanning.
