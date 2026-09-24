@@ -22,7 +22,7 @@ extension ScanLibrary {
             let annotated = BlurFilter.annotate(records)
             progress(L10n.text("逐張匹配拍攝影像…"), 0)
             let refined = await OfflinePoseRefinement.run(records: annotated, directory: source, rounds: 6, surfaceRefinement:true,
-                isCancelled: { Task.isCancelled }, progress: { progress(($0 >= 0.97 || ($0 >= 0.78 && $0 < 0.82) || ($0 >= 0.87 && $0 < 0.90)) ? L10n.text("檢查照片對齊…") : $0 >= 0.82 ? L10n.text("驗證局部表面對齊…") : $0 >= 0.546 ? L10n.text("搜尋並驗證重訪視角…") : L10n.text("逐張匹配與驗證相機位置…"), $0 * 0.45) })
+                isCancelled: { Task.isCancelled }, progress: { progress(($0 >= 0.97 || ($0 >= 0.78 && $0 < 0.82) || ($0 >= 0.87 && $0 < 0.90)) ? L10n.text("檢查照片對齊…") : $0 >= 0.82 ? L10n.text("驗證局部表面對齊…") : $0 >= 0.546 || ($0 >= 0.4641 && $0 < 0.4914) ? L10n.text("搜尋並驗證重訪視角…") : L10n.text("逐張匹配與驗證相機位置…"), $0 * 0.45) })
             try Task.checkCancellation()
             if ["memoryPressure", "observationBudgetExceeded"].contains(refined.report.status) {
                 throw OptimizationError(message: L10n.text("目前資源不足以完成相機精修，原始掃描未變更。請關閉其他工作後重試。"))

@@ -7,8 +7,8 @@
 ## 流程
 
 1. **ARKit 錨點**：每個關鍵幀放置一個 `ARAnchor`，停止時讀回 ARKit 地圖優化移動後的錨點。一份 569 幀重跑中，這一步修正了中位數 38 mm、最大 108 mm 的姿態，重訪位置的表面偏移由約 45 mm 降至 11 mm。此階段未變更。
-2. **特徵階段**：已儲存照片與最近影格及四個路線錨點比對，接著執行帶 ARKit 運動先驗的聯合光束法平差（BA）與已驗證閉環（見下方）。
-3. **特徵照片驗證**：立即驗證特徵階段，通過才繼續處理其姿態；未通過就保留輸入，略過局部階段。
+2. **特徵階段**：已儲存照片與最近影格及四個路線錨點比對；重訪視角以姿態引導、依平面變形的 patch 匹配後加入為 track（見[重訪視角精修](LOOP_CLOSURE_AND_SCALE.zh-TW.md#重訪視角精修)），接著執行帶 ARKit 運動先驗的聯合光束法平差（BA，見下方）。
+3. **特徵照片驗證**：立即驗證特徵階段，通過才繼續處理其姿態。加入重訪 track 的結果若在此或被 BA 保留集門檻拒絕，會移除重訪 track 重新求解並再次檢查；仍未通過就保留輸入，略過局部階段。
 4. **局部試算**（僅開啟實驗性表面重建時）：沿完整路線分散選最多 48 個中間影格，使用與完整[表面對齊](SURFACE_RECONSTRUCTION.zh-TW.md)相同的固定錨點與深度點到平面求解。沒有可靠修正，或照片驗證未通過（含重疊不足），就保留已接受的特徵姿態。試算不會以局部修改的軌跡直接輸出。
 5. **完整局部精修與最後驗證**：試算通過才執行完整局部階段，之後仍需獨立通過照片驗證；若試算已涵蓋所有有效中間影格則直接重用。即使略過或拒絕局部姿態修正，TSDF 仍會執行。融合、預覽與 COLMAP 匯出共用最終姿態。
 
@@ -22,7 +22,7 @@
 - **第一個階段的判定**：每組 NCC 變化扣除 `0.1 × 遺失比例`；共同樣本少於 400 的配對，有效變化至少記為 −0.02。相鄰配對有效變化中位數最多下降 0.002，原始 NCC 下降超過 0.02 的相鄰配對不得多於 15%，寬基線有效變化中位數至少提高 0.003。兩類仍各需至少 8 組有效取樣配對。原始 NCC 與含懲罰變化分開報告。
 - **階段順序**：特徵階段對輸入姿態檢查。局部表面階段接著對已接受的特徵階段檢查，只要求「不造成傷害」（寬基線變化至少 −0.002）。特徵階段被拒絕時，建立在其上的局部階段也一併捨棄。
 
-`pose-refinement.json` 第 5 版新增 `photometric`（各階段的影格對數、前後 NCC 中位數、中位變化、變差的相鄰對數、耗時）與 `appliedStage`。新增狀態 `photometricValidationRejected` 與 `photometricValidationInsufficient`，兩者都保留原相機位置並顯示在地化提示。第 6 版增加 `localSurfacePilot` 與 `localSurfaceSkippedReason`；照片報告增加 `baselineSamples`、`retainedSamples`、`minimumRetainedFraction`、`lowRetentionPairs`、`evaluatedPairs` 及有效 NCC 變化。仍可讀取舊版報告。試算屬保守捷徑，可能漏掉抽樣以外有用的局部修正；此時保留已接受的輸入姿態。
+`pose-refinement.json` 第 5 版新增 `photometric`（各階段的影格對數、前後 NCC 中位數、中位變化、變差的相鄰對數、耗時）與 `appliedStage`。新增狀態 `photometricValidationRejected` 與 `photometricValidationInsufficient`，兩者都保留原相機位置並顯示在地化提示。第 6 版增加 `localSurfacePilot` 與 `localSurfaceSkippedReason`；照片報告增加 `baselineSamples`、`retainedSamples`、`minimumRetainedFraction`、`lowRetentionPairs`、`evaluatedPairs` 及有效 NCC 變化。第 7 版增加 `loopMode`、`loopTracks` 與 `revisitFallback`，執行回退時另有 `featuresWithoutRevisits` 照片報告。仍可讀取舊版報告。試算屬保守捷徑，可能漏掉抽樣以外有用的局部修正；此時保留已接受的輸入姿態。
 
 ## 光束法平差
 
@@ -67,7 +67,7 @@ swiftc -O -module-cache-path /tmp/fable-swift-cache \
 /tmp/replay_pose_refinement compare SCAN INPUT.jsonl CANDIDATE.jsonl
 ```
 
-重跑工具只讀取掃描資料，不會修改。環境變數 `BA_LEGACY`、`BA_JOINT`、`BA_TRACKS`、`BA_SUBPIXEL`、`BA_RECENT`、`BA_ANCHORS`、`BA_ITER`、`BA_PRIOR_T`、`BA_PRIOR_R_DEG`、`BA_PRIOR_FRACTION` 與 `BA_HOLDOUT=0` 可重現上述比較。
+重跑工具只讀取掃描資料，不會修改。環境變數 `BA_LEGACY`、`BA_JOINT`、`BA_TRACKS`、`BA_SUBPIXEL`、`BA_RECENT`、`BA_ANCHORS`、`BA_ITER`、`BA_PRIOR_T`、`BA_PRIOR_R_DEG`、`BA_PRIOR_FRACTION` 與 `BA_HOLDOUT=0` 可重現上述比較。`LOOP_MODE=off` 移除重訪 track；其他重訪相關選項見[閉環修正](LOOP_CLOSURE_AND_SCALE.zh-TW.md#驗證與限制)。
 
 - BA 測試以 `.legacy` 保留原本的逐幀案例。
 - 新增類似 ARKit 的平滑漂移案例：0.80 cm / 0.43° → 0.22 cm / 0.00°，相鄰運動誤差由 1.4 mm 降至 0.5 mm（逐幀求解器為 2.9 mm）。另有沿視線位移案例。
@@ -80,6 +80,7 @@ swiftc -O -module-cache-path /tmp/fable-swift-cache \
 - 沒有建模內參、鏡頭畸變與捲簾快門。
 - 檢查需要有紋理且互相重疊的視角；過短或缺乏紋理的掃描會保留 ARKit 姿態。
 - 尚未在 iPhone 量測增加的迭代與檢查所需的時間與記憶體。
+- 以 LiDAR 密集比較 9F8040 時發現，相隔 15–40 秒觀測到的近距離牆面，在 BA 之後彼此差異反而變大：沿視線差異中位數由 −18 mm 變為 −41 mm（只涉及少部分像素），但照片對齊同時改善。原因尚未查明。
 - 局部試算無法驗證改善時可略過局部姿態，TSDF 仍繼續重建表面；試算與完整階段都必須通過檢查才套用局部姿態。
 
 ## 自適應階段重跑（2026-09-23）

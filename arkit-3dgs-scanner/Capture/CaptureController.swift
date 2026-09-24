@@ -589,7 +589,8 @@ final class CaptureController: NSObject, ObservableObject {
                     let featureProgress = p / (surfaceRefinement ? 0.78 : 0.92)
                     self.statusText = (!surfaceRefinement && p >= 0.92) || (surfaceRefinement && (p >= 0.97 || (p >= 0.78 && p < 0.82) || (p >= 0.87 && p < 0.90))) ? L10n.text("檢查照片對齊…")
                         : surfaceRefinement && p >= 0.82 ? L10n.text("驗證局部表面對齊…")
-                        : featureProgress >= 0.7 ? L10n.text("搜尋並驗證重訪視角…")
+                        // Revisit search: 0.595-0.63 before the bundle adjustment (revisit tracks), >= 0.7 for rigid loop modes.
+                        : featureProgress >= 0.7 || (featureProgress >= 0.595 && featureProgress < 0.63) ? L10n.text("搜尋並驗證重訪視角…")
                         : (featureProgress < 0.595 ? L10n.text("逐張匹配拍攝影像… \(Int(featureProgress / 0.595 * 100))%") : L10n.text("驗證相機位置修正…"))
                 }
             }
