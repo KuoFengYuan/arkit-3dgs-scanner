@@ -66,6 +66,45 @@ HUD 區分「追蹤恢復」「紋理不足」「移動過快」「等待清晰�
 
 這些數字量測程式工作，沒有量測 GPU 顯示 FPS。比較時應用相同裝置、建置模式、路徑與光線；Debug 和 Release 的 Swift 熱迴圈速度可能不同。
 
+## 視角涵蓋熱圖
+
+熱圖（點雲工具列的溫度計圖示）與快門旁的百分比，表示每塊表面被看過的角度範圍。三角化與 3DGS 訓練都需要從不同位置拍攝；站在原地看同一處 20 次沒有幫助，原地轉身也不會移動相機。
+
+### 怎麼量
+
+- `TiledFusedGrid.ViewSpan` 為每塊 tile 的每個 10 cm 視角格，記錄到目前為止相距最遠的兩個觀測方向。方向一律從視角格中心指向相機，所以只有相機移動（左右或上下）才會增加夾角。
+- 跨度就是這兩個方向的夾角，沒有固定的方向分格。
+- 顏色由紅（0°）經黃到綠（30° 以上），圖例標示刻度。
+- 30° 約等於在 2 m 外側走 1.1 m。
+- 百分比是「所在視角格已達 30°」的 1 cm 預覽體素佔比；以增量方式維護，粗化或縮減後會重算。
+
+### 舊方法為什麼不準
+
+先前每個 1 cm 體素記錄自己從 16 個世界方向格中的哪幾格被看過（方位 8 格 × 是否俯視），累積 3 格變綠。這個判斷有三個問題：
+- **格子太小：** 預覽體素只有 1 cm，約等於 LiDAR 雜訊，同一表面的觀測被切到相鄰體素，每格只看到少數方向。
+- **格線邊界：** 跨過格線移動 1° 就多算一格，同一格內移動 40° 卻不算。
+- **上下移動幾乎不算：** 仰角只有兩格。
+
+以三份 LiDAR 掃描重播，把兩種判斷與「真實跨度」比較。真實跨度是每個 10 cm 區域內，任兩個相機方向的最大夾角（精確計算）。`tools/replay_view_diversity.swift` 會把每幀深度（每隔一個像素取樣）插入預覽格：
+
+| | 7F2187 | 9F8040 | 916C58 |
+| --- | --- | --- | --- |
+| 真實跨度 ≥ 30° 的體素 | 58.3% | 83.3% | 52.5% |
+| 舊判斷：3 格以上 | 5.8% | 1.8% | 4.2% |
+| 舊判斷只有 1 格（紅色）但真實跨度 ≥ 30° | 35.9% | 70.8% | 33.2% |
+| 新判斷 ≥ 30° | 57.7% | 83.3% | 51.8% |
+| 新判斷與真實跨度差距：中位數／P90 | 0.0°／1.2° | 0.0°／1.4° | 0.0°／0.3° |
+
+兩端點近似下，落到與真實跨度不同級距（10° 以下、10–30°、30° 以上）的體素不到 1%。
+
+### 限制
+
+- 跨度以 10 cm 區域計算：區域內某些相機看不到的凹縫，會與整個區域同一評等。
+- 只計方向，不計影像品質：斜掠或模糊的視角同樣增加夾角。
+- 30° 是涵蓋指引，不是精度保證。
+- 重播略過了即時的逐幀過濾，門檻也只在這幾份掃描上驗證過。
+- 同時修正：剛好捨入到 tile 邊界上的點，以前每幀都會新建一個 tile 並要求新錨點，現在會併入既有 tile。
+
 ## 驗證
 
 ```sh
@@ -109,6 +148,22 @@ swiftc -O -module-cache-path /tmp/fable-swift-cache \
   tools/test_stop_processing.swift -o /tmp/fable-stop-test
 /tmp/fable-stop-test
 ```
+
+視角涵蓋熱圖的檢查：
+
+```sh
+swiftc -O -module-cache-path /tmp/fable-swift-cache \
+  arkit-3dgs-scanner/Capture/{Localization,Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,SurfaceTSDF,PointCloudFusion}.swift \
+  tools/test_view_coverage.swift -o /tmp/fable-view-coverage
+/tmp/fable-view-coverage          # 11 項
+
+swiftc -O -module-cache-path /tmp/fable-swift-cache \
+  arkit-3dgs-scanner/Capture/{Localization,Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,SurfaceTSDF,PointCloudFusion}.swift \
+  tools/replay_view_diversity.swift -o /tmp/replay_view_diversity
+/tmp/replay_view_diversity SCAN --stride 2
+```
+
+11 項視角涵蓋檢查包含：原地重複觀測維持 0°；在 2 m 外側走 1.4 m 達到 30°；小幅跨過舊格線不算多角度；舊格線內 40° 的移動算 40°；上下移動與左右移動同樣計入；深度雜訊不影響；熱圖顏色；增量完成度與完整重算一致（含縮減、粗化）；tile 邊界上的點併入既有 tile。
 
 26 項停止流程容量檢查包含低可用記憶體、設定上限、最高 2,000 萬原始頂點的取樣數量計算、單批 12,000 點降至 128 格、有限中繼輸出與保留續掃資料。取樣測試驗證索引數量，不是實機配置 2,000 萬頂點的壓力測試。iOS 實際峰值與本次閃退原因仍須用裝置紀錄確認。
 

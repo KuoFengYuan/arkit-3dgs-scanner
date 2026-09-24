@@ -53,11 +53,11 @@ The history opens only when the card is tapped.
 - **Guidance slot.** One prioritized hint at a time. Blocking warnings also draw the red frame and trigger a warning haptic.
 - **Tool rail.** Point cloud, heat map and room structure toggles. It appears only while scanning, on the trailing edge (leading in landscape).
 - **Shutter.**
-  - While scanning with LiDAR, its ring shows view coverage (red below 30%, orange below 60%, then green), with the percentage beside it.
+  - While scanning with LiDAR, its ring shows view coverage: the share of the surface seen over at least 30° (red below 30%, orange below 60%, then green), with the percentage beside it.
   - **Scan settings** is a single button to the left of the shutter. The current mode (LiDAR or camera mode) is shown under it.
 - **Contextual indicators.**
   - The motion meter appears only near the blur threshold.
-  - The heat-map legend appears only in heat-map mode.
+  - The heat-map legend appears only in heat-map mode. It shows the viewing-angle span from 0° to 30°+ ([how it is measured](LIDAR_QUALITY_AND_PREVIEW.md#view-coverage-heat-map)).
   - The instruction hint appears only for the first few frames.
 - **Landscape.** On compact-height layouts the shutter column sits on the trailing edge and the review panel at the bottom trailing corner, so the center of the scene stays clear.
 

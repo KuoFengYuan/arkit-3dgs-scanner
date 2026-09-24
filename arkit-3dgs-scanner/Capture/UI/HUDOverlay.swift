@@ -347,12 +347,13 @@ struct HUDOverlay: View {
         }
     }
 
-    /// 熱圖圖例。只在熱圖模式顯示 —— 量的是「從幾個不同方向看過」而非次數。
+    /// 熱圖圖例。只在熱圖模式顯示 —— 顏色是表面被看過的夾角跨度（0° → 30° 以上），不是次數。
     @ViewBuilder
     private var fusionLegend: some View {
         if controller.phase == .scanning, controller.showPointCloud, controller.colorMode == .fusionQuality {
             HStack(spacing: 8) {
-                Text(L10n.text("視角")).font(.caption2)
+                Text(L10n.text("視角跨度")).font(.caption2)
+                Text("0°").font(.caption2.monospacedDigit())
                 HStack(spacing: 3) {
                     ForEach(0..<7) { i in
                         let q = Double(i) / 6
@@ -361,8 +362,11 @@ struct HUDOverlay: View {
                             .frame(width: 14, height: 8)
                     }
                 }
-                Text(L10n.text("單一角度 → 多角度")).font(.caption2)
+                Text(String(format: "%.0f°+", TiledFusedGrid.kWellObservedDegrees)).font(.caption2.monospacedDigit())
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(L10n.text("視角跨度"))
+            .accessibilityValue(String(format: L10n.text("紅色為單一角度，綠色為 %.0f° 以上"), TiledFusedGrid.kWellObservedDegrees))
             .hudText()
             .padding(.horizontal, 12).padding(.vertical, 6)
             .hudGlass(Capsule())

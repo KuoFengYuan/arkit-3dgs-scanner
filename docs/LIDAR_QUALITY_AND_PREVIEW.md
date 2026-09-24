@@ -62,6 +62,45 @@ The HUD distinguishes recovering tracking, low texture, moving too fast, and wai
 
 `preview-performance.json` records candidate/accepted observations, fusion count and mean/max time, packed batches/tiles, maximum pending tiles, packing time, main-thread application time, and quality rejection counts. Observation counts are not unique points; work durations are not GPU display FPS. Compare on identical devices, paths, lighting, and build modes.
 
+## View coverage heat map
+
+The heat map (point-cloud tool rail, thermometer icon) and the percentage beside the shutter show how widely each surface has been seen. Triangulation and 3D Gaussian training need views from different positions. Looking at the same spot 20 times from one place adds nothing, and turning on the spot does not move the camera.
+
+### How it is measured
+
+- `TiledFusedGrid.ViewSpan` keeps, for every 10 cm view cell of a tile, the two viewing directions farthest apart so far. Directions run from the cell centre to the camera, so only camera movement adds angle, whether sideways, up or down.
+- The span is the angle between those two directions, with no fixed direction bins.
+- Colour goes from red (0°) through yellow to green at 30° or more. The legend shows the scale.
+- 30° is about a 1.1 m sideways pass at 2 m.
+- The percentage is the share of 1 cm preview voxels whose view cell has reached 30°. It is maintained incrementally and recounted after coarsening or trimming.
+
+### Why the earlier rating was wrong
+
+Each 1 cm voxel previously recorded which of 16 world direction bins it had been seen from (8 azimuth sectors × looking down or not) and turned green at three bins. That rating failed in three ways:
+- **Too fine a cell.** Preview voxels are 1 cm, about the LiDAR noise, so observations of one surface were split across neighbouring voxels. Each voxel saw only a few directions.
+- **Sector boundaries.** A 1° move across a sector line counted as a new direction, while a 40° move inside one sector did not.
+- **Vertical movement barely counted.** Elevation had only two bins.
+
+Replays of three LiDAR scans compare both ratings with the true span: the exact largest angle between any two camera directions from each 10 cm region. `tools/replay_view_diversity.swift` inserts every frame's depth, sampled every second pixel, into the preview grid.
+
+| | 7F2187 | 9F8040 | 916C58 |
+| --- | --- | --- | --- |
+| Voxels with a true span ≥ 30° | 58.3% | 83.3% | 52.5% |
+| Earlier rating: three bins or more | 5.8% | 1.8% | 4.2% |
+| Earlier rating: one bin (red) although the true span is ≥ 30° | 35.9% | 70.8% | 33.2% |
+| Current rating ≥ 30° | 57.7% | 83.3% | 51.8% |
+| Current vs true span: median / P90 difference | 0.0° / 1.2° | 0.0° / 1.4° | 0.0° / 0.3° |
+
+With the two-direction approximation, fewer than 1% of voxels fall in a different band (below 10°, 10–30°, 30° or more) than the true span.
+
+### Limits
+
+- The span is measured per 10 cm region. A crevice inside a region that some cameras could not see is rated like the rest of the region.
+- The rating counts directions, not image quality: grazing or blurred views add angle too.
+- 30° is a coverage guide, not an accuracy guarantee.
+- The replay skips the live per-frame filters, and the thresholds were checked on these scans only.
+- A related fix: points that rounded exactly onto a tile boundary used to start a new tile, and request a new anchor, on every frame. They now join the existing tile.
+
 ## Stop-time safeguards
 
 Reports described crashes seconds after Stop, before visible fusion progress. Without crash/jetsam records, allocation risks are evidence, not a confirmed sole cause.
@@ -110,7 +149,26 @@ swiftc -O -module-cache-path /tmp/fable-swift-cache \
   arkit-3dgs-scanner/Capture/{Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,PointCloudFusion}.swift \
   tools/test_stop_processing.swift -o /tmp/fable-stop-test
 /tmp/fable-stop-test
+
+swiftc -O -module-cache-path /tmp/fable-swift-cache \
+  arkit-3dgs-scanner/Capture/{Localization,Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,SurfaceTSDF,PointCloudFusion}.swift \
+  tools/test_view_coverage.swift -o /tmp/fable-view-coverage
+/tmp/fable-view-coverage          # 11 checks
+
+swiftc -O -module-cache-path /tmp/fable-swift-cache \
+  arkit-3dgs-scanner/Capture/{Localization,Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,SurfaceTSDF,PointCloudFusion}.swift \
+  tools/replay_view_diversity.swift -o /tmp/replay_view_diversity
+/tmp/replay_view_diversity SCAN --stride 2
 ```
+
+The 11 view-coverage checks cover:
+- repeated views from one position staying at 0°;
+- a 1.4 m sideways pass at 2 m reaching 30°;
+- a small move across an old sector line not counting as multiple angles, while a 40° move inside one sector counts as 40°;
+- vertical movement counting like sideways movement, and depth noise having no effect;
+- heat-map colours;
+- the incremental completeness matching a full recount, including after trimming and coarsening;
+- points on tile boundaries joining the existing tile.
 
 Historical validation comprised 173 checks: 26 stop-capacity, 39 depth/preview, 30 capture-policy, 18 fusion, 29 RGB reconstruction, 26 camera-only, and five shard checks; unsigned device/Simulator builds passed. The parallel desktop path retains a pre-existing Sendable warning.
 

@@ -60,6 +60,35 @@ nonisolated struct TiledFusedGrid {
         var cells: [Int64: FusedVoxelGrid.Cell] = [:]   // 鍵為「局部」voxel
         let center: SIMD3<Float>                      // 建錨當下的世界中心，ID 不再代表目前位置
         var originLatest: simd_float4x4                 // 最近一次換算所用的錨點變換
+        /// 視角格（局部 10 cm）→ 觀測方向的跨度；熱圖與完成度都讀這裡。
+        var views: [Int64: ViewSpan] = [:]
+    }
+
+    /// 一塊表面被看過的「角度範圍」：目前相距最遠的兩個觀測方向（點 → 相機，單位向量）。
+    ///
+    /// **為什麼不用方位分格。** 先前把方向量化成世界方位 8 格 × 仰角 2 格、湊滿 3 格算充分：
+    /// 相機只移 1° 剛好跨過格線就多算一格，在同一格內移 40° 卻仍是一格；
+    /// 仰角只分俯視與否，上下移動幾乎看不到。這裡直接量兩兩夾角的最大值（以兩端點近似），
+    /// 方位與仰角一視同仁，也沒有格線。
+    ///
+    /// **為什麼是 10 cm 而不是每個 1 cm voxel。** 深度雜訊會把同一表面的點散到相鄰 voxel，
+    /// 每格只分到少數視角而偏紅。方向一律從視角格中心算，只有相機移動才會增加夾角。
+    struct ViewSpan {
+        var a = SIMD3<Float>.zero
+        var b = SIMD3<Float>.zero
+        var spanCos: Float = 1
+        /// 這個視角格內的 voxel 數（完成度以 voxel 為單位）。
+        var cells = 0
+
+        /// 以新方向擴大跨度：保留三組配對中夾角最大的一組。
+        mutating func add(_ d: SIMD3<Float>) {
+            guard a != .zero else { a = d; b = d; spanCos = 1; return }
+            let ca = simd_dot(d, a), cb = simd_dot(d, b)
+            guard min(ca, cb) < spanCos else { return }
+            if ca <= cb { b = d; spanCos = ca } else { a = d; spanCos = cb }
+        }
+        var degrees: Float { acos(max(-1, min(1, spanCos))) * 180 / .pi }
+        var isWellObserved: Bool { a != .zero && spanCos <= TiledFusedGrid.kWellObservedCos }
     }
 
     private(set) var tiles: [Int64: Tile] = [:]
@@ -101,9 +130,7 @@ nonisolated struct TiledFusedGrid {
             dirtyTiles.insert(key)
         }
         totalCells = retained
-        wellObserved = tiles.values.reduce(0) { sum, tile in
-            sum + tile.cells.values.reduce(0) { $1.dirMask.nonzeroBitCount >= Self.kFullDirs ? $0 + 1 : $0 }
-        }
+        recountViews()
     }
 
     /// anchorTransforms：主執行緒傳入的各磚錨點「當下」變換（漂移修正後）。
@@ -151,7 +178,9 @@ nonisolated struct TiledFusedGrid {
                 guard let inverse = inverses[id] else { continue }
                 let p = inverse * worldH
                 let local = SIMD3(p.x, p.y, p.z)
-                guard simd_reduce_min(local) >= -half, simd_reduce_max(local) < half else { continue }
+                // 10 µm tolerance: a point on a tile boundary can round to exactly ±half, and would
+                // otherwise start a new dynamic tile (and anchor) every frame.
+                guard simd_reduce_min(local) >= -half - 1e-5, simd_reduce_max(local) < half + 1e-5 else { continue }
                 let distance = simd_length_squared(local)
                 if selected == nil || distance < selected!.distance { selected = (id, local, distance) }
             }
@@ -173,8 +202,20 @@ nonisolated struct TiledFusedGrid {
                 local = world - center
             }
             let cameraLocal = inverses[tileKey]! * SIMD4<Float>(cameraPosition, 1)
-            let dirBit = Self.directionBit(SIMD3(cameraLocal.x, cameraLocal.y, cameraLocal.z) - local)
-            guard let cellKey = PointCloudMath.voxelKey(local, size: voxelSize) else { continue }
+            guard let cellKey = PointCloudMath.voxelKey(local, size: voxelSize),
+                  let viewKey = PointCloudMath.voxelKey(local, size: Self.viewCellSize) else { continue }
+            // Direction from the view cell's centre, so points spread over the cell do not add
+            // angle by themselves: only a moving camera does.
+            let toCamera = SIMD3(cameraLocal.x, cameraLocal.y, cameraLocal.z) - PointCloudMath.cellCenter(viewKey, size: Self.viewCellSize)
+            guard simd_length_squared(toCamera) > 1e-8 else { continue }
+            var span = tiles[tileKey]!.views[viewKey] ?? ViewSpan()
+            let wasWell = span.isWellObserved
+            span.add(simd_normalize(toCamera))
+            let isNewCell = tiles[tileKey]!.cells[cellKey] == nil
+            if isNewCell { span.cells += 1 }
+            // 跨過門檻的那一刻整個視角格一起計入；已達標的格子只加新 voxel → O(1) 維護
+            if span.isWellObserved { wellObserved += wasWell ? (isNewCell ? 1 : 0) : span.cells }
+            tiles[tileKey]!.views[viewKey] = span
 
             let rgb = SIMD3<Float>(Float(pt.r), Float(pt.g), Float(pt.b))
             if var cell = tiles[tileKey]!.cells[cellKey] {
@@ -184,16 +225,10 @@ nonisolated struct TiledFusedGrid {
                 cell.color += (rgb - cell.color) * (w / total)
                 cell.weight = min(total, weightCap)
                 cell.bestScore = max(cell.bestScore, pt.score)
-                let before = cell.dirMask
-                cell.dirMask |= dirBit
-                // 跨過門檻的那一次才計數 → O(1) 維護，不必每幀掃全部 cell
-                if before.nonzeroBitCount < Self.kFullDirs,
-                   cell.dirMask.nonzeroBitCount >= Self.kFullDirs { wellObserved += 1 }
                 tiles[tileKey]!.cells[cellKey] = cell
             } else {
                 tiles[tileKey]!.cells[cellKey] = FusedVoxelGrid.Cell(
-                    mean: local, color: rgb, weight: max(0.01, pt.score), bestScore: pt.score,
-                    dirMask: dirBit)
+                    mean: local, color: rgb, weight: max(0.01, pt.score), bestScore: pt.score)
                 totalCells += 1
                 if totalCells >= maxCells { coarsen() }
             }
@@ -221,7 +256,6 @@ nonisolated struct TiledFusedGrid {
                     m.color += (cell.color - m.color) * (cell.weight / total)
                     m.weight = min(total, weightCap)
                     m.bestScore = max(m.bestScore, cell.bestScore)
-                    m.dirMask |= cell.dirMask
                     merged[key] = m
                 } else {
                     merged[key] = cell
@@ -231,12 +265,8 @@ nonisolated struct TiledFusedGrid {
             totalCells += merged.count
             dirtyTiles.insert(tileKey)
         }
-        // 合併改變了方向分佈 → 重算。coarsen 很少發生，O(N) 可接受。
-        wellObserved = tiles.values.reduce(0) { acc, tile in
-            acc + tile.cells.values.reduce(0) {
-                $1.dirMask.nonzeroBitCount >= Self.kFullDirs ? $0 + 1 : $0
-            }
-        }
+        // 合併改變了 voxel 數 → 重算。coarsen 很少發生，O(N) 可接受。
+        recountViews()
         print("[PointCloud] 自動粗化 → voxel \(voxelSize * 100)cm，剩 \(totalCells) 點")
     }
 
@@ -284,9 +314,10 @@ nonisolated struct TiledFusedGrid {
                 colors.append(min(1, max(0, c.color.y / 255)))
                 colors.append(min(1, max(0, c.color.z / 255)))
             case .fusionQuality:
-                // 紅 → 黃 → 綠，依「看過幾個不同方向」而非次數。
-                // 站著不動時連續幀落在同一個 bin → 顏色不會前進，這正是要的行為。
-                let q = min(1, Float(c.dirMask.nonzeroBitCount) / Float(Self.kFullDirs))
+                // 紅 → 黃 → 綠，依觀測方向的夾角跨度（0° → kWellObservedDegrees）而非次數。
+                // 站著不動或原地轉身時方向不變 → 顏色不會前進，這正是要的行為。
+                let span = PointCloudMath.voxelKey(c.mean, size: Self.viewCellSize).flatMap { tile.views[$0] }
+                let q = min(1, (span?.degrees ?? 0) / Self.kWellObservedDegrees)
                 colors.append(q < 0.5 ? 1 : 2 * (1 - q))
                 colors.append(q < 0.5 ? 2 * q : 1)
                 colors.append(0.15)
@@ -300,24 +331,34 @@ nonisolated struct TiledFusedGrid {
                               indices: indices.withUnsafeBufferPointer { Data(buffer: $0) })
     }
 
-    /// 「觀測充分」的門檻：看過幾個不同方向（熱圖 / 完成度共用）。
-    /// 3 個 bin ＝ 至少約 90° 的方位跨度，足以三角化出可靠的深度。
-    static let kFullDirs = 3
+    /// 「觀測充分」：觀測方向的夾角跨度至少 30°（熱圖 / 完成度共用）。
+    /// 在牆前 2 m 側走約 1 m 即達到；三角化與 3DGS 的視角相依外觀都需要這種基線，
+    /// 原地轉身或站著連拍則維持 0°。
+    static let kWellObservedDegrees: Float = 30
+    static let kWellObservedCos = cos(kWellObservedDegrees * .pi / 180)
+    /// 視角格邊長（公尺，錨點局部座標）。
+    static let viewCellSize: Float = 0.10
 
-    /// 觀測方向量化成 16 個 bin（方位 8 × 仰角 2）。世界 +Y 為上（worldAlignment = .gravity）。
-    /// 粗量化是刻意的：目的是分辨「有沒有換位置看」，不是精確測角。
-    static func directionBit(_ d: SIMD3<Float>) -> UInt16 {
-        let n = simd_length(d) > 1e-6 ? d / simd_length(d) : SIMD3<Float>(0, 1, 0)
-        let azi = atan2(n.z, n.x)                                  // -π…π
-        var a = Int(((azi + .pi) / (2 * .pi) * 8).rounded(.down))
-        a = min(max(a, 0), 7)
-        let e = n.y > 0.35 ? 1 : 0                                 // 俯視 vs 水平/仰視
-        return UInt16(1) << UInt16(e * 8 + a)
+    /// 依目前 voxel 重算各視角格的 voxel 數與完成度（粗化、縮減後）。
+    private mutating func recountViews() {
+        wellObserved = 0
+        for key in Array(tiles.keys) {
+            guard var tile = tiles[key] else { continue }
+            for viewKey in Array(tile.views.keys) { tile.views[viewKey]!.cells = 0 }
+            for cell in tile.cells.values {
+                guard let viewKey = PointCloudMath.voxelKey(cell.mean, size: Self.viewCellSize) else { continue }
+                var span = tile.views[viewKey] ?? ViewSpan()
+                span.cells += 1
+                if span.isWellObserved { wellObserved += 1 }
+                tile.views[viewKey] = span
+            }
+            tiles[key] = tile
+        }
     }
 
-    /// 已達 kFullDirs 個觀測方向的 cell 數（O(1) 維護）
+    /// 所在視角格已達 kWellObservedDegrees 的 voxel 數（O(1) 維護）
     private(set) var wellObserved = 0
-    /// 融合完成度：已從足夠多「不同方向」看過的表面占比。
+    /// 融合完成度：已從夾角夠大的不同方向看過的表面占比。
     /// 比幀數與觀測次數都更有意義——100 幀站在原地拍，兩者都會給滿分，但視差為零。
     var fusionCompleteness: Double {
         totalCells > 0 ? Double(wellObserved) / Double(totalCells) : 0
