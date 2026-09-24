@@ -34,7 +34,7 @@ Camera state and dataset phase are distinct. `scanning + relocalizing` retains t
 
 ## User flow
 
-The home screen explains Scan → Review/rescan → Export/share with scrolling content and a fixed start button. Advanced capture settings are collapsed. Permission denial offers Settings. Export requires usable photos; zero-point data may still export calibrated images. Invalid tracking cannot append a new coordinate system to an existing scan.
+The home screen is the scan history, with a floating start button. With no scans it explains Scan → Review/rescan → Export/share. Advanced capture settings open from one **Scan settings** button. See [interface design](INTERFACE_DESIGN.md). Permission denial offers Settings. Export requires usable photos; zero-point data may still export calibrated images. Invalid tracking cannot append a new coordinate system to an existing scan.
 
 Capture, processing, and export prevent closing the screen directly. Leaving an unexported review explains where files remain and that the live session cannot be restored from history.
 
@@ -52,7 +52,7 @@ Refined scanning defaults on. LiDAR-assisted bundle adjustment solves all frames
 
 Stopping saves `review.ply`, `review-poses.jsonl`, and `scan-summary.json` beside raw media. History reads `Documents/scans/scan_*`, including older scans. Missing previews use bounded depth reconstruction; photos remain viewable without depth. History previews cap at 120,000 points and use thumbnails. Export builds COLMAP before creating a new ZIP.
 
-Select supports individual selection, Select all, Delete selected, and Delete all. Confirmation includes the count. Processing disables controls and dismissal; cancel changes nothing.
+Select supports individual selection, Select all, and Delete selected. Deleting with every scan selected is the delete-all case, and its confirmation says so. A long press on a cover also offers Delete. Confirmation includes the count. Processing disables controls and dismissal; cancel changes nothing.
 
 Deletion removes selected scan directories and matching ZIPs, including images, depth, poses, COLMAP, point clouds, floor plans, and legacy models such as `gaussians.ply` / `floorplan.usdz`. Photos-library assets, copies shared to other apps, and unselected scans are unaffected.
 

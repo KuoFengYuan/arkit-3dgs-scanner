@@ -73,7 +73,6 @@
 "單一角度 → 多角度" = "Single angle → Multiple angles";
 "單指旋轉・雙指縮放與平移" = "One finger to rotate · Two fingers to zoom and pan";
 "單指旋轉・雙指縮放，檢查是否有遺漏的區域" = "One finger to rotate · Two fingers to zoom. Check for missing areas.";
-"回到點雲" = "Back to point cloud";
 "回放速度" = "Playback speed";
 "地板 %.1f m²　·　外接 %.2f × %.2f m　·　樓高 %.2f m" = "Floor %.1f m² · Bounds %.2f × %.2f m · Height %.2f m";
 "外接 %.2f × %.2f m　·　最長牆 %.2f m　·　樓高 %.2f m" = "Bounds %.2f × %.2f m · Longest wall %.2f m · Height %.2f m";
@@ -82,12 +81,10 @@
 "姿態修正 中位數 %.0fcm / 最大 %.0fcm" = "Pose correction: median %.0fcm / maximum %.0fcm";
 "姿態已修正 %@ 幀（ARKit 地圖優化）" = "Corrected %@ frame poses (ARKit map optimization)";
 "完成" = "Done";
-"完成掃描後會自動保留在這裡，之後可預覽、分享或刪除。" = "Completed scans are saved here for preview, sharing, or deletion.";
 "客廳" = "Living room";
 "對焦" = "Focus";
 "尚未取得可用影像，請繼續掃描並緩慢移動" = "No usable images yet. Continue scanning and move slowly.";
 "尚無可用影像，請繼續掃描後再匯出" = "No usable images yet. Continue scanning before exporting.";
-"已儲存於裝置" = "Saved on device";
 "已刪除 %@ 筆，另有 %@ 筆未能完整刪除。請重新整理後重試。\n%@" = "Deleted %@ scans; %@ could not be fully deleted. Refresh and retry.\n%@";
 "已匹配 %@ 張影像，%@ 張位置通過驗證並修正。" = "Matched %@ images; validated and corrected %@ camera positions.";
 "已另存優化版本，原始掃描仍保留" = "Saved as an optimized copy. The original scan is preserved.";
@@ -134,7 +131,6 @@
 "掃描原始資料已保留，但歷史點雲預覽儲存失敗：%@" = "Raw scan data is saved, but saving the history point cloud preview failed: %@";
 "掃描已暫停，回到相機後會重新定位" = "Scanning paused. The camera will relocalize when you return.";
 "掃描影像" = "Scan image";
-"掃描會保留在首頁的「掃描紀錄」，之後可預覽、分享或刪除。離開後無法接續這次即時掃描。" = "This scan is saved in Scan history for preview, sharing, or deletion. You cannot resume this live scan session after leaving.";
 "掃描檔案已關閉" = "Scan files are closed";
 "掃描紀錄" = "Scan history";
 "掃描與資料優化都在裝置上進行" = "Capture and data refinement run on your device";
@@ -277,7 +273,6 @@
 "跟隨拍攝位置" = "Follow camera position";
 "跨影格匹配不足（%@ 張達到求解需求），保留原本位置。" = "Not enough cross-frame matches (%@ frames meet the solver requirements). Original poses preserved.";
 "較長曝光會增加運動模糊風險" = "Longer exposures increase motion blur risk";
-"返回開始掃描" = "Back to scanning";
 "追蹤不穩，請放慢並對準紋理豐富的區域" = "Tracking is unstable. Slow down and aim at a textured area.";
 "追蹤恢復中・請保持畫面穩定" = "Recovering tracking · Keep the view steady";
 "追蹤暫時不穩，請放慢並對準有紋理的表面" = "Tracking is unstable. Slow down and aim at a textured surface.";
@@ -288,7 +283,6 @@
 "這次掃描沒有儲存點雲或深度資料，可切換查看影像。" = "This scan has no saved point cloud or depth data. Switch to images.";
 "這次掃描沒有可預覽的點雲，仍可查看拍攝影像。" = "No point cloud is available for this scan. Captured images can still be viewed.";
 "選取" = "Select";
-"還沒有掃描紀錄" = "No scans yet";
 "重新啟動相機" = "Restart camera";
 "重新定位中：請把鏡頭對準上次掃描過的區域" = "Relocalizing: aim at a previously scanned area";
 "重新播放" = "Replay";
@@ -304,7 +298,6 @@
 "離開掃描" = "Leave scan";
 "離開掃描檢視？" = "Leave scan review?";
 "靠近牆面一點" = "Move closer to the wall";
-"預覽、分享或刪除之前的掃描" = "Preview, share, or delete previous scans";
 "預覽內容" = "Preview content";
 "顯示掃描品質熱圖" = "Show scan quality heatmap";
 "顯示點雲" = "Show point cloud";
@@ -503,3 +496,12 @@
 "照片對齊檢查已通過。" = "The photo alignment check passed.";
 "照片對齊檢查未確認改善，保留原本相機位置。" = "The photo alignment check did not confirm an improvement. Original camera positions preserved.";
 "重疊照片不足以確認修正，保留原本相機位置。" = "Too few overlapping photos to confirm the correction. Original camera positions preserved.";
+"%@ 個點" = "%@ points";
+"相機模式" = "Camera mode";
+"移動速度" = "Motion speed";
+"影像重建 %@ 點" = "%@ image points";
+"回到點雲" = "Back to point cloud";
+"顯示家具" = "Show furniture";
+"掃描會保留在首頁的「掃描紀錄」，之後可預覽、分享或刪除。離開後無法接續這次即時掃描。" = "This scan is saved in Scan history for preview, sharing, or deletion. You cannot resume this live scan session after leaving.";
+"還沒有掃描紀錄" = "No scans yet";
+"完成掃描後會自動保留在這裡，之後可預覽、分享或刪除。" = "Completed scans are saved here for preview, sharing, or deletion.";

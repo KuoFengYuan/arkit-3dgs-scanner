@@ -4,7 +4,7 @@
 
 Documentation defaults to English. Every Markdown document has a Traditional Chinese `.zh-TW.md` counterpart and a reciprocal language link. Keep examples, behavior, limitations, and maintenance changes consistent across both versions.
 
-The app defaults to **Traditional Chinese**, independent of device language. Choose 繁體中文 or English on the home screen; `app.language` in UserDefaults persists the choice. Missing or unrecognized values fall back to Traditional Chinese. SwiftUI receives the selected locale without rebuilding the scan session. Change language from the home screen before entering capture or history.
+The app defaults to **Traditional Chinese**, independent of device language. Choose 繁體中文 or English from the language menu (globe) on the home screen; `app.language` in UserDefaults persists the choice. Missing or unrecognized values fall back to Traditional Chinese. SwiftUI receives the selected locale without rebuilding the scan session. Change language from the home screen before entering capture or history.
 
 `Capture/Localization.swift` provides `AppLanguage`, `LocalizedMessage`, and `L10n`. User-facing labels, dynamic errors/progress, quality guidance, accessibility labels, and built-in floor-plan names use `L10n.text`. Translation resources are `en.lproj/Localizable.strings` and `zh-Hant.lproj/Localizable.strings`.
 

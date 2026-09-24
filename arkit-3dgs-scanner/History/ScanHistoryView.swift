@@ -1,8 +1,13 @@
 import SwiftUI
 import ImageIO
 
+/// Home library: a grid of saved scans with one prominent capture action.
 struct ScanHistoryView: View {
-    @Environment(\.dismiss) private var dismiss
+    /// Changes when capture closes, so a newly saved scan appears without pulling to refresh.
+    let revision: Int
+    let hasLiDAR: Bool
+    let canScan: Bool
+    let onStartScan: () -> Void
     @State private var entries: [ScanEntry] = []
     @State private var loading = true
     @State private var error: String?
@@ -10,6 +15,8 @@ struct ScanHistoryView: View {
     @State private var deleting = false
     @State private var selecting = false
     @State private var selectedIDs: Set<String> = []
+    /// DEBUG `--preview-scan-detail[-photos]`: open the newest scan for UI inspection.
+    @State private var debugDetail = false
 
     private struct DeletionRequest {
         let entries: [ScanEntry]
@@ -18,137 +25,263 @@ struct ScanHistoryView: View {
     }
 
     private var selectedEntries: [ScanEntry] { entries.filter { selectedIDs.contains($0.id) } }
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if loading && entries.isEmpty {
-                    ProgressView(L10n.text("讀取掃描紀錄…"))
-                } else if entries.isEmpty {
-                    ContentUnavailableView {
-                        Label(error == nil ? L10n.text("還沒有掃描紀錄") : L10n.text("無法讀取紀錄"), systemImage: "clock.arrow.circlepath")
-                    } description: {
-                        Text(error ?? L10n.text("完成掃描後會自動保留在這裡，之後可預覽、分享或刪除。"))
-                    } actions: {
-                        if error != nil { Button(L10n.text("重試")) { Task { await reload() } } }
-                        else { Button(L10n.text("返回開始掃描")) { dismiss() }.buttonStyle(.borderedProminent) }
-                    }
-                } else {
-                    List {
-                        Section {
-                            ForEach(entries) { entry in
-                                if selecting {
-                                    Button {
-                                        if !selectedIDs.insert(entry.id).inserted { selectedIDs.remove(entry.id) }
-                                    } label: {
-                                        HStack(spacing: 12) {
-                                            Image(systemName: selectedIDs.contains(entry.id) ? "checkmark.circle.fill" : "circle")
-                                                .font(.title2).foregroundStyle(Color.accentColor)
-                                            row(entry)
-                                        }
-                                        .contentShape(Rectangle())
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityValue(selectedIDs.contains(entry.id) ? L10n.text("已選取") : L10n.text("未選取"))
-                                } else {
-                                    NavigationLink {
-                                        ScanHistoryDetail(entry: entry) {
-                                            Task { await reload() }
-                                        }
-                                    } label: { row(entry) }
-                                    .swipeActions {
-                                        Button(role: .destructive) {
-                                            pendingDelete = DeletionRequest(entries: [entry])
-                                        } label: { Label(L10n.text("刪除"), systemImage: "trash") }
-                                    }
-                                }
-                            }
-                        } footer: {
-                            Text(L10n.text("包含舊版拍攝的掃描。刪除會一併移除照片、模型、點雲與分享檔案。"))
-                        }
-                    }
-                    .refreshable { if !deleting { await reload() } }
-                    .disabled(deleting)
-                }
-            }
-            .navigationTitle(selecting ? L10n.text("已選取 \(selectedIDs.count) 筆") : L10n.text("掃描紀錄"))
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    if !entries.isEmpty {
-                        Button(selecting ? L10n.text("取消選取") : L10n.text("選取")) {
-                            selecting.toggle()
-                            selectedIDs.removeAll()
-                        }.disabled(deleting || loading)
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(L10n.text("完成")) { dismiss() }.disabled(deleting)
-                }
-            }
-            .safeAreaInset(edge: .bottom) {
-                if !entries.isEmpty {
-                    HStack {
-                        if deleting {
-                            ProgressView(L10n.text("正在刪除照片與模型…"))
-                        } else if selecting {
-                            Button(selectedIDs.count == entries.count ? L10n.text("取消全選") : L10n.text("全選")) {
-                                selectedIDs = selectedIDs.count == entries.count ? [] : Set(entries.map(\.id))
-                            }
-                            Spacer()
-                            Button(L10n.text("刪除所選（\(selectedIDs.count)）"), role: .destructive) {
-                                pendingDelete = DeletionRequest(entries: selectedEntries)
-                            }.disabled(selectedIDs.isEmpty)
-                        } else {
-                            Text(L10n.text("共 \(entries.count) 筆")).foregroundStyle(.secondary)
-                            Spacer()
-                            Button(L10n.text("全部刪除"), role: .destructive) {
-                                pendingDelete = DeletionRequest(entries: entries, all: true)
-                            }
-                        }
-                    }
-                    .disabled(loading)
-                    .padding().background(.bar)
-                }
-            }
-            .interactiveDismissDisabled(deleting)
-            .task { await reload() }
-            .confirmationDialog(pendingDelete?.title ?? L10n.text("刪除掃描？"), isPresented: Binding(
-                get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
-                titleVisibility: .visible, presenting: pendingDelete) { request in
-                Button(L10n.text("永久刪除 \(request.entries.count) 筆掃描"), role: .destructive) {
-                    pendingDelete = nil
-                    deleting = true
-                    Task { await delete(request.entries) }
-                }
-                Button(L10n.text("取消"), role: .cancel) { pendingDelete = nil }
-            } message: { _ in
-                Text(L10n.text("所選掃描的所有照片、模型、點雲、深度與姿態資料、平面圖及同名 ZIP 都會刪除，無法復原。"))
-            }
-            .alert(L10n.text("無法完成操作"), isPresented: Binding(get: { error != nil && !entries.isEmpty }, set: { if !$0 { error = nil } })) {
-                Button(L10n.text("好")) { error = nil }
-            } message: { Text(error ?? "") }
-        }
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    /// Two columns on iPhone; larger covers on iPad and wide windows.
+    private var columns: [GridItem] {
+        let minimum: CGFloat = horizontalSizeClass == .regular ? 220 : 150
+        return [GridItem(.adaptive(minimum: minimum, maximum: 340), spacing: DS.Space.m, alignment: .top)]
     }
 
-    private func row(_ entry: ScanEntry) -> some View {
-        HStack(spacing: 14) {
-            ScanPhoto(url: entry.cover, maxDimension: 240)
-                .frame(width: 72, height: 72)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-            VStack(alignment: .leading, spacing: 5) {
-                Text(entry.date, format: .dateTime.month().day().hour().minute()).font(.headline)
-                Text(L10n.text("\(entry.frameCount) 張影像") + (entry.pointCount.map { L10n.text("・\($0.formatted()) 個點") } ?? ""))
-                    .font(.caption).foregroundStyle(.secondary)
-                if let lidar = entry.usedLiDAR {
-                    Label(lidar ? L10n.text("LiDAR 開啟") : L10n.text("LiDAR 關閉・相機模式"),
-                          systemImage: lidar ? "sensor.tag.radiowaves.forward" : "camera")
-                        .font(.caption).foregroundStyle(lidar ? Color.accentColor : .secondary)
+    var body: some View {
+        Group {
+            if loading && entries.isEmpty {
+                ProgressView(L10n.text("讀取掃描紀錄…"))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if entries.isEmpty, let error {
+                ContentUnavailableView {
+                    Label(L10n.text("無法讀取紀錄"), systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(error)
+                } actions: {
+                    Button(L10n.text("重試")) { Task { await reload() } }
+                        .buttonStyle(DSSecondaryButtonStyle())
                 }
-                Text(entry.archive == nil ? L10n.text("已儲存於裝置") : L10n.text("已有分享檔案"))
-                    .font(.caption).foregroundStyle(.secondary)
+            } else if entries.isEmpty {
+                emptyLibrary
+            } else {
+                library
             }
         }
-        .padding(.vertical, 4)
+        .dsCanvas()
+        .navigationTitle(selecting ? L10n.text("已選取 \(selectedIDs.count) 筆") : L10n.text("掃描紀錄"))
+        .navigationBarTitleDisplayMode(selecting ? .inline : .large)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                if !entries.isEmpty {
+                    Button(selecting ? L10n.text("取消選取") : L10n.text("選取")) {
+                        withAnimation(DS.springy) {
+                            selecting.toggle()
+                            selectedIDs.removeAll()
+                        }
+                    }
+                    .disabled(deleting || loading)
+                }
+            }
+        }
+        .safeAreaInset(edge: .bottom) { bottomBar }
+        .task(id: revision) {
+            await reload()
+            #if DEBUG
+            let arguments = ProcessInfo.processInfo.arguments
+            if !entries.isEmpty, arguments.contains(where: { $0.hasPrefix("--preview-scan-detail") }) { debugDetail = true }
+            #endif
+        }
+        .navigationDestination(isPresented: $debugDetail) {
+            if let entry = entries.first {
+                ScanHistoryDetail(entry: entry,
+                                  initialTab: ProcessInfo.processInfo.arguments.contains("--preview-scan-detail-photos") ? 1 : 0) {
+                    Task { await reload() }
+                }
+            }
+        }
+        .confirmationDialog(pendingDelete?.title ?? L10n.text("刪除掃描？"), isPresented: Binding(
+            get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+            titleVisibility: .visible, presenting: pendingDelete) { request in
+            Button(L10n.text("永久刪除 \(request.entries.count) 筆掃描"), role: .destructive) {
+                pendingDelete = nil
+                deleting = true
+                Task { await delete(request.entries) }
+            }
+            Button(L10n.text("取消"), role: .cancel) { pendingDelete = nil }
+        } message: { _ in
+            Text(L10n.text("所選掃描的所有照片、模型、點雲、深度與姿態資料、平面圖及同名 ZIP 都會刪除，無法復原。"))
+        }
+        .alert(L10n.text("無法完成操作"), isPresented: Binding(get: { error != nil && !entries.isEmpty }, set: { if !$0 { error = nil } })) {
+            Button(L10n.text("好")) { error = nil }
+        } message: { Text(error ?? "") }
+        .sensoryFeedback(.selection, trigger: selectedIDs)
+    }
+
+    // MARK: - Grid
+
+    private var library: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: DS.Space.m) {
+                HStack(spacing: DS.Space.xs) {
+                    DSMetric(value: hasLiDAR ? "LiDAR" : L10n.text("標準相機"),
+                             symbol: hasLiDAR ? "sensor.tag.radiowaves.forward" : "camera",
+                             tone: hasLiDAR ? .accent : .neutral)
+                    Text(L10n.text("共 \(entries.count) 筆")).font(.subheadline).foregroundStyle(DS.Palette.textSecondary)
+                    Spacer()
+                }
+                LazyVGrid(columns: columns, spacing: DS.Space.l) {
+                    ForEach(entries) { entry in
+                        if selecting {
+                            Button {
+                                if !selectedIDs.insert(entry.id).inserted { selectedIDs.remove(entry.id) }
+                            } label: {
+                                ScanCard(entry: entry, selecting: true, selected: selectedIDs.contains(entry.id))
+                            }
+                            .buttonStyle(DSCardButtonStyle())
+                            .accessibilityValue(selectedIDs.contains(entry.id) ? L10n.text("已選取") : L10n.text("未選取"))
+                        } else {
+                            NavigationLink {
+                                ScanHistoryDetail(entry: entry) { Task { await reload() } }
+                            } label: {
+                                ScanCard(entry: entry)
+                            }
+                            .buttonStyle(DSCardButtonStyle())
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    pendingDelete = DeletionRequest(entries: [entry])
+                                } label: { Label(L10n.text("刪除"), systemImage: "trash") }
+                            }
+                        }
+                    }
+                }
+                Text(L10n.text("包含舊版拍攝的掃描。刪除會一併移除照片、模型、點雲與分享檔案。"))
+                    .font(.caption)
+                    .foregroundStyle(DS.Palette.textTertiary)
+                    .padding(.top, DS.Space.xs)
+            }
+            .padding(.horizontal, DS.Space.m)
+            .padding(.bottom, DS.Space.xl)
+        }
+        .refreshable { if !deleting { await reload() } }
+        .disabled(deleting)
+    }
+
+    // MARK: - Empty state (first run)
+
+    private var emptyLibrary: some View {
+        ScrollView {
+            VStack(spacing: DS.Space.xl) {
+                ZStack {
+                    Circle().fill(DS.Palette.accent.opacity(0.10)).frame(width: 148, height: 148)
+                    Circle().strokeBorder(DS.Palette.accent.opacity(0.25), lineWidth: 1).frame(width: 112, height: 112)
+                    Image(systemName: "cube.transparent")
+                        .font(.system(size: 46, weight: .light))
+                        .foregroundStyle(DS.Palette.accent)
+                    Image(systemName: "viewfinder")
+                        .font(.system(size: 96, weight: .ultraLight))
+                        .foregroundStyle(DS.Palette.accent.opacity(0.55))
+                }
+                .accessibilityHidden(true)
+                .padding(.top, DS.Space.l)
+                VStack(spacing: DS.Space.s) {
+                    Text(L10n.text("把眼前的空間，\n留下來。"))
+                        .font(.system(.largeTitle, design: .rounded, weight: .bold))
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(L10n.text("走一圈、檢查點雲與拍攝路線，再匯出空間掃描資料。"))
+                        .font(.body)
+                        .foregroundStyle(DS.Palette.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                // The home screen is the scan history; say so while it is still empty.
+                HStack(alignment: .top, spacing: DS.Space.s) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(DS.Palette.accent)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(L10n.text("還沒有掃描紀錄")).font(.headline)
+                        Text(L10n.text("完成掃描後會自動保留在這裡，之後可預覽、分享或刪除。"))
+                            .font(.subheadline)
+                            .foregroundStyle(DS.Palette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .dsCard()
+                .accessibilityElement(children: .combine)
+                ScanGuideSteps()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .dsCard(padding: DS.Space.l)
+                Label(L10n.text("多走動、少原地旋轉，讓同一個表面被不同角度看見。"), systemImage: "figure.walk")
+                    .font(.subheadline)
+                    .foregroundStyle(DS.Palette.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !hasLiDAR {
+                    Label(L10n.text("此裝置可擷取影像與稀疏點雲；完整幾何與平面圖建議使用 LiDAR 裝置。"), systemImage: "info.circle")
+                        .font(.footnote)
+                        .foregroundStyle(DS.Palette.textTertiary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.horizontal, DS.Space.xl)
+            .padding(.bottom, DS.Space.xl)
+            .frame(maxWidth: DS.Size.panelMaxWidth)
+            .frame(maxWidth: .infinity)
+        }
+        .refreshable { await reload() }
+    }
+
+    // MARK: - Bottom actions
+
+    @ViewBuilder
+    private var bottomBar: some View {
+        Group {
+            if deleting {
+                ProgressView(L10n.text("正在刪除照片與模型…"))
+                    .tint(.white)
+                    .foregroundStyle(DS.Palette.textPrimary)
+                    .padding(.horizontal, DS.Space.l).frame(minHeight: DS.Size.primaryHeight)
+                    .dsFloatingPanel(radius: DS.Radius.l)
+            } else if selecting {
+                HStack(spacing: DS.Space.s) {
+                    Button(selectedIDs.count == entries.count ? L10n.text("取消全選") : L10n.text("全選")) {
+                        selectedIDs = selectedIDs.count == entries.count ? [] : Set(entries.map(\.id))
+                    }
+                    .buttonStyle(DSSecondaryButtonStyle())
+                    Spacer(minLength: 0)
+                    Button(role: .destructive) {
+                        pendingDelete = DeletionRequest(entries: selectedEntries, all: selectedIDs.count == entries.count)
+                    } label: {
+                        Label(L10n.text("刪除所選（\(selectedIDs.count)）"), systemImage: "trash")
+                    }
+                    .buttonStyle(DSPrimaryButtonStyle(fill: false, tint: DS.Palette.danger))
+                    .disabled(selectedIDs.isEmpty)
+                }
+                .padding(DS.Space.s)
+                .dsFloatingPanel(radius: DS.Radius.xl + 4)
+            } else {
+                VStack(spacing: DS.Space.xs) {
+                    Button(action: onStartScan) {
+                        Label(L10n.text("開始掃描"), systemImage: "record.circle")
+                            .padding(.horizontal, DS.Space.xs)
+                    }
+                    .buttonStyle(DSPrimaryButtonStyle(fill: false))
+                    .shadow(color: DS.Palette.accent.opacity(canScan ? 0.35 : 0), radius: 16, y: 6)
+                    .disabled(!canScan)
+                    .accessibilityIdentifier("startScan")
+                    if !canScan {
+                        Text(L10n.text("此裝置不支援 AR 掃描"))
+                            .font(.caption)
+                            .foregroundStyle(DS.Palette.textSecondary)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: DS.Size.panelMaxWidth)
+        .padding(.horizontal, DS.Space.m)
+        .padding(.top, DS.Space.l)
+        .padding(.bottom, DS.Space.xs)
+        .frame(maxWidth: .infinity)
+        .background {
+            // Fade the grid out under the floating actions instead of a hard toolbar edge.
+            LinearGradient(stops: [.init(color: DS.Palette.canvas.opacity(0), location: 0),
+                                   .init(color: DS.Palette.canvas.opacity(0.94), location: 0.45),
+                                   .init(color: DS.Palette.canvas, location: 1)],
+                           startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+        }
+        .disabled(loading && !deleting)
+        .animation(DS.springy, value: selecting)
+        .animation(DS.springy, value: deleting)
     }
 
     private func delete(_ targets: [ScanEntry]) async {
@@ -167,11 +300,83 @@ struct ScanHistoryView: View {
         do {
             entries = try await ScanLibrary.shared.entries()
             selectedIDs.formIntersection(entries.map(\.id))
+            if entries.isEmpty { selecting = false }
             error = nil
         } catch { self.error = error.localizedDescription }
     }
 }
 
+/// One scan in the library grid: cover photo first, then date and size.
+private struct ScanCard: View {
+    let entry: ScanEntry
+    var selecting = false
+    var selected = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DS.Space.xs) {
+            Color.clear
+                .aspectRatio(4.0 / 3.0, contentMode: .fit)
+                .overlay { ScanPhoto(url: entry.cover, maxDimension: 480) }
+                .clipShape(RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous)
+                        .strokeBorder(selected ? DS.Palette.accent : DS.Palette.stroke, lineWidth: selected ? 3 : 0.5)
+                }
+                .overlay(alignment: .topLeading) { badges.padding(DS.Space.xs) }
+                .overlay(alignment: .topTrailing) {
+                    if selecting {
+                        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                            .font(.title2)
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(selected ? DS.Palette.onAccent : .white, selected ? DS.Palette.accent : .black.opacity(0.25))
+                            .shadow(color: .black.opacity(0.4), radius: 3)
+                            .padding(DS.Space.xs)
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.date, format: .dateTime.month().day().hour().minute())
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(DS.Palette.textPrimary)
+                Text(L10n.text("\(entry.frameCount) 張影像") + (entry.pointCount.map { L10n.text("・\($0.formatted()) 個點") } ?? ""))
+                    .font(.caption)
+                    .foregroundStyle(DS.Palette.textSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+            }
+            .padding(.horizontal, 2)
+        }
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+
+    private var badges: some View {
+        HStack(spacing: DS.Space.xxs) {
+            if let lidar = entry.usedLiDAR {
+                badge(lidar ? "sensor.tag.radiowaves.forward" : "camera",
+                      label: lidar ? L10n.text("LiDAR 開啟") : L10n.text("LiDAR 關閉・相機模式"),
+                      tint: lidar ? DS.Palette.accent : .white)
+            }
+            if entry.archive != nil {
+                badge("shippingbox.fill", label: L10n.text("已有分享檔案"), tint: .white)
+            }
+        }
+    }
+
+    private func badge(_ symbol: String, label: String, tint: Color) -> some View {
+        Image(systemName: symbol)
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(tint)
+            .frame(width: 26, height: 26)
+            .hudGlass(Circle())
+            .accessibilityLabel(label)
+    }
+}
+
+// MARK: - Scan detail
+
+/// 3D-first scan detail: the point cloud or the photo route fills the screen, a floating
+/// switcher picks the view, and a compact panel holds the export action.
 private struct ScanHistoryDetail: View {
     let entry: ScanEntry
     @State private var optimizedEntry: ScanEntry?
@@ -186,64 +391,38 @@ private struct ScanHistoryDetail: View {
     let onLibraryChange: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var preview: ScanPreview?
-    @State private var selectedTab = 0
+    @State private var selectedTab: Int
+
+    init(entry: ScanEntry, initialTab: Int = 0, onLibraryChange: @escaping () -> Void) {
+        self.entry = entry
+        self.onLibraryChange = onLibraryChange
+        _selectedTab = State(initialValue: initialTab)
+    }
     @State private var photoIndex = 0
     @State private var playbackFPS = ScanPlaybackTiming.defaultFPS
     @State private var error: String?
     @State private var showDelete = false
     @State private var busy = false
     @State private var archive: URL?
+    @State private var viewReset = 0
+    @State private var showGestureHint = true
+    /// Brief confirmation once the export archive is ready to share.
+    @State private var showReadyToast = false
+
+    private var qualityNeedsReview: Bool { selection?.notice != nil }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if let lidar = currentEntry.usedLiDAR {
-                Text(lidar ? L10n.text("LiDAR 深度掃描") : L10n.text("相機模式・未使用 LiDAR 深度"))
-                    .font(.caption).foregroundStyle(.secondary).padding(.top, 8)
-            }
-            if optimizedEntry != nil {
-                Text(L10n.text("已另存優化版本，原始掃描仍保留")).font(.caption).foregroundStyle(.secondary)
-            }
-            Button { showDetails = true } label: {
-                Label(selection?.notice != nil ? L10n.text("拍攝品質需要檢查") : L10n.text("掃描品質資訊"),
-                      systemImage: selection?.notice != nil ? "exclamationmark.circle" : "info.circle")
-                    .font(.subheadline).frame(minHeight: 44)
-                    .foregroundStyle(selection?.notice != nil ? Color.orange : Color.accentColor)
-            }
-            if optimizationTask != nil {
-                ProgressView(optimizationText, value: optimizationProgress).padding()
-            }
-            Picker(L10n.text("預覽內容"), selection: $selectedTab) {
-                Text(L10n.text("3D 點雲")).tag(0)
-                Text(L10n.text("拍攝影像")).tag(1)
-            }
-            .pickerStyle(.segmented).padding()
-            if let preview {
-                if selectedTab == 0 {
-                    if preview.points.isEmpty {
-                        ContentUnavailableView(L10n.text("沒有可預覽的點雲"), systemImage: "cube.transparent",
-                                               description: Text(preview.note ?? L10n.text("可切換查看拍攝影像。")))
-                    } else {
-                        ZStack(alignment: .bottom) {
-                            ReviewPointCloudView(points: preview.points, trajectory: preview.trajectory)
-                            Text(L10n.text("單指旋轉・雙指縮放與平移"))
-                                .font(.caption).padding(10).hudGlass(Capsule()).foregroundStyle(.white)
-                                .padding().allowsHitTesting(false)
-                        }
-                        .accessibilityLabel(L10n.text("歷史掃描 3D 點雲"))
-                    }
-                } else if preview.images.isEmpty {
-                    ContentUnavailableView(L10n.text("沒有拍攝影像"), systemImage: "photo")
-                } else {
-                    ScanRoutePlaybackView(preview: preview, currentIndex: $photoIndex, playbackFPS: $playbackFPS)
-                }
-            } else {
-                Spacer()
-                ProgressView(L10n.text("準備預覽…"))
-                Text(L10n.text("舊版掃描可能需要從深度資料重建點雲"))
-                    .font(.caption).foregroundStyle(.secondary).padding()
-                Spacer()
+        ZStack {
+            DS.Palette.canvas.ignoresSafeArea()
+            content
+        }
+        .overlay(alignment: .top) {
+            if showReadyToast {
+                DSToast(text: L10n.text("檔案已準備好")).padding(.top, DS.Space.xs)
             }
         }
+        .safeAreaInset(edge: .top, spacing: 0) { topOverlay }
+        .safeAreaInset(edge: .bottom, spacing: 0) { bottomPanel }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 if optimizationTask != nil {
@@ -270,71 +449,14 @@ private struct ScanHistoryDetail: View {
                 }
             }
         }
-        .sheet(isPresented: $showDetails) {
-            NavigationStack {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        Label(L10n.text("\(currentEntry.frameCount) 張影像"), systemImage: "photo.stack")
-                        if let poseNotice {
-                            Text(poseNotice).font(.subheadline).foregroundStyle(.secondary)
-                        }
-                        if let selection {
-                            Text(L10n.text("訓練選用 \(selection.selectedIDs.count) / \(selection.inputFrames) 張影像"))
-                                .font(.subheadline).foregroundStyle(.secondary)
-                            if let notice = selection.notice {
-                                Label(notice, systemImage: "exclamationmark.circle")
-                                    .font(.subheadline).foregroundStyle(.orange)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            if let information = selection.diagnosticSummary {
-                                DisclosureGroup(L10n.text("拍攝品質資訊")) {
-                                    Text(information).font(.subheadline)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                }.font(.subheadline).foregroundStyle(.secondary)
-                            }
-                        }
-                        if let note = preview?.note {
-                            Text(note).font(.subheadline).foregroundStyle(.secondary)
-                        }
-                    }.frame(maxWidth: .infinity, alignment: .leading).padding()
-                }
-                .navigationTitle(L10n.text("掃描品質資訊"))
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar { ToolbarItem(placement: .confirmationAction) {
-                    Button(L10n.text("完成")) { showDetails = false }
-                } }
-            }
-            .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
-            .presentationBackground(Color(uiColor: .systemGroupedBackground))
-        }
+        .sheet(isPresented: $showDetails) { detailsSheet }
         .sheet(isPresented: $showMeasurements) {
             if let preview { SceneMeasurementView(entry: currentEntry, preview: preview) }
         }
         .onDisappear { optimizationTask?.cancel() }
         .navigationTitle(currentEntry.date.formatted(.dateTime.locale(L10n.locale).year().month().day().hour().minute()))
         .navigationBarTitleDisplayMode(.inline)
-        .safeAreaInset(edge: .bottom) {
-            Group {
-                if busy {
-                    ProgressView(L10n.text("處理中…"))
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                } else if let archive {
-                    ShareLink(item: archive) {
-                        Label(L10n.text("分享掃描"), systemImage: "square.and.arrow.up")
-                            .frame(maxWidth: .infinity, minHeight: 32)
-                    }
-                } else {
-                    Button { Task { await makeArchive() } } label: {
-                        Label(L10n.text("匯出 3DGS 訓練資料"), systemImage: "square.and.arrow.up")
-                            .frame(maxWidth: .infinity, minHeight: 32)
-                    }
-                }
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(busy || preview == nil)
-            .padding().background(.bar)
-        }
+        .toolbarBackground(DS.Palette.canvas.opacity(0.85), for: .navigationBar)
         .task {
             // Existing ZIPs may predate COLMAP preparation; regenerate once per detail visit.
             archive = nil
@@ -344,11 +466,21 @@ private struct ScanHistoryDetail: View {
                 let result = try await ScanLibrary.shared.preview(currentEntry)
                 guard !Task.isCancelled else { return }
                 preview = result
+                #if DEBUG
+                if ProcessInfo.processInfo.arguments.contains("--preview-scan-detail-measure"), !result.points.isEmpty {
+                    showMeasurements = true
+                }
+                #endif
             } catch {
                 guard !Task.isCancelled else { return }
                 self.error = error.localizedDescription
                 preview = ScanPreview(points: [], trajectory: [], images: [], note: error.localizedDescription)
             }
+        }
+        .task(id: preview == nil) {
+            guard preview != nil else { return }
+            try? await Task.sleep(for: .seconds(4))
+            withAnimation(.easeOut(duration: 0.4)) { showGestureHint = false }
         }
         .confirmationDialog(L10n.text("刪除這次掃描？"), isPresented: $showDelete, titleVisibility: .visible) {
             Button(L10n.text("刪除照片、模型與所有資料"), role: .destructive) {
@@ -364,6 +496,189 @@ private struct ScanHistoryDetail: View {
         .alert(L10n.text("無法完成操作"), isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
             Button(L10n.text("好")) { error = nil }
         } message: { Text(error ?? "") }
+        .sensoryFeedback(.success, trigger: archive != nil) { _, ready in ready }
+        .sensoryFeedback(.success, trigger: optimizedEntry?.id)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let preview {
+            if selectedTab == 0 {
+                if preview.points.isEmpty {
+                    ContentUnavailableView(L10n.text("沒有可預覽的點雲"), systemImage: "cube.transparent",
+                                           description: Text(preview.note ?? L10n.text("可切換查看拍攝影像。")))
+                } else {
+                    ReviewPointCloudView(points: preview.points, trajectory: preview.trajectory,
+                                         resetCameraToken: viewReset)
+                        .ignoresSafeArea(edges: .bottom)
+                        .accessibilityLabel(L10n.text("歷史掃描 3D 點雲"))
+                        .overlay(alignment: .bottom) {
+                            if showGestureHint {
+                                Text(L10n.text("單指旋轉・雙指縮放與平移"))
+                                    .font(.caption).hudText()
+                                    .padding(.horizontal, 14).padding(.vertical, 8)
+                                    .hudGlass(Capsule())
+                                    .padding(.bottom, DS.Space.m)
+                                    .transition(.opacity)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                }
+            } else if preview.images.isEmpty {
+                ContentUnavailableView(L10n.text("沒有拍攝影像"), systemImage: "photo")
+            } else {
+                ScanRoutePlaybackView(preview: preview, currentIndex: $photoIndex, playbackFPS: $playbackFPS)
+            }
+        } else {
+            VStack(spacing: DS.Space.s) {
+                ProgressView(L10n.text("準備預覽…")).tint(.white)
+                Text(L10n.text("舊版掃描可能需要從深度資料重建點雲"))
+                    .font(.caption).foregroundStyle(DS.Palette.textSecondary)
+            }
+            .padding()
+        }
+    }
+
+    private var topOverlay: some View {
+        VStack(spacing: DS.Space.xs) {
+            HStack(spacing: DS.Space.xs) {
+                Spacer(minLength: DS.Size.control + DS.Space.xs)
+                DSSegmentedPicker(segments: [
+                    DSSegment(value: 0, title: L10n.text("3D 點雲"), symbol: "cube"),
+                    DSSegment(value: 1, title: L10n.text("拍攝影像"), symbol: "photo.on.rectangle")
+                ], selection: $selectedTab)
+                .accessibilityLabel(L10n.text("預覽內容"))
+                Spacer(minLength: 0)
+                Button { viewReset += 1 } label: {
+                    Label(L10n.text("顯示完整點雲"), systemImage: "scope")
+                }
+                .buttonStyle(DSIconButtonStyle())
+                .opacity(selectedTab == 0 && preview?.points.isEmpty == false ? 1 : 0)
+                .disabled(selectedTab != 0 || preview?.points.isEmpty != false)
+            }
+            if selectedTab == 0 {
+                HStack(spacing: DS.Space.xs) {
+                    DSMetric(value: L10n.text("\(currentEntry.frameCount) 張影像"), symbol: "photo.stack")
+                    if let points = currentEntry.pointCount {
+                        DSMetric(value: L10n.text("\(points.formatted()) 個點"), symbol: "circle.grid.3x3.fill")
+                    }
+                    if let lidar = currentEntry.usedLiDAR {
+                        DSMetric(value: lidar ? "LiDAR" : L10n.text("相機模式"),
+                                 symbol: lidar ? "sensor.tag.radiowaves.forward" : "camera",
+                                 tone: lidar ? .accent : .warning)
+                            .accessibilityLabel(lidar ? L10n.text("LiDAR 深度掃描") : L10n.text("相機模式・未使用 LiDAR 深度"))
+                    }
+                }
+                .transition(.opacity)
+            }
+            if optimizedEntry != nil {
+                DSStatusPill(text: L10n.text("已另存優化版本，原始掃描仍保留"), symbol: "checkmark.circle.fill", tone: .success)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .padding(.horizontal, DS.Space.m)
+        .padding(.vertical, DS.Space.xs)
+        .animation(DS.springy, value: selectedTab)
+        .animation(DS.springy, value: optimizedEntry != nil)
+    }
+
+    private var bottomPanel: some View {
+        VStack(spacing: DS.Space.s) {
+            if optimizationTask != nil {
+                VStack(alignment: .leading, spacing: DS.Space.xs) {
+                    HStack {
+                        Label(optimizationText, systemImage: "wand.and.stars")
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(2)
+                        Spacer()
+                        Text("\(Int(optimizationProgress * 100))%")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(DS.Palette.textSecondary)
+                    }
+                    ProgressView(value: optimizationProgress).tint(DS.Palette.accent)
+                }
+                .foregroundStyle(DS.Palette.textPrimary)
+                .accessibilityElement(children: .combine)
+            }
+            HStack(spacing: DS.Space.xs) {
+                Button { showDetails = true } label: {
+                    Label(qualityNeedsReview ? L10n.text("拍攝品質需要檢查") : L10n.text("掃描品質資訊"),
+                          systemImage: qualityNeedsReview ? "exclamationmark.circle" : "info.circle")
+                }
+                .buttonStyle(DSIconButtonStyle(isSelected: qualityNeedsReview, tint: DS.Palette.warning, size: DS.Size.primaryHeight))
+                primaryAction
+            }
+        }
+        .padding(DS.Space.s)
+        .dsFloatingPanel(radius: DS.Radius.xl + 4)
+        .frame(maxWidth: DS.Size.panelMaxWidth)
+        .padding(.horizontal, DS.Space.m)
+        .padding(.bottom, DS.Space.xs)
+        .frame(maxWidth: .infinity)
+        .animation(DS.springy, value: optimizationTask != nil)
+    }
+
+    @ViewBuilder
+    private var primaryAction: some View {
+        if let archive {
+            ShareLink(item: archive) {
+                Label(L10n.text("分享掃描"), systemImage: "square.and.arrow.up")
+            }
+            .buttonStyle(DSPrimaryButtonStyle())
+            .disabled(busy)
+        } else {
+            Button { Task { await makeArchive() } } label: {
+                Label(busy && optimizationTask == nil ? L10n.text("處理中…") : L10n.text("匯出 3DGS 訓練資料"),
+                      systemImage: "square.and.arrow.up")
+            }
+            .buttonStyle(DSPrimaryButtonStyle(isLoading: busy && optimizationTask == nil))
+            .disabled(busy || preview == nil)
+        }
+    }
+
+    private var detailsSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: DS.Space.m) {
+                    Label(L10n.text("\(currentEntry.frameCount) 張影像"), systemImage: "photo.stack")
+                        .font(.headline)
+                    if let poseNotice {
+                        Text(poseNotice).font(.subheadline).foregroundStyle(DS.Palette.textSecondary)
+                    }
+                    if let selection {
+                        Text(L10n.text("訓練選用 \(selection.selectedIDs.count) / \(selection.inputFrames) 張影像"))
+                            .font(.subheadline).foregroundStyle(DS.Palette.textSecondary)
+                        if let notice = selection.notice {
+                            Label(notice, systemImage: "exclamationmark.circle")
+                                .font(.subheadline).foregroundStyle(DS.Palette.warning)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        if let information = selection.diagnosticSummary {
+                            DisclosureGroup(L10n.text("拍攝品質資訊")) {
+                                Text(information).font(.subheadline)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }.font(.subheadline).foregroundStyle(DS.Palette.textSecondary)
+                        }
+                    }
+                    if let note = preview?.note {
+                        Text(note).font(.subheadline).foregroundStyle(DS.Palette.textSecondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .dsCard()
+                .padding()
+            }
+            .dsCanvas()
+            .navigationTitle(L10n.text("掃描品質資訊"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) {
+                Button(L10n.text("完成")) { showDetails = false }
+            } }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(DS.Palette.canvas)
+        .presentationCornerRadius(DS.Radius.xl)
     }
 
     private func makeArchive() async {
@@ -373,9 +688,15 @@ private struct ScanHistoryDetail: View {
             archive = try await ScanLibrary.shared.archive(currentEntry)
             selection = await ScanLibrary.shared.trainingSelection(currentEntry)
             poseNotice = await ScanLibrary.shared.poseRefinementNotice(currentEntry)
+            withAnimation(DS.springy) { showReadyToast = true }
+            Task {
+                try? await Task.sleep(for: .seconds(2.5))
+                withAnimation(.easeOut(duration: 0.3)) { showReadyToast = false }
+            }
         }
         catch { self.error = error.localizedDescription }
     }
+
     private func optimize() async {
         busy = true
         optimizationText = L10n.text("準備優化…")
@@ -405,7 +726,6 @@ private struct ScanHistoryDetail: View {
             preview = try? await ScanLibrary.shared.preview(currentEntry)
         }
     }
-
 }
 
 struct ScanPhoto: View {
@@ -426,7 +746,7 @@ struct ScanPhoto: View {
     var body: some View {
         GeometryReader { geometry in
             ZStack {
-                Color(uiColor: .secondarySystemBackground)
+                DS.Palette.surface
                 if let image {
                     Image(uiImage: image).resizable()
                         .aspectRatio(contentMode: fit ? .fit : .fill)

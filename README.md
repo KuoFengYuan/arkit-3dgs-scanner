@@ -61,9 +61,16 @@ The interface supports Traditional Chinese (default) and English; switch languag
 
 ## Interface and controls
 
-The home screen keeps scan history above an expandable first-scan guide. Before capture, open **Scan settings** for scrollable capture-mode, quality, camera, and coordinate-system sections. Surface reconstruction explicitly includes pose refinement; disable reconstruction first to configure refinement independently.
+The interface is dark and 3D-first. The camera feed or point cloud fills the screen, and controls float above it: one prominent action per screen, with secondary controls shown only when relevant.
+- **Home: scan history.** The home screen is the scan history, a grid of covers with a floating **Start scanning** button. **Select** enables multi-select deletion.
+- **Capture HUD.**
+  - One status pill and one prioritized guidance slot.
+  - A tool rail that appears only while scanning.
+  - A shutter whose ring shows LiDAR view coverage.
+  - A single **Scan settings** button that also shows the current mode. Its scrollable sections cover capture mode, quality, camera, and coordinate system.
+- **Review and history.** A floating panel holds the metrics, the primary export or share action, and secondary actions. Quality details stay in a separate sheet, and **More actions** in history holds scene-scale validation, optimization, and deletion.
 
-Review screens keep quality details in a separate scrollable sheet so long diagnostics do not cover the point cloud. In history, **More actions** contains scene-scale validation, optimization, and deletion; the bottom button exports or shares the dataset. Delete still requires confirmation and removes the complete selected scan. Scan overlay tools have 44-point touch targets and spoken labels. All new controls are available in English and Traditional Chinese.
+Surface reconstruction explicitly includes pose refinement; disable reconstruction first to configure refinement independently. Deletion still requires confirmation and removes the complete selected scan. Touch targets are at least 44 points with spoken labels, and all controls are available in English and Traditional Chinese. See [interface design](docs/INTERFACE_DESIGN.md) for the design system, screen states, responsive layouts, and Simulator preview arguments.
 
 ## Capture modes
 
@@ -177,6 +184,7 @@ Swift regression tools cover capture writes, geometry, bounded depth caching, la
 ## Documentation
 
 - [Capture architecture](docs/CAPTURE_ARCHITECTURE.md)
+- [Interface design](docs/INTERFACE_DESIGN.md)
 - [Pose refinement and photo-alignment validation](docs/POSE_REFINEMENT.md)
 - [Loop closure and metric scale](docs/LOOP_CLOSURE_AND_SCALE.md)
 - [On-device dataset refinement](docs/ON_DEVICE_TRAINING_QUALITY.md)
