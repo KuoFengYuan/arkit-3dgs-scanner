@@ -23,6 +23,90 @@ White walls, reflections, short scans, and pure rotation may yield fewer points.
 
 Live sparse checks are not independent RGB triangulation and cannot remove all systematic ARKit feature errors. Accepted IDs are not continually replaced by later refined estimates; only tile-anchor correction applies. The separate reconstruction pass below also fixes ARKit poses and cannot remove systematic pose error.
 
+## Pose refinement without depth
+
+Camera-only scans now get a bundle adjustment too. It runs after keyframe-anchor readback and before the blur review and image reconstruction, as the LiDAR refinement does. `CameraOnlyPoseRefinement` combines two parts: image-only feature tracks, and the joint bundle adjustment with ARKit's frame-to-frame motion as a prior. `cameraOnlyPoseRefinement` in `CaptureConfig` turns it off.
+
+### Tracks from the images alone (`CameraOnlyTracker`)
+
+- **Detection.** Each keyframe is decoded at a 640-pixel long edge. A 16×12 grid gets at most one new Shi-Tomasi corner per cell that has no live track, with at most 192 live tracks.
+- **Tracking.** Pyramidal Lucas-Kanade (3 levels, 15×15 window, mean-normalized for exposure changes) follows each corner to the next keyframe. The search starts where the input poses predict the feature at the current scene-depth estimate.
+- **Checks.** A step is kept only if all of these hold:
+  - tracking back returns within 0.7 pixels;
+  - the patches correlate at 0.8 or better;
+  - the match lies within 4 pixels (saved resolution) of the epipolar line of the input poses.
+
+  The epipolar check cannot see errors along the direction of travel.
+- **Tracks.** Tracks end after 40 frames, and tracks shorter than three frames are dropped. An unreadable frame ends all tracks.
+- **Output.** Observations carry no depth. The scene-depth estimate uses sorted track IDs, so repeated runs give identical tracks.
+
+### Bundle adjustment
+
+`BundleAdjuster` treats `depth <= 0` as "no depth measurement". It skips the depth residual and triangulates the track from its viewing rays, with at least 1° of parallax. Camera-only tracks then refine each point by reprojection (`optimizeTracks`).
+
+Everything else is the LiDAR default:
+- the joint solve over all frames;
+- ARKit's relative motion as a tight prior (0.3 mm and 0.01° per step);
+- a weak anchor to the input poses, and 30 iterations.
+
+LiDAR observations always carry depth, so the LiDAR path is unchanged.
+
+**Validation.** Every fifth track is held out of the solve. The result is applied only if the held-out tracks' median reprojection improves by at least 3%. There is no photo check, because it needs depth.
+
+**Report.** `camera-pose-refinement.json` records:
+- status: `applied`, `holdoutDidNotImprove`, `insufficientHoldoutTracks`, `insufficientTrackSupport`, `noImprovement`, `noObservations`, `insufficientFrames` or `cancelled`;
+- the tracking statistics;
+- the held-out median before and after;
+- the frames changed, the median and largest corrections, and the time.
+
+The scan summary shows the held-out change as for LiDAR scans.
+
+### Measured on the two replay scans
+
+`tools/refine_camera_only.swift` runs the app's `CameraOnlyPoseRefinement` on the simulated camera-only capture of a LiDAR scan, with its depth removed. It writes the result for `replay_camera_only --candidate`. The LiDAR reference is not ground truth.
+
+| Camera-only poses: before → after refinement | 7F2187 | 9F8040 |
+| --- | --- | --- |
+| Tracks; median length | 3,033; 5 frames | 4,367; 7 frames |
+| Held-out reprojection median | 1.74 → 1.05 px (−40%) | 1.83 → 1.14 px (−38%) |
+| Frames changed; median / largest correction | 194; 4.0 / 11.2 mm | 372; 10.3 / 35.4 mm |
+| Position difference from the reference, median | 1.0 → 0.81 cm | 1.8 → 1.32 cm |
+| RPE over 5 m, median | 1.8 → 1.40 cm | 2.7 → 2.12 cm |
+| Photo NCC gain over the input: adjacent; wide (reference poses) | +0.0078; +0.0033 (+0.0063; +0.0227) | +0.0023; +0.0187 (+0.0030; +0.0211) |
+| MVS points | 14,474 → 18,875 | 11,365 → 18,274 |
+| MVS accuracy median / P90 | 1.95 / 8.78 → 1.97 / 7.21 cm | 2.95 / 9.28 → 2.39 / 6.58 cm |
+| MVS points beyond 10 cm | 7.7 → 4.3% | 8.2 → 3.9% |
+| MVS completeness within 5 cm | 23.7 → 28.9% | 10.1 → 14.3% |
+| Mac time (tracking + solve) | 4.1 + 0.6 s | 7.4 + 1.2 s |
+
+- **Room scale.** Refinement recovers most of the wide-baseline photo alignment that the LiDAR reference has, and halves the outlying MVS points.
+- **Close range.** It fixes adjacent alignment and outliers, but wide-baseline alignment stays near the input. Its tracks are short (median five frames), so views further apart are barely linked.
+
+### Choosing the defaults
+
+Variants on both scans (5 cm completeness / points beyond 10 cm / wide photo gain) were all close:
+
+| Variant | 7F2187 | 9F8040 |
+| --- | --- | --- |
+| **Default:** triangulated then refined points | 28.9% / 4.3% / +0.0033 | 14.3% / 3.9% / +0.0187 |
+| Triangulated points only | 28.3% / 4.6% / −0.0005 | 15.2% / 3.9% / +0.0210 |
+| Denser 24×18 grid, 400 tracks | 28.4% / 5.4% / −0.0009 | 15.7% / 4.0% / +0.0242 |
+| Looser motion prior (1 mm, 0.03°) | 28.2% / 4.5% / +0.0015 | 15.1% / 4.2% / +0.0137 |
+| Tighter motion prior (0.1 mm, 0.003°) | 27.4% / 5.0% / +0.0023 | 14.8% / 4.1% / +0.0160 |
+| Tracks up to 80 frames | 28.6% / 4.7% / +0.0017 | 15.3% / 3.7% / +0.0207 |
+| Looser checks (1 px back-tracking, 6 px epipolar) | 28.1% / 4.8% / +0.0014 | 15.1% / 3.8% / +0.0224 |
+
+The variants other than the default ran before the scene-depth estimate was made deterministic. Repeated runs of the same variant then differed by about half a percentage point, so these gaps are within that noise. Refined points are the default because they gave the best close-range accuracy and outliers, and a positive wide gain on both scans.
+
+### Limits
+
+- **Slow drift is not corrected.**
+  - Without loop closure or depth, drift slower than the tracks' length is absorbed by the triangulated structure. In a synthetic test, a smooth 2 cm drift over 30 frames stayed.
+  - The tight ARKit prior also keeps most frame-to-frame jitter: the synthetic test cut held-out reprojection by 45% but the four-frame displacement error only from 9.0 to 8.2 mm.
+  - The real-scan gains come from the multi-view consistency that feature tracks can see.
+- **Tracking gaps.** Repeated texture, motion blur and low texture limit tracking. The epipolar check does not catch errors along the direction of travel.
+- **Not measured on a phone.** Timing and memory are Mac figures; a phone may take several times as long. The evidence is two scans from one device.
+
 ## Image reconstruction after stopping
 
 With LiDAR disabled, Image depth reconstruction defaults to enabled and can be disabled for a sparse-only comparison. The choice is fixed for the active scan, including resumed capture. After anchor-pose correction and blur review, `RGBReconstructionEngine` reads photos in the background. Only `.keep` frames participate; `.drop` and `.demote` are excluded.
@@ -81,7 +165,7 @@ This is fixed-pose MVS at 320 pixels. It has no SfM or RGB bundle adjustment, so
 
 ### Purpose
 
-`tools/replay_camera_only.swift` measures camera-only mode on real LiDAR scans. It replays the camera-only pipeline and ignores the saved depth. The LiDAR data then provides the references. In camera-only mode, poses are ARKit poses plus keyframe-anchor readback; offline BA, loop closure and the photo check do not run because `baRounds` is 0 without LiDAR. Points come from fixed-pose MVS. `--candidate` accepts any pose file, so a future RGB-only bundle adjustment can be scored the same way.
+`tools/replay_camera_only.swift` measures camera-only mode on real LiDAR scans. It replays the camera-only pipeline and ignores the saved depth. The LiDAR data then provides the references. The baseline poses are ARKit poses plus keyframe-anchor readback, before the [camera-only refinement](#pose-refinement-without-depth). Loop closure and the depth-based photo check do not run without LiDAR. Points come from fixed-pose MVS. `--candidate` accepts any pose file; the refinement is scored this way with poses from `tools/refine_camera_only.swift`.
 
 1. **Simulated capture.** The baseline poses (default `review-poses.jsonl`, ARKit + anchors) are taken in timestamp order. A frame is kept when it is at least `cameraOnlyMinBaselineM` (4 cm) from the last kept frame and at least 0.10 s later. Depth fields are removed, and `BlurFilter.annotate` runs on the candidate poses, as the app does before MVS. `--all-frames` skips the subsampling.
 2. **Poses** are compared with the reference on the simulated frames. The report gives raw (same world frame) position and rotation differences and the ATE after a best rigid alignment (Horn's quaternion method on camera centres). It also gives the Umeyama Sim(3) scale (above 1 means the candidate path is larger) and the relative pose error over 1 m and 5 m of reference path.
@@ -200,7 +284,11 @@ swiftc -O -module-cache-path /tmp/fable-swift-cache \
   tools/test_rgb_reconstruction.swift -o /tmp/fable-rgb-test
 /tmp/fable-rgb-test
 
-bash tools/test_camera_only_replay.sh   # replay metrics (32 checks) and a replay tool build
+bash tools/test_camera_only_replay.sh   # replay metrics (32), camera-only bundle adjustment (11), both replay tool builds
+
+# Camera-only pose refinement on a LiDAR scan, then scoring (sources as in the script)
+/tmp/refine_camera_only SCAN /tmp/refined.jsonl
+/tmp/replay_camera_only SCAN WORK_DIR --reference /tmp/ref.jsonl --candidate /tmp/refined.jsonl
 
 # Diagnostic MVS sweep: environment overrides for the replay tool (recorded in the report)
 MVS_STD=0.02 MVS_REFS=72 /tmp/replay_camera_only SCAN WORK_DIR --reference /tmp/ref.jsonl
@@ -214,6 +302,14 @@ The replay metric checks cover the following synthetic cases:
 - A plane offset by 1 cm (accuracy, half-plane completeness at 2/5/10 cm, masking), far outliers and point spacing.
 - The viewed mask: visible, occluded, tolerance, out of image, low confidence and too near.
 - Shutter subsampling.
+
+The camera-only bundle test renders a textured room corner along a sideways pass with 30 keyframes. It checks:
+- depth-free tracks, and their sub-pixel agreement with the true geometry;
+- a correction confirmed by held-out tracks, with no larger displacement errors;
+- correct input poses left unchanged, and identical repeated runs;
+- no tracks on blank walls;
+- epipolar rejection of a pitched frame;
+- unreadable frames, cancellation, and the report round trip.
 
 The RGB reconstruction test has 33 checks. A pre-existing parallel refusion Sendable warning remains.
 
