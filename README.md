@@ -66,7 +66,7 @@ The interface is dark and 3D-first. The camera feed or point cloud fills the scr
 - **Capture HUD.**
   - One status pill and one prioritized guidance slot.
   - A tool rail that appears only while scanning.
-  - A shutter whose ring shows LiDAR view coverage.
+  - A shutter whose ring shows LiDAR view coverage, the share of surfaces seen over at least 30°. The heat map colours the same angle span per surface ([view coverage](docs/LIDAR_QUALITY_AND_PREVIEW.md#view-coverage-heat-map)).
   - A single **Scan settings** button that also shows the current mode. Its scrollable sections cover capture mode, quality, camera, and coordinate system.
 - **Review and history.** A floating panel holds the metrics, the primary export or share action, and secondary actions. Quality details stay in a separate sheet, and **More actions** in history holds scene-scale validation, optimization, and deletion.
 

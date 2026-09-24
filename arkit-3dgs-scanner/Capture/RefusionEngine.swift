@@ -143,12 +143,7 @@ nonisolated struct FusedVoxelGrid {
         /// 用來量化補充來源的實際貢獻：只有 measured==false 的格子才是真的補到新覆蓋。
         /// 預設 true —— 即時預覽的 TiledFusedGrid 共用本型別但不追蹤來源。
         var measured: Bool = true
-        /// 這格被「哪些方向」觀測過：16 個 bin 的 bitmask（方位 8 × 仰角 2）。
-        /// 用方向多樣性而非觀測次數，是因為次數會給假綠燈——同一角度看 20 次，
-        /// 視差為零、幾何完全沒被約束，但次數計量會判定為充分。
-        /// 3DGS 的高斯深度/形狀靠視差約束（同 SfM 三角化），視角相依外觀靠角度多樣性，
-        /// 兩者都不是次數能取代的。popcount 也天然涵蓋次數（1 次不可能有 3 個方向）。
-        var dirMask: UInt16 = 0
+        // 即時預覽的視角多樣性不存在單一 cell：見 TiledFusedGrid.ViewSpan（10 cm 視角格）。
         var packedNormal: UInt16 = 0
     }
 

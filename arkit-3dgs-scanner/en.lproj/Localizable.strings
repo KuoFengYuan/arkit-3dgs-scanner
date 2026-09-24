@@ -70,7 +70,6 @@
 "取消選取" = "Cancel selection";
 "可切換查看拍攝影像。" = "Switch to captured images to view photos.";
 "可追蹤紋理不足，請對準有細節的區域並緩慢側向移動" = "Not enough trackable texture. Aim at details and slowly move sideways.";
-"單一角度 → 多角度" = "Single angle → Multiple angles";
 "單指旋轉・雙指縮放與平移" = "One finger to rotate · Two fingers to zoom and pan";
 "單指旋轉・雙指縮放，檢查是否有遺漏的區域" = "One finger to rotate · Two fingers to zoom. Check for missing areas.";
 "回到點雲" = "Back to point cloud";
@@ -257,7 +256,6 @@
 "裝置過熱，已停止掃描並保留資料。請等手機降溫後再繼續。" = "Device too hot. Scanning stopped and data was saved. Let the phone cool before continuing.";
 "裝置過熱，建議暫停散熱" = "Device too hot. Pause to let it cool.";
 "複核模糊幀…" = "Reviewing frame quality…";
-"視角" = "View coverage";
 "視角 %.0f%%" = "View coverage %.0f%%";
 "訓練選用 %@ / %@ 張影像" = "%@ / %@ images selected for training";
 "記憶體不足以安全保存世界地圖，已略過；掃描照片與預覽已保留。" = "Not enough memory to save the world map safely; skipped. Scan photos and preview are preserved.";
@@ -507,3 +505,5 @@
 "顯示家具" = "Show furniture";
 "預覽、分享或刪除之前的掃描" = "Preview, share, or delete previous scans";
 "返回開始掃描" = "Back to scanning";
+"視角跨度" = "View angle span";
+"紅色為單一角度，綠色為 %.0f° 以上" = "Red is a single angle, green is %.0f° or more";
