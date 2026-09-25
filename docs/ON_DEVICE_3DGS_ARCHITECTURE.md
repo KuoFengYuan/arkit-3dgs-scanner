@@ -230,7 +230,7 @@ Run `bash tools/test_gaussian_training.sh`; it builds and runs all of the tests 
 | --- | --- |
 | `tools/test_gaussian_raster.swift` | Forward against a double-precision CPU reference; parameter and pose gradients by finite differences (Mip filter, capture motion, LiDAR depth loss); banded backward equals one pass (20 checks) |
 | `tools/test_gaussian_loss.swift` | Loss, image and PPISP gradients (7 checks) |
-| `tools/test_gaussian_training.swift` | 65 end-to-end checks: memory plan, resolution tiers, MRNF with the growth ramp and relocation, the SOG file (WebP, ZIP, round trip), export frame, convergence, enhancement, PPISP, poses, capture motion, depth seeds, hole filling, checkpoints (including version 1 and saving on leaving the app), the session state machine, the viewer, archives, and a 1,200-frame run. `GS_ONLY=session,enhancement` runs a subset |
+| `tools/test_gaussian_training.swift` | 68 end-to-end checks: memory plan, the seed budget and iteration count, resolution tiers, MRNF with the growth ramp and relocation, the SOG file (WebP, ZIP, round trip), export frame, convergence, enhancement, PPISP, poses, capture motion, depth seeds, hole filling, checkpoints (including version 1 and saving on leaving the app), the session state machine, the viewer, archives, and a 1,200-frame run. `GS_ONLY=session,enhancement` runs a subset |
 | `tools/train_gaussians.swift` | Replays a real scan on the Mac GPU with every experiment switch, for example `--long-edge`, `--align-eval`, `--eval-full-res`, `--holdout-segment`, `--save-model`, `--enhance-from`, `--depth-loss`, `--per-frame` |
 
 Mac results say nothing about iPhone speed, memory or heat. Those need device runs.

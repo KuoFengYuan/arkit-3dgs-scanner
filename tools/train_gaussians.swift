@@ -96,9 +96,9 @@ import simd
         let t0 = Date()
         let seedStart = Date()
         var dataset = try TrainingDataset.prepare(scan: scan, longEdge: config.longEdge, holdOutEvery: config.holdOutEvery,
-                                                  maxPoints: 250_000, depthSeedLimit: config.depthSeedLimit, holdOutSegment: holdOutSegment)
-        print(String(format: "seeds: %d points (depth seeds %@, limit %d) in %.1f s", dataset.points.count,
-                     config.usesDepthSeeds ? "on" : "off", config.depthSeedLimit, Date().timeIntervalSince(seedStart)))
+                                                  maxPoints: config.seedBudget, depthSeedLimit: config.depthSeedLimit(cloudPoints:), holdOutSegment: holdOutSegment)
+        print(String(format: "seeds: %d points (depth seeds %@, seed budget %d) in %.1f s", dataset.points.count,
+                     config.usesDepthSeeds ? "on" : "off", config.seedBudget, Date().timeIntervalSince(seedStart)))
         dataset = try perturbed(dataset, scan: scan, poseFile: poseFile, noise: initNoise, keep: initKeep, random: initRandom,
                                 latticeJitter: latticeJitter)
         if !excludeIDs.isEmpty {

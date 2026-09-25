@@ -83,6 +83,8 @@ The app trains a 3D Gaussian Splatting model of a saved scan on the phone's GPU.
    | Standard (recommended) | 10,000 | 600,000 | Most scans |
    | High quality | 20,000 | 1,000,000 | The most detail; takes the longest and uses more battery |
 
+   Scans with more than about 333 training photos get more iterations, so each photo is still used about 12 / 30 / 60 times. The **Iterations** row below the cards shows the count and the time it would take at this phone's measured speed; change it with − / + before starting.
+
 4. Pick a **training resolution**, the long edge of the training images:
 
    | Resolution | Long edge | Cost |

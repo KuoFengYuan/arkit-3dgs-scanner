@@ -643,6 +643,15 @@
 "進度已儲存，可隨時繼續" = "Progress is saved; resume anytime";
 "PLY 格式，可用一般 3DGS 檢視器開啟；色彩校正另存 ppisp.json" = "PLY format for standard 3DGS viewers; color correction is saved in ppisp.json";
 "PLY 格式，可用一般 3DGS 檢視器開啟" = "PLY format for standard 3DGS viewers";
+"迭代次數" = "Iterations";
+"再訓練次數" = "More iterations";
+"預估約 %@，依這支手機上次訓練的速度" = "About %@ at this phone's last measured speed";
+"在這支手機完成一次訓練後，會依它的速度顯示預估時間" = "After a first run on this phone, the time is estimated from its speed";
+"恢復自動" = "Use automatic";
+"已手動調整；自動計算為 %@ 次" = "Set by hand; the automatic count is %@";
+"依品質預設" = "From the quality preset";
+"依 %@ 張照片增加，每張約訓練 %@ 次" = "Raised for %@ photos, about %@ updates per photo";
+"品質預設的次數；%@ 張照片，每張約訓練 %@ 次" = "The quality's count; %@ photos, about %@ updates per photo";
 "SOG 格式，約為 PLY 的 1/12，可用 SuperSplat 等 3DGS 檢視器開啟；色彩校正另存 ppisp.json" = "SOG format, about 1/12 the size of PLY, for SuperSplat and other 3DGS viewers; color correction is saved in ppisp.json";
 "SOG 格式，約為 PLY 的 1/12，可用 SuperSplat 等 3DGS 檢視器開啟" = "SOG format, about 1/12 the size of PLY, for SuperSplat and other 3DGS viewers";
 "GPU 運算反覆失敗，已停止訓練並保留最後的進度：%@" = "The GPU failed repeatedly. Training stopped and the last progress was kept: %@";
