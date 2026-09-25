@@ -23,9 +23,9 @@ The repository owner has requested this default workflow for authorized code cha
 
 - Documentation: English primary (`README.md`, `docs/NAME.md`), complete Traditional Chinese counterpart (`README.zh-TW.md`, `docs/NAME.zh-TW.md`). Link both directions and link within the same language.
 - App UI: Traditional Chinese by default, English selectable on the home screen; persist the preference. Use `L10n` and both `en.lproj` / `zh-Hant.lproj` resources for user text, interpolated messages, accessibility, errors, and progress. Keep machine-readable identifiers independent of language.
-- Local project, scheme, and repository name: `arkit-3dgs-scanner`. Preserve bundle ID `itri.fable` for installation/data continuity.
+- Local project, scheme, repository name, and bundle ID: `arkit-3dgs-scanner`. Keep company or employer names out of identifiers, code, and documentation; this is a personal research project.
 - Write `capture-meta.json`; continue reading legacy `meta.json` and preserve metadata bytes during export migration.
 - Preserve original scan images/depth. Motion estimates alone are not measured blur; keep warning policy distinct from depth-fusion eligibility.
-- Do not reintroduce phone Gaussian training without a new request. The app prepares datasets for external training.
+- On-device 3DGS training (Metal, [docs](docs/ON_DEVICE_3DGS.md)) coexists with the COLMAP dataset export for external trainers. Keep it on the device: no server path presented as on-device, bounded memory plans, and pause/checkpoint on background, heat, low battery, or memory pressure. Do not claim device memory or speed from Mac or Simulator runs.
 
 See [contribution workflow](CONTRIBUTING.md) and [localization](docs/LOCALIZATION.md) for commands and coverage.

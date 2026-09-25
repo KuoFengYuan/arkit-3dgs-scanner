@@ -24,7 +24,9 @@ The app root applies the dark color scheme and the accent tint. Point-cloud view
 | `DSIconButtonStyle` | Round 44 pt glass button. `isSelected` tints toggles that are on; `foreground` colors destructive icons |
 | `DSStatusPill` | Status and guidance capsule with a tone (neutral, accent, success, warning, danger, info) and an optional pulsing recording dot |
 | `DSMetric` | Compact icon + value chip for frames, points and modes |
-| `DSSegmentedPicker` | Floating segmented control with a sliding accent selection |
+| `DSSegmentedPicker` | Floating segmented control with a sliding accent selection; `fillsWidth` gives equal-width segments whose labels shrink slightly instead of truncating |
+| `DSActionCardLabel`, `DSActionIcon` | Tinted action card: round icon (or progress ring / spinner), title, one short detail, chevron. Scan actions (train, export/share, quality) use it on the review screen, the scan detail, and the saved model |
+| `SystemShare` | Presents the system share sheet with the file itself, so share extensions (LINE, Teams, Mail) receive the ZIP; SwiftUI `ShareLink(item: URL)` offered only a file link that those extensions could not load |
 | `DSProgressRing`, `DSToast` | Determinate progress; short success confirmation |
 | `DSFlowLayout` | Wraps chips onto new rows instead of clipping them |
 | `dsCard`, `dsFloatingPanel`, `dsCanvas` | Cards on the canvas, floating panels over scenes, and the app background |
@@ -69,18 +71,27 @@ The history opens only when the card is tapped.
 
 The optimized point cloud fills the screen. The top bar has close, the status pill, a quality-details button (warning tint when there is a notice) and **Fit cloud**. A floating panel holds:
 - metric chips: frames, points, the image-reconstruction result, and the floor plan when one exists;
-- **Export 3DGS dataset**, which shows a loading state while exporting and becomes **Share .zip** when done;
-- **Resume scan** and a destructive discard button.
+- the **Train 3DGS** card, the same as in the scan detail;
+- the **Export 3DGS dataset** card, which shows a spinner and the stage while exporting and becomes **Share scan** when done;
+- **Resume scan** and a destructive discard button (after export: **New scan**).
 
 A gesture hint shows for four seconds.
 
 ### Scan detail (history)
 
 The point cloud or the photo route fills the screen.
-- A floating switcher chooses **3D point cloud** or **Captured images**. Chips show images, points and capture mode, and there is a **Fit cloud** button.
-- The bottom panel has the quality-details button and the export or share action. Optimization progress, with its percentage and **Cancel**, appears in the same panel. A toast confirms when an export archive is ready.
+- A full-width switcher chooses **3D point cloud** or **Captured images**; its segments share the width, so neither label truncates. Chips show images, points and capture mode. **Fit cloud** floats at the bottom trailing corner of the 3D view.
+- The bottom panel stacks three cards with one layout: **Train 3DGS** (with progress, a saved model, or a resumable run), **Export 3DGS dataset** (then **Share scan**), and **Scan quality information** (warning tint when photos need a look, with the selected image count). Optimization progress, with its percentage and **Cancel**, appears in the same panel. A toast confirms when an export archive is ready.
 - **More actions** still holds scene scale, optimization and deletion.
 - Route playback uses glass overlays and an accent play button, and places the photo and cloud side by side on wide screens.
+
+### 3DGS training
+
+One screen per scan, opened from the training card.
+- **Setup.** The scan's photo, softened, sits behind a card that says what will happen. Below it are three quality cards (Quick preview, Standard with a *Recommended* badge, High quality), each with a plain description and, after a run on this phone, its measured time. Then a memory check, the one reminder that matters (keep the app open, preferably on power), an **Advanced settings** button (a sheet with pose refinement, PPISP and anti-aliasing, and the preset's technical details), and **Start training**.
+- **Training.** The live model fills the screen, with a short gesture hint. The bottom card shows a progress ring, the current stage in words, and the remaining time; below them are one quiet line of iteration, Gaussians, loss, PSNR and elapsed time, and Pause / Save progress / Stop. Notices appear at the top only for pauses, throttling or memory limits.
+- **Resume.** A ring with the saved percentage, **Resume where you left off**, **Restart** and **Delete progress**.
+- **Model.** The saved model in the orbit viewer, a summary, and a **Share 3DGS model** card.
 
 ### Floor plan, measurement and point picking
 
@@ -98,12 +109,13 @@ Debug builds accept launch arguments that render UI states without an AR session
 | `--preview-fusion` | Processing page (see [fusion review](FUSION_REVIEW.md)) |
 | `--preview-history` | Scan history |
 | `--preview-scan-detail`, `--preview-scan-detail-photos`, `--preview-scan-detail-measure` | The newest saved scan's detail: 3D tab, photo tab, or the scene-scale sheet (needs a scan in the app's `Documents/scans`) |
+| `--preview-training SCAN`, `--preview-training-start SCAN [--training-iterations N]`, `--preview-training-resume SCAN` | The 3DGS training screen of a saved scan (folder name): setup, a started quick run, or resume from its checkpoint |
 | `--compact-height` | Adds a compact vertical size class to check the landscape arrangement |
 
 Add `-app.language en` to check English.
 
 ```sh
-xcrun simctl launch --terminate-running-process booted itri.fable --preview-scanning -app.language en
+xcrun simctl launch --terminate-running-process booted arkit-3dgs-scanner --preview-scanning -app.language en
 xcrun simctl io booted screenshot scanning.png
 ```
 

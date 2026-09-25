@@ -278,10 +278,12 @@ struct DSSegment<Value: Hashable>: Identifiable {
     var id: Value { value }
 }
 
-/// Floating glass segmented control with a sliding accent selection.
+/// Floating glass segmented control with a sliding accent selection. `fillsWidth` gives every
+/// segment an equal share of the available width (labels shrink slightly instead of truncating).
 struct DSSegmentedPicker<Value: Hashable>: View {
     let segments: [DSSegment<Value>]
     @Binding var selection: Value
+    var fillsWidth = false
     @Namespace private var namespace
 
     var body: some View {
@@ -294,8 +296,9 @@ struct DSSegmentedPicker<Value: Hashable>: View {
                     Label(segment.title, systemImage: segment.symbol)
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
-                        .padding(.horizontal, 14)
-                        .frame(minHeight: 36)
+                        .minimumScaleFactor(0.75)
+                        .padding(.horizontal, fillsWidth ? DS.Space.xs : 14)
+                        .frame(maxWidth: fillsWidth ? .infinity : nil, minHeight: 36)
                         .foregroundStyle(selected ? DS.Palette.onAccent : DS.Palette.textPrimary)
                         .background {
                             if selected {
@@ -312,6 +315,56 @@ struct DSSegmentedPicker<Value: Hashable>: View {
         }
         .padding(DS.Space.xxs)
         .hudGlass(Capsule())
+    }
+}
+
+/// Content of a tinted action card: leading icon (or progress), title, short detail and a
+/// chevron. Wrap it in a Button or ShareLink with `DSCardButtonStyle`; scan detail actions
+/// (train, export, quality) share this one look.
+struct DSActionCardLabel<Leading: View>: View {
+    let title: String
+    var subtitle: String?
+    var tint: Color = DS.Palette.accent
+    var trailingSymbol: String? = "chevron.right"
+    @ViewBuilder var leading: () -> Leading
+
+    var body: some View {
+        HStack(spacing: DS.Space.s) {
+            leading().frame(width: 40, height: 40)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(DS.Palette.textPrimary)
+                    .lineLimit(1).minimumScaleFactor(0.85)
+                if let subtitle {
+                    Text(subtitle).font(.caption).foregroundStyle(DS.Palette.textSecondary)
+                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+            if let trailingSymbol {
+                Image(systemName: trailingSymbol).font(.footnote.weight(.semibold))
+                    .foregroundStyle(DS.Palette.textTertiary)
+            }
+        }
+        .padding(.horizontal, DS.Space.s)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+        .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous).strokeBorder(tint.opacity(0.32), lineWidth: 0.5))
+        .contentShape(RoundedRectangle(cornerRadius: DS.Radius.m, style: .continuous))
+    }
+}
+
+/// Round tinted icon for `DSActionCardLabel`.
+struct DSActionIcon: View {
+    let symbol: String
+    var tint: Color = DS.Palette.accent
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: 17, weight: .semibold))
+            .foregroundStyle(tint)
+            .frame(width: 40, height: 40)
+            .background(tint.opacity(0.16), in: Circle())
     }
 }
 

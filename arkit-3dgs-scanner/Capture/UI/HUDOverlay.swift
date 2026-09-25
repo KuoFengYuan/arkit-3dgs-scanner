@@ -17,6 +17,8 @@ struct HUDOverlay: View {
     @ObservedObject var controller: CaptureController
     /// 檢視階段重設 3D 視角（由承載點雲的 CaptureView 執行）。
     var onResetView: (() -> Void)? = nil
+    /// Opens on-device 3DGS training of the saved scan (closes the capture first).
+    var onTrain: ((URL) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @Environment(\.verticalSizeClass) private var verticalSizeClass
@@ -44,12 +46,6 @@ struct HUDOverlay: View {
         }
         .sheet(isPresented: $showAdvanced) { scanSettings }
         .sheet(isPresented: $summaryExpanded) { scanDetails }
-        .confirmationDialog(L10n.text("離開掃描檢視？"), isPresented: $showExitConfirm, titleVisibility: .visible) {
-            Button(L10n.text("離開並保留檔案")) { dismiss() }
-            Button(L10n.text("留在這裡"), role: .cancel) {}
-        } message: {
-            Text(L10n.text("掃描會保留在首頁的「掃描紀錄」，之後可預覽、分享或刪除。離開後無法接續這次即時掃描。"))
-        }
         .onChange(of: controller.phase) { _, phase in
             showAdvanced = false
             summaryExpanded = false
@@ -108,6 +104,13 @@ struct HUDOverlay: View {
         .disabled(!controller.canClose)
         .opacity(controller.canClose ? 1 : 0)
         .accessibilityHidden(!controller.canClose)
+        // Confirmations open from the control that asked for them.
+        .confirmationDialog(L10n.text("離開掃描檢視？"), isPresented: $showExitConfirm, titleVisibility: .visible) {
+            Button(L10n.text("離開並保留檔案")) { dismiss() }
+            Button(L10n.text("留在這裡"), role: .cancel) {}
+        } message: {
+            Text(L10n.text("掃描會保留在首頁的「掃描紀錄」，之後可預覽、分享或刪除。離開後無法接續這次即時掃描。"))
+        }
     }
 
     @ViewBuilder
@@ -582,7 +585,7 @@ struct HUDOverlay: View {
     // MARK: - 檢視面板（掃描後）
 
     private var reviewPanel: some View {
-        VStack(alignment: .leading, spacing: DS.Space.s) {
+        VStack(alignment: .leading, spacing: DS.Space.xs) {
             DSFlowLayout {
                     DSMetric(value: L10n.text("\(controller.keyframeCount) 幀"), symbol: "camera.viewfinder")
                     DSMetric(value: L10n.text("\(controller.reviewPoints.count / 1000)k 點"), symbol: "circle.grid.3x3.fill")
@@ -609,37 +612,45 @@ struct HUDOverlay: View {
                         .disabled(controller.phase == .exporting)
                     }
             }
+            if onTrain != nil, controller.phase == .review || controller.phase == .done { trainButton }
             primaryReviewAction
             secondaryReviewActions
         }
         .padding(DS.Space.m)
         .dsFloatingPanel()
-        .confirmationDialog(L10n.text("捨棄這次掃描？"), isPresented: $showDiscardConfirm, titleVisibility: .visible) {
-            Button(L10n.text("刪除掃描資料"), role: .destructive) { controller.discardScan() }
-            Button(L10n.text("取消"), role: .cancel) {}
-        }
     }
 
+    /// Export in the same card layout as the History detail: export, then share the archive.
     @ViewBuilder
     private var primaryReviewAction: some View {
         switch controller.phase {
         case .done:
             if let zip = controller.exportedZip {
-                ShareLink(item: zip) {
-                    Label(L10n.text("分享 .zip"), systemImage: "square.and.arrow.up")
+                Button { SystemShare.present([zip]) } label: {
+                    DSActionCardLabel(title: L10n.text("分享掃描"), subtitle: L10n.text("檔案已準備好，點此分享"),
+                                      tint: DS.Palette.success) {
+                        DSActionIcon(symbol: "square.and.arrow.up", tint: DS.Palette.success)
+                    }
                 }
-                .buttonStyle(DSPrimaryButtonStyle())
+                .buttonStyle(DSCardButtonStyle())
+                .accessibilityIdentifier("shareCaptureArchive")
             }
         case .exporting:
-            Button {} label: { Label(L10n.text("正在匯出"), systemImage: "shippingbox") }
-                .buttonStyle(DSPrimaryButtonStyle(isLoading: true))
-                .disabled(true)
+            DSActionCardLabel(title: L10n.text("正在匯出"), subtitle: controller.statusText, tint: DS.Palette.info,
+                              trailingSymbol: nil) {
+                ProgressView().tint(DS.Palette.info)
+            }
         default:
             Button { controller.exportAndShare() } label: {
-                Label(L10n.text("匯出 3DGS 訓練資料"), systemImage: "square.and.arrow.up")
+                DSActionCardLabel(title: L10n.text("匯出 3DGS 訓練資料"),
+                                  subtitle: L10n.text("照片、相機姿態與點雲，可在電腦上訓練"), tint: DS.Palette.info) {
+                    DSActionIcon(symbol: "square.and.arrow.up", tint: DS.Palette.info)
+                }
             }
-            .buttonStyle(DSPrimaryButtonStyle())
+            .buttonStyle(DSCardButtonStyle())
             .disabled(!controller.canUseScan)
+            .opacity(controller.canUseScan ? 1 : 0.5)
+            .accessibilityIdentifier("exportCaptureArchive")
         }
     }
 
@@ -662,10 +673,27 @@ struct HUDOverlay: View {
                     Label(L10n.text("捨棄本次掃描"), systemImage: "trash")
                 }
                 .buttonStyle(DSIconButtonStyle(foreground: DS.Palette.danger))
+                .confirmationDialog(L10n.text("捨棄這次掃描？"), isPresented: $showDiscardConfirm, titleVisibility: .visible) {
+                    Button(L10n.text("刪除掃描資料"), role: .destructive) { controller.discardScan() }
+                    Button(L10n.text("取消"), role: .cancel) {}
+                }
             }
         default:
             EmptyView()
         }
+    }
+
+    /// Saved scans can be trained on the phone right away; the same card and screen as History.
+    private var trainButton: some View {
+        let usable = controller.canUseScan && GaussianMetal.isSupported
+        return TrainingEntryCard(state: .idle(estimate: TrainingSpeedHistory.estimatedSeconds(.preset(.standard)))) {
+            Task {
+                if let dir = await controller.finishForTraining() { onTrain?(dir); dismiss() }
+            }
+        }
+        .disabled(!usable)
+        .opacity(usable ? 1 : 0.5)
+        .accessibilityIdentifier("trainAfterCapture")
     }
 
     // MARK: - 設定與品質資訊

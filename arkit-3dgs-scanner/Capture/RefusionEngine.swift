@@ -1130,7 +1130,7 @@ nonisolated enum RefusionEngine {
         // Xcode's stderr transport can close during a long device run. The legacy
         // FileHandle.write raises an Objective-C exception (SIGABRT), outside Swift catch.
         // Unified logging must never decide whether completed scan data is published.
-        Logger(subsystem: "itri.fable", category: "Refusion").info("\(msg, privacy: .public)")
+        Logger(subsystem: Bundle.main.bundleIdentifier ?? "arkit-3dgs-scanner", category: "Refusion").info("\(msg, privacy: .public)")
         report.status = "completed"
         report.wallSeconds = Date().timeIntervalSince(jobStarted)
         report.stage = "finished"

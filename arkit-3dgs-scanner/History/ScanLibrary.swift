@@ -12,6 +12,11 @@ nonisolated struct ScanEntry: Identifiable, Sendable {
     let usedLiDAR: Bool?
     let cover: URL?
     let archive: URL?
+    /// On-device 3DGS state, filled in by the app (`ScanLibrary.entriesWithTraining`).
+    var trainingStatus: String? = nil
+    var trainingProgress: Double? = nil
+    var hasGaussianModel = false
+    var canResumeTraining = false
 }
 
 nonisolated struct ScanPlaybackFrame: Sendable {
@@ -244,7 +249,8 @@ actor ScanLibrary {
         let zip = root.appendingPathComponent(entry.directory.lastPathComponent + ".zip")
         var moved: [(URL, URL)] = []
         do {
-            for source in [entry.directory, zip, root.appendingPathComponent(entry.directory.lastPathComponent + "-metric.zip")] where fm.fileExists(atPath: source.path) {
+            for source in [entry.directory, zip, root.appendingPathComponent(entry.directory.lastPathComponent + "-metric.zip"),
+                           root.appendingPathComponent(entry.directory.lastPathComponent + "-3dgs.zip")] where fm.fileExists(atPath: source.path) {
                 let destination = staging.appendingPathComponent(source.lastPathComponent)
                 try fm.moveItem(at: source, to: destination)
                 moved.append((source, destination))

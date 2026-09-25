@@ -2,7 +2,7 @@
 
 [English](TRAINING.md) | **繁體中文**
 
-App 在手機整理資料，Gaussian 訓練由外部工具執行。解壓匯出的掃描，使用 `images/ + sparse/0`。模型包含選用影像姿態、逐影像 PINHOLE 內參與初始化點，不含完整 SfM 觀測及 tracks。
+本頁說明在電腦上訓練；App 也可以直接在手機上訓練（[手機端 3DGS 訓練](ON_DEVICE_3DGS.zh-TW.md)）。使用外部訓練器時，解壓匯出的掃描，使用 `images/ + sparse/0`。模型包含選用影像姿態、逐影像 PINHOLE 內參與初始化點，不含完整 SfM 觀測及 tracks。
 
 ## LichtFeld Studio / MrNeRF
 
@@ -10,7 +10,7 @@ App 在手機整理資料，Gaussian 訓練由外部工具執行。解壓匯出�
 
 訓練影像以 `sparse/0/images.bin` 為準；images 仍保留所有原始照片，包括未選用者。自行遍歷 images 的流程需套用 training-selection.json 的 selectedIDs。
 
-points3D.bin 是初始化點雲，不是訓練後模型。手機輸出目前上限 250,000 點。新版沒有 gaussians.ply，該檔是可能的訓練結果，不是缺少的輸入。
+points3D.bin 是初始化點雲，不是訓練後模型。手機輸出目前上限 250,000 點。資料集 ZIP 不含 `gaussians.ply`：那是訓練結果，不是缺少的輸入；手機端訓練的模型另以 `scan_…-3dgs.zip` 分享。
 
 ## 其他訓練器
 

@@ -20,6 +20,7 @@ Prefixes are case-sensitive. Use a lowercase hyphenated description. Start from 
 python3 tools/check_project.py
 bash tools/test_localization.sh
 bash tools/test_training_quality.sh
+bash tools/test_gaussian_training.sh
 xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner \
   -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build
 xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner \
@@ -29,6 +30,10 @@ xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner \
 Run device and Simulator builds sequentially to avoid sharing a locked build database. Choose further regressions for the affected subsystem; do not claim sensor accuracy from compiler or synthetic tests. Swift command-line tools calling localized code must include `Capture/Localization.swift` in their sources. Resources fall back to Chinese source text if a standalone binary has no app bundle.
 
 Documentation is English first with a matching `.zh-TW.md` page. App UI defaults to Traditional Chinese with an English setting. See [localization conventions](docs/LOCALIZATION.md). Keep raw scan samples, private images, credentials, and generated build output out of commits.
+
+## License
+
+Contributions are accepted under the project's [Apache License 2.0](LICENSE). Keep [NOTICE](NOTICE) intact, and give new 3DGS source files the same `SPDX-License-Identifier` header.
 
 ## PR and merge
 

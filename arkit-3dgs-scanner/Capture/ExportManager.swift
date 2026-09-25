@@ -24,13 +24,27 @@ nonisolated extension Data {
 }
 
 nonisolated enum ExportManager {
+    /// On-device 3DGS training folder inside a scan (checkpoint and trained model).
+    static let gaussianTrainingFolder = "gaussian-training"
+
     /// 先寫暫存檔；壓縮完整成功才以正式檔名發布，避免分享半個 ZIP。
     static func makeArchive(of directory: URL) throws -> URL {
         let parent = directory.deletingLastPathComponent()
         let destination = parent.appendingPathComponent(directory.lastPathComponent + ".zip")
         let temporary = parent.appendingPathComponent(UUID().uuidString + ".partial")
         defer { try? FileManager.default.removeItem(at: temporary) }
-        try zipDirectory(directory, to: temporary)
+        // The on-device 3DGS checkpoint and model are not training inputs; the model has its own
+        // archive. Zip a hard-linked mirror without that folder (no media is copied).
+        let fm = FileManager.default
+        if fm.fileExists(atPath: directory.appendingPathComponent(gaussianTrainingFolder).path) {
+            let staging = parent.appendingPathComponent(".archive-\(UUID().uuidString)", isDirectory: true)
+            let mirror = staging.appendingPathComponent(directory.lastPathComponent, isDirectory: true)
+            defer { try? fm.removeItem(at: staging) }
+            try mirrorTree(directory, to: mirror, excluding: [gaussianTrainingFolder])
+            try zipDirectory(mirror, to: temporary)
+        } else {
+            try zipDirectory(directory, to: temporary)
+        }
         if FileManager.default.fileExists(atPath: destination.path) {
             _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
         } else {
@@ -39,6 +53,22 @@ nonisolated enum ExportManager {
         return destination
     }
 
+
+    /// Recreates `source` under `destination` with hard links (copies where linking fails),
+    /// skipping top-level entries named in `excluding`.
+    static func mirrorTree(_ source: URL, to destination: URL, excluding: Set<String>) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        for item in try fm.contentsOfDirectory(at: source, includingPropertiesForKeys: [.isDirectoryKey]) {
+            if excluding.contains(item.lastPathComponent) { continue }
+            let target = destination.appendingPathComponent(item.lastPathComponent)
+            if (try item.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true {
+                try mirrorTree(item, to: target, excluding: [])
+            } else {
+                do { try fm.linkItem(at: item, to: target) } catch { try fm.copyItem(at: item, to: target) }
+            }
+        }
+    }
 
     enum TrainingExportError: LocalizedError {
         case noUsableFrames, invalidFrame(Int), missingImage(String), invalidPoints

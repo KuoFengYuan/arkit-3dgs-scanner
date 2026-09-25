@@ -10,6 +10,9 @@ struct ContentView: View {
     /// Bumped when capture closes so the history shows the scan that was just saved.
     @State private var libraryRevision = 0
     @State private var scanCount: Int?
+    /// Scan chosen for training at the end of a capture; opens once the capture has closed.
+    @State private var pendingTraining: URL?
+    @State private var trainingScan: URL?
 
     private var hasLiDAR: Bool {
         ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
@@ -31,16 +34,31 @@ struct ContentView: View {
                 .navigationDestination(isPresented: $showHistory) {
                     ScanHistoryView(revision: libraryRevision)
                 }
+                .navigationDestination(item: $trainingScan) { scan in
+                    GaussianTrainingView(scan: scan) { libraryRevision += 1 }
+                }
         }
-        .fullScreenCover(isPresented: $showCapture, onDismiss: { libraryRevision += 1 }) { CaptureView() }
+        .fullScreenCover(isPresented: $showCapture, onDismiss: {
+            libraryRevision += 1
+            if let scan = pendingTraining { pendingTraining = nil; trainingScan = scan }
+        }) { CaptureView(onTrain: { pendingTraining = $0 }) }
         .sheet(isPresented: $showGuide) { ScanGuideSheet(hasLiDAR: hasLiDAR) }
         .task(id: libraryRevision) { await countScans() }
         // Deletions inside the history change the count shown on the card.
         .onChange(of: showHistory) { _, shown in if !shown { Task { await countScans() } } }
         #if DEBUG
         .onAppear {
-            if ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--preview-scan-detail") || $0 == "--preview-history" }) {
+            let arguments = ProcessInfo.processInfo.arguments
+            if arguments.contains(where: { $0.hasPrefix("--preview-scan-detail") || $0 == "--preview-history" }) {
                 showHistory = true
+            }
+            // `--preview-training[-start] [scan folder name]`: open (and start) 3DGS training of a scan.
+            if let index = arguments.firstIndex(where: { $0.hasPrefix("--preview-training") }) {
+                let name = arguments.indices.contains(index + 1) && !arguments[index + 1].hasPrefix("-") ? arguments[index + 1] : nil
+                Task {
+                    let entries = (try? await ScanLibrary.shared.entries()) ?? []
+                    trainingScan = (name.flatMap { n in entries.first { $0.id == n } } ?? entries.first)?.directory
+                }
             }
         }
         #endif

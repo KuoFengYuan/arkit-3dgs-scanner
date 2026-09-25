@@ -855,6 +855,20 @@ final class CaptureController: NSObject, ObservableObject {
         }
     }
 
+    /// Closes the capture and keeps the saved scan for on-device 3DGS training. The review
+    /// cloud, poses and photos are already saved; this only finalises the pose log.
+    func finishForTraining() async -> URL? {
+        guard phase == .review || phase == .done, canUseScan, let dir = sessionDir else {
+            statusText = L10n.text("尚無可用影像，請繼續掃描後再訓練")
+            return nil
+        }
+        _ = await writer?.finish()
+        writer = nil
+        accumulator = nil
+        phase = .done
+        return dir
+    }
+
     /// review 發現破洞 → 回到掃描續拍（不 reset：保留地圖與錨點，ARKit 自動重新定位）
     func resumeScan() {
         guard phase == .review, arView != nil, writer != nil, !isInBackground else { return }

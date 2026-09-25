@@ -5,11 +5,13 @@ import ImageIO
 struct ScanHistoryView: View {
     /// Changes when capture closes, so a newly saved scan appears without pulling to refresh.
     let revision: Int
+    @ObservedObject private var trainingCenter = TrainingCenter.shared
     @Environment(\.dismiss) private var dismiss
     @State private var entries: [ScanEntry] = []
     @State private var loading = true
     @State private var error: String?
     @State private var pendingDelete: DeletionRequest?
+    @State private var pendingCardDelete: DeletionRequest?
     @State private var deleting = false
     @State private var selecting = false
     @State private var selectedIDs: Set<String> = []
@@ -70,6 +72,7 @@ struct ScanHistoryView: View {
         .safeAreaInset(edge: .bottom) { bottomBar }
         .animation(DS.springy, value: selecting)
         .animation(DS.springy, value: deleting)
+        .onChange(of: trainingCenter.revision) { _, _ in Task { await reload() } }
         .task(id: revision) {
             await reload()
             #if DEBUG
@@ -85,15 +88,16 @@ struct ScanHistoryView: View {
                 }
             }
         }
-        .confirmationDialog(pendingDelete?.title ?? L10n.text("刪除掃描？"), isPresented: Binding(
-            get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
-            titleVisibility: .visible, presenting: pendingDelete) { request in
+        // A scan deleted from its card's context menu: a centred alert (the card is not a
+        // stable anchor once the menu closes).
+        .alert(pendingCardDelete?.title ?? L10n.text("刪除掃描？"), isPresented: Binding(get: { pendingCardDelete != nil }, set: { if !$0 { pendingCardDelete = nil } }),
+               presenting: pendingCardDelete) { request in
             Button(L10n.text("永久刪除 \(request.entries.count) 筆掃描"), role: .destructive) {
-                pendingDelete = nil
+                pendingCardDelete = nil
                 deleting = true
                 Task { await delete(request.entries) }
             }
-            Button(L10n.text("取消"), role: .cancel) { pendingDelete = nil }
+            Button(L10n.text("取消"), role: .cancel) { pendingCardDelete = nil }
         } message: { _ in
             Text(L10n.text("所選掃描的所有照片、模型、點雲、深度與姿態資料、平面圖及同名 ZIP 都會刪除，無法復原。"))
         }
@@ -128,7 +132,7 @@ struct ScanHistoryView: View {
                             .buttonStyle(DSCardButtonStyle())
                             .contextMenu {
                                 Button(role: .destructive) {
-                                    pendingDelete = DeletionRequest(entries: [entry])
+                                    pendingCardDelete = DeletionRequest(entries: [entry])
                                 } label: { Label(L10n.text("刪除"), systemImage: "trash") }
                             }
                         }
@@ -205,6 +209,19 @@ struct ScanHistoryView: View {
                         }
                         .buttonStyle(DSPrimaryButtonStyle(fill: false, tint: DS.Palette.danger))
                         .disabled(selectedIDs.isEmpty)
+                        // Confirmations open from the control that asked for them.
+                        .confirmationDialog(pendingDelete?.title ?? L10n.text("刪除掃描？"), isPresented: Binding(
+                            get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+                            titleVisibility: .visible, presenting: pendingDelete) { request in
+                            Button(L10n.text("永久刪除 \(request.entries.count) 筆掃描"), role: .destructive) {
+                                pendingDelete = nil
+                                deleting = true
+                                Task { await delete(request.entries) }
+                            }
+                            Button(L10n.text("取消"), role: .cancel) { pendingDelete = nil }
+                        } message: { _ in
+                            Text(L10n.text("所選掃描的所有照片、模型、點雲、深度與姿態資料、平面圖及同名 ZIP 都會刪除，無法復原。"))
+                        }
                     }
                     .padding(DS.Space.s)
                     .dsFloatingPanel(radius: DS.Radius.xl + 4)
@@ -222,8 +239,16 @@ struct ScanHistoryView: View {
     private func delete(_ targets: [ScanEntry]) async {
         defer { deleting = false }
         var deletionError: String?
-        do { try await ScanLibrary.shared.delete(targets) }
-        catch { deletionError = error.localizedDescription }
+        // The scan being trained is kept: its session still reads and writes it.
+        let training = targets.filter { TrainingCenter.shared.isActive($0.directory) }
+        let deletable = targets.filter { !TrainingCenter.shared.isActive($0.directory) }
+        if !deletable.isEmpty {
+            do { try await ScanLibrary.shared.delete(deletable) }
+            catch { deletionError = error.localizedDescription }
+        }
+        if !training.isEmpty {
+            deletionError = [deletionError, L10n.text("正在訓練 3DGS 的掃描沒有刪除；請先停止訓練。")].compactMap { $0 }.joined(separator: "\n")
+        }
         await reload()
         if let deletionError { error = deletionError }
         if selectedIDs.isEmpty { selecting = false }
@@ -233,7 +258,7 @@ struct ScanHistoryView: View {
         loading = true
         defer { loading = false }
         do {
-            entries = try await ScanLibrary.shared.entries()
+            entries = try await ScanLibrary.shared.entriesWithTraining(activeScan: TrainingCenter.shared.activeScan)
             selectedIDs.formIntersection(entries.map(\.id))
             if entries.isEmpty { selecting = false }
             error = nil
@@ -295,6 +320,13 @@ private struct ScanCard: View {
             if entry.archive != nil {
                 badge("shippingbox.fill", label: L10n.text("已有分享檔案"), tint: .white)
             }
+            if TrainingCenter.shared.isActive(entry.directory) {
+                badge("sparkles", label: L10n.text("3DGS 訓練中"), tint: DS.Palette.accent)
+            } else if entry.hasGaussianModel {
+                badge("cube.fill", label: L10n.text("已有 3DGS 模型"), tint: DS.Palette.success)
+            } else if entry.canResumeTraining {
+                badge("pause.circle.fill", label: L10n.text("3DGS 訓練可繼續"), tint: DS.Palette.warning)
+            }
         }
     }
 
@@ -343,6 +375,11 @@ private struct ScanHistoryDetail: View {
     @State private var showGestureHint = true
     /// Brief confirmation once the export archive is ready to share.
     @State private var showReadyToast = false
+    @State private var showTraining = false
+    @State private var trainingRecord: TrainingRecord?
+    @State private var trainingHasModel = false
+    @State private var trainingHasCheckpoint = false
+    @ObservedObject private var trainingCenter = TrainingCenter.shared
 
     private var qualityNeedsReview: Bool { selection?.notice != nil }
 
@@ -350,6 +387,16 @@ private struct ScanHistoryDetail: View {
         ZStack {
             DS.Palette.canvas.ignoresSafeArea()
             content
+                .overlay(alignment: .bottomTrailing) {
+                    if selectedTab == 0 && preview?.points.isEmpty == false {
+                        Button { viewReset += 1 } label: {
+                            Label(L10n.text("顯示完整點雲"), systemImage: "scope")
+                        }
+                        .buttonStyle(DSIconButtonStyle())
+                        .padding(DS.Space.m)
+                        .transition(.opacity)
+                    }
+                }
         }
         .overlay(alignment: .top) {
             if showReadyToast {
@@ -374,16 +421,33 @@ private struct ScanHistoryDetail: View {
                         }.disabled(busy || preview == nil)
                         Divider()
                         Button(role: .destructive) { showDelete = true } label: {
-                            Label(L10n.text("刪除"), systemImage: "trash")
-                        }.disabled(busy)
+                            Label(trainingCenter.isActive(currentEntry.directory) ? L10n.text("刪除（請先停止 3DGS 訓練）") : L10n.text("刪除"),
+                                  systemImage: "trash")
+                        }.disabled(busy || trainingCenter.isActive(currentEntry.directory))
                     } label: {
                         Label(L10n.text("更多操作"), systemImage: "ellipsis.circle")
                             .frame(minWidth: 44, minHeight: 44)
                     }
                     .accessibilityIdentifier("scanActions")
+                    // Confirmations open from the control that asked for them.
+                    .confirmationDialog(L10n.text("刪除這次掃描？"), isPresented: $showDelete, titleVisibility: .visible) {
+                        Button(L10n.text("刪除照片、模型與所有資料"), role: .destructive) {
+                            Task {
+                                busy = true
+                                defer { busy = false }
+                                do { try await ScanLibrary.shared.delete(currentEntry); onLibraryChange(); dismiss() }
+                                catch { self.error = error.localizedDescription }
+                            }
+                        }
+                        Button(L10n.text("取消"), role: .cancel) { showDelete = false }
+                    } message: { Text(L10n.text("此掃描的所有照片、模型、點雲、深度與姿態資料、平面圖及同名 ZIP 都會刪除，無法復原。")) }
                 }
             }
         }
+        .navigationDestination(isPresented: $showTraining) {
+            GaussianTrainingView(scan: currentEntry.directory) { onLibraryChange(); Task { await loadTrainingState() } }
+        }
+        .task(id: trainingCenter.revision) { await loadTrainingState() }
         .sheet(isPresented: $showDetails) { detailsSheet }
         .sheet(isPresented: $showMeasurements) {
             if let preview { SceneMeasurementView(entry: currentEntry, preview: preview) }
@@ -417,17 +481,6 @@ private struct ScanHistoryDetail: View {
             try? await Task.sleep(for: .seconds(4))
             withAnimation(.easeOut(duration: 0.4)) { showGestureHint = false }
         }
-        .confirmationDialog(L10n.text("刪除這次掃描？"), isPresented: $showDelete, titleVisibility: .visible) {
-            Button(L10n.text("刪除照片、模型與所有資料"), role: .destructive) {
-                Task {
-                    busy = true
-                    defer { busy = false }
-                    do { try await ScanLibrary.shared.delete(currentEntry); onLibraryChange(); dismiss() }
-                    catch { self.error = error.localizedDescription }
-                }
-            }
-            Button(L10n.text("取消"), role: .cancel) { showDelete = false }
-        } message: { Text(L10n.text("此掃描的所有照片、模型、點雲、深度與姿態資料、平面圖及同名 ZIP 都會刪除，無法復原。")) }
         .alert(L10n.text("無法完成操作"), isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
             Button(L10n.text("好")) { error = nil }
         } message: { Text(error ?? "") }
@@ -476,21 +529,14 @@ private struct ScanHistoryDetail: View {
 
     private var topOverlay: some View {
         VStack(spacing: DS.Space.xs) {
-            HStack(spacing: DS.Space.xs) {
-                Spacer(minLength: DS.Size.control + DS.Space.xs)
-                DSSegmentedPicker(segments: [
-                    DSSegment(value: 0, title: L10n.text("3D 點雲"), symbol: "cube"),
-                    DSSegment(value: 1, title: L10n.text("拍攝影像"), symbol: "photo.on.rectangle")
-                ], selection: $selectedTab)
-                .accessibilityLabel(L10n.text("預覽內容"))
-                Spacer(minLength: 0)
-                Button { viewReset += 1 } label: {
-                    Label(L10n.text("顯示完整點雲"), systemImage: "scope")
-                }
-                .buttonStyle(DSIconButtonStyle())
-                .opacity(selectedTab == 0 && preview?.points.isEmpty == false ? 1 : 0)
-                .disabled(selectedTab != 0 || preview?.points.isEmpty != false)
-            }
+            // Equal-width segments across the screen: labels never truncate. The recenter
+            // control sits on the 3D view itself (bottom trailing).
+            DSSegmentedPicker(segments: [
+                DSSegment(value: 0, title: L10n.text("3D 點雲"), symbol: "cube"),
+                DSSegment(value: 1, title: L10n.text("拍攝影像"), symbol: "photo.on.rectangle")
+            ], selection: $selectedTab, fillsWidth: true)
+            .frame(maxWidth: 420)
+            .accessibilityLabel(L10n.text("預覽內容"))
             if selectedTab == 0 {
                 HStack(spacing: DS.Space.xs) {
                     DSMetric(value: L10n.text("\(currentEntry.frameCount) 張影像"), symbol: "photo.stack")
@@ -518,7 +564,7 @@ private struct ScanHistoryDetail: View {
     }
 
     private var bottomPanel: some View {
-        VStack(spacing: DS.Space.s) {
+        VStack(spacing: DS.Space.xs) {
             if optimizationTask != nil {
                 VStack(alignment: .leading, spacing: DS.Space.xs) {
                     HStack {
@@ -535,14 +581,9 @@ private struct ScanHistoryDetail: View {
                 .foregroundStyle(DS.Palette.textPrimary)
                 .accessibilityElement(children: .combine)
             }
-            HStack(spacing: DS.Space.xs) {
-                Button { showDetails = true } label: {
-                    Label(qualityNeedsReview ? L10n.text("拍攝品質需要檢查") : L10n.text("掃描品質資訊"),
-                          systemImage: qualityNeedsReview ? "exclamationmark.circle" : "info.circle")
-                }
-                .buttonStyle(DSIconButtonStyle(isSelected: qualityNeedsReview, tint: DS.Palette.warning, size: DS.Size.primaryHeight))
-                primaryAction
-            }
+            trainingButton
+            primaryAction
+            qualityButton
         }
         .padding(DS.Space.s)
         .dsFloatingPanel(radius: DS.Radius.xl + 4)
@@ -553,22 +594,81 @@ private struct ScanHistoryDetail: View {
         .animation(DS.springy, value: optimizationTask != nil)
     }
 
+    /// The on-device 3DGS entry: train, resume an interrupted run, follow a running one, or view
+    /// the saved model. Opens the same screen as the action after a capture.
+    private var trainingButton: some View {
+        let state: TrainingEntryCard.State
+        if trainingCenter.isActive(currentEntry.directory) {
+            state = .active(trainingCenter.snapshot)
+        } else if trainingHasCheckpoint, let record = trainingRecord, record.status != .completed {
+            state = .resumable(progress: record.progress)
+        } else if trainingHasModel {
+            state = .model
+        } else if trainingRecord?.status == .failed {
+            state = .failed
+        } else {
+            state = .idle(estimate: TrainingSpeedHistory.estimatedSeconds(.preset(.standard)))
+        }
+        return TrainingEntryCard(state: state) { showTraining = true }
+            .disabled(busy || optimizationTask != nil)
+            .opacity(busy || optimizationTask != nil ? 0.5 : 1)
+            .accessibilityIdentifier("trainGaussians")
+    }
+
+    private func loadTrainingState() async {
+        let workspace = TrainingWorkspace(scan: currentEntry.directory)
+        let active = trainingCenter.activeScan
+        let state = await Task.detached(priority: .utility) {
+            (workspace.record(activeScan: active), workspace.hasModel, workspace.hasCheckpoint)
+        }.value
+        trainingRecord = state.0
+        trainingHasModel = state.1
+        trainingHasCheckpoint = state.2
+    }
+
+    /// Dataset export in the same card layout as the training entry; once the archive is
+    /// ready the card shares it.
     @ViewBuilder
     private var primaryAction: some View {
         if let archive {
-            ShareLink(item: archive) {
-                Label(L10n.text("分享掃描"), systemImage: "square.and.arrow.up")
+            Button { SystemShare.present([archive]) } label: {
+                DSActionCardLabel(title: L10n.text("分享掃描"), subtitle: L10n.text("檔案已準備好，點此分享"),
+                                  tint: DS.Palette.success) {
+                    DSActionIcon(symbol: "square.and.arrow.up", tint: DS.Palette.success)
+                }
             }
-            .buttonStyle(DSPrimaryButtonStyle())
+            .buttonStyle(DSCardButtonStyle())
             .disabled(busy)
+            .accessibilityIdentifier("shareScanArchive")
         } else {
+            let exporting = busy && optimizationTask == nil
             Button { Task { await makeArchive() } } label: {
-                Label(busy && optimizationTask == nil ? L10n.text("處理中…") : L10n.text("匯出 3DGS 訓練資料"),
-                      systemImage: "square.and.arrow.up")
+                DSActionCardLabel(title: exporting ? L10n.text("處理中…") : L10n.text("匯出 3DGS 訓練資料"),
+                                  subtitle: L10n.text("照片、相機姿態與點雲，可在電腦上訓練"), tint: DS.Palette.info) {
+                    if exporting { ProgressView().tint(DS.Palette.info) }
+                    else { DSActionIcon(symbol: "square.and.arrow.up", tint: DS.Palette.info) }
+                }
             }
-            .buttonStyle(DSPrimaryButtonStyle(isLoading: busy && optimizationTask == nil))
+            .buttonStyle(DSCardButtonStyle())
             .disabled(busy || preview == nil)
+            .opacity(busy || preview == nil ? 0.5 : 1)
+            .accessibilityIdentifier("exportScanArchive")
         }
+    }
+
+    /// Capture quality summary; warns when photos need a look.
+    private var qualityButton: some View {
+        let detail: String? = selection.map { L10n.text("訓練選用 \($0.selectedIDs.count) / \($0.inputFrames) 張影像") }
+        return Button { showDetails = true } label: {
+            DSActionCardLabel(title: qualityNeedsReview ? L10n.text("拍攝品質需要檢查") : L10n.text("掃描品質資訊"),
+                              subtitle: detail,
+                              tint: qualityNeedsReview ? DS.Palette.warning : DS.Palette.textSecondary) {
+                DSActionIcon(symbol: qualityNeedsReview ? "exclamationmark.circle" : "info.circle",
+                             tint: qualityNeedsReview ? DS.Palette.warning : DS.Palette.textSecondary)
+            }
+        }
+        .buttonStyle(DSCardButtonStyle())
+        .accessibilityIdentifier("scanQualityInfo")
     }
 
     private var detailsSheet: some View {
