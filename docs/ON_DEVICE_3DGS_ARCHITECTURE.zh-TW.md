@@ -230,7 +230,7 @@ stateDiagram-v2
 | --- | --- |
 | `tools/test_gaussian_raster.swift` | 前向渲染對照雙精度 CPU 參考實作；以有限差分驗證參數與姿態梯度（Mip 濾波、拍攝運動、LiDAR 深度損失）；分段反向傳播與一次算完相同（20 項） |
 | `tools/test_gaussian_loss.swift` | 損失、影像與 PPISP 梯度（7 項） |
-| `tools/test_gaussian_training.swift` | 65 項端對端檢查：記憶體配置、解析度分級、MRNF（含成長漸進與重新分配）、SOG 檔（WebP、ZIP、寫入讀回）、匯出座標、收斂、加強模型、PPISP、姿態、拍攝運動、深度種子、補洞、檢查點（含第 1 版與離開 App 時存檔）、工作階段狀態機、檢視器、壓縮檔，以及 1,200 張影像的訓練。`GS_ONLY=session,enhancement` 可只跑部分測試 |
+| `tools/test_gaussian_training.swift` | 68 項端對端檢查：記憶體配置、種子上限與迭代次數、解析度分級、MRNF（含成長漸進與重新分配）、SOG 檔（WebP、ZIP、寫入讀回）、匯出座標、收斂、加強模型、PPISP、姿態、拍攝運動、深度種子、補洞、檢查點（含第 1 版與離開 App 時存檔）、工作階段狀態機、檢視器、壓縮檔，以及 1,200 張影像的訓練。`GS_ONLY=session,enhancement` 可只跑部分測試 |
 | `tools/train_gaussians.swift` | 在 Mac GPU 上重跑真實掃描，每個實驗都有開關，例如 `--long-edge`、`--align-eval`、`--eval-full-res`、`--holdout-segment`、`--save-model`、`--enhance-from`、`--depth-loss`、`--per-frame` |
 
 Mac 上的結果無法代表 iPhone 的速度、記憶體或發熱，這些都需要實機測試。

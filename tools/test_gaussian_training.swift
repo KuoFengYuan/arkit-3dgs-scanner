@@ -614,6 +614,35 @@ import simd
         print("  \(seeds.count) depth seeds in \(cells.count) cells")
         check(!seeds.isEmpty && onWall && red && cells.count == seeds.count && !far && limited == 7,
               "depth seeds fill only empty cells, on the measured surface, coloured from the photo, within the limit, without far low-confidence depth")
+        // A long capture: 8 photos of walls 5 m apart. With room for fewer seeds than empty cells,
+        // every photo's wall still gets some (interleaved photos, thinned on a coarser grid).
+        let walk = (0..<8).map { k -> FrameRecord in
+            var r = record
+            r.id = 10 + k
+            r.transform = arkitPose(eye: SIMD3(Double(k) * 5, 0, 0), target: SIMD3(Double(k) * 5, 0, -1))
+            return r
+        }
+        let spread = TrainingDataset.depthSeeds(records: walk, directory: dir, existing: [], limit: 400, stride: 2)
+        let walls = Set(spread.map { Int(($0.x / 5).rounded()) })
+        print("  long capture: \(spread.count) seeds on \(walls.count) of 8 walls")
+        check(spread.count <= 400 && spread.count > 300 && walls.count == 8,
+              "with more empty cells than the limit, depth seeds spread over the whole capture, not only its first photos")
+        // The seed budget follows the Gaussian cap; depth seeds fill what the cloud leaves.
+        var standard = GaussianTrainingConfiguration.preset(.standard)
+        standard.maxGaussians = 600_000
+        var enhance = standard
+        enhance.enhancedFrom = 1_000
+        check(standard.seedBudget == 300_000 && standard.depthSeedLimit(cloudPoints: 250_000) == 150_000
+              && standard.depthSeedLimit(cloudPoints: 20_000) == 280_000 && enhance.depthSeedLimit(cloudPoints: 0) == 0,
+              "the seed budget is half the Gaussian cap, with at least a quarter for depth seeds")
+        // Iterations: at least the preset's, and enough for about 12 / 30 / 60 updates per photo.
+        typealias Config = GaussianTrainingConfiguration
+        check(Config.automaticIterations(.standard, trainingPhotos: 250) == 10_000
+              && Config.automaticIterations(.standard, trainingPhotos: 1_000) == 30_000
+              && Config.automaticIterations(.quick, trainingPhotos: 1_000) == 12_000
+              && Config.automaticIterations(.high, trainingPhotos: 401) == 25_000
+              && Config.automaticIterations(.high, trainingPhotos: nil) == 20_000,
+              "the automatic iteration count grows with the number of training photos")
     }
 
     /// The left wall has no seeds: splitting neighbours reaches it slowly and blurrily; hole

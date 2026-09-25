@@ -227,8 +227,8 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
         snapshot.checkpointIteration = record?.checkpointIteration
         saveRecord(status: .preparing)
         let dataset = try TrainingDataset.prepare(scan: workspace.scan, longEdge: configuration.longEdge,
-                                                  holdOutEvery: configuration.holdOutEvery, maxPoints: 250_000,
-                                                  depthSeedLimit: configuration.depthSeedLimit,
+                                                  holdOutEvery: configuration.holdOutEvery, maxPoints: configuration.seedBudget,
+                                                  depthSeedLimit: configuration.depthSeedLimit(cloudPoints:),
                                                   isCancelled: { [weak self] in self?.cancelRequestedNow ?? true })
         if let keep = cancelValue {
             if !resume, let previous {

@@ -40,6 +40,8 @@ struct GaussianTrainingView: View {
     @State private var cover: URL?
     @State private var exposureRange: Double?
     @State private var debugIterations: Int?
+    /// The user's iteration count for the selected quality (nil = the automatic count).
+    @State private var customIterations: Int?
     @State private var frameCount: Int?
     @State private var showAdvanced = false
     /// Enhance model: the setup continues the saved model instead of starting a new one.
@@ -494,7 +496,7 @@ struct GaussianTrainingView: View {
                 setupChoices(startTitle: L10n.text("開始訓練"), identifier: "startTraining")
             }
         }
-        .onChange(of: preset) { _, _ in Task { await updateEstimate() } }
+        .onChange(of: preset) { _, _ in customIterations = nil; Task { await updateEstimate() } }
         .onChange(of: resolution) { _, _ in Task { await updateEstimate() } }
     }
 
@@ -504,6 +506,7 @@ struct GaussianTrainingView: View {
         VStack(spacing: DS.Space.xs) {
             ForEach(GaussianTrainingConfiguration.Preset.allCases, id: \.self) { presetCard($0) }
         }
+        iterationsRow
         resolutionPicker
         readiness
         HStack(spacing: DS.Space.xs) {
@@ -515,6 +518,50 @@ struct GaussianTrainingView: View {
                 .disabled(!supported || otherScanTraining || estimateError != nil)
                 .accessibilityIdentifier(identifier)
         }
+    }
+
+    /// The iteration count: computed from the scan's photos, adjustable before training, with the
+    /// time it would take at this phone's measured speed (never another device's).
+    private var iterationsRow: some View {
+        let c = configuration
+        let run = c.runIterations
+        let automatic = GaussianTrainingConfiguration.automaticIterations(preset, trainingPhotos: frameCount)
+        let range = GaussianTrainingConfiguration.iterationRange
+        return VStack(alignment: .leading, spacing: DS.Space.xxs) {
+            Stepper(value: Binding(get: { run }, set: { customIterations = min(max($0, range.lowerBound), range.upperBound) }),
+                    in: range, step: 1_000) {
+                HStack {
+                    Text(enhancing ? L10n.text("再訓練次數") : L10n.text("迭代次數"))
+                        .font(.subheadline.weight(.semibold)).foregroundStyle(DS.Palette.textPrimary)
+                    Spacer(minLength: DS.Space.xs)
+                    Text(run.formatted()).font(.subheadline.monospacedDigit()).foregroundStyle(DS.Palette.textPrimary)
+                }
+            }
+            .accessibilityIdentifier("trainingIterations")
+            Text(iterationDetail(run: run, automatic: automatic)).font(.caption).foregroundStyle(DS.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: DS.Space.xs) {
+                Text(TrainingSpeedHistory.estimatedSeconds(c).map { L10n.text("預估約 \(TrainingPresentation.approximate($0))，依這支手機上次訓練的速度") }
+                     ?? L10n.text("在這支手機完成一次訓練後，會依它的速度顯示預估時間"))
+                    .font(.caption).foregroundStyle(DS.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if customIterations != nil {
+                    Spacer(minLength: 0)
+                    Button(L10n.text("恢復自動")) { customIterations = nil }
+                        .font(.caption.weight(.semibold))
+                        .accessibilityIdentifier("trainingIterationsAutomatic")
+                }
+            }
+        }
+    }
+
+    private func iterationDetail(run: Int, automatic: Int) -> String {
+        if customIterations != nil { return L10n.text("已手動調整；自動計算為 \(automatic.formatted()) 次") }
+        guard let photos = frameCount, photos > 0 else { return L10n.text("依品質預設") }
+        let perPhoto = max(1, run / photos).formatted()
+        return automatic > GaussianTrainingConfiguration.preset(preset).iterations
+            ? L10n.text("依 \(photos.formatted()) 張照片增加，每張約訓練 \(perPhoto) 次")
+            : L10n.text("品質預設的次數；\(photos.formatted()) 張照片，每張約訓練 \(perPhoto) 次")
     }
 
     /// Training image resolution: low (960 px), medium (1440 px) or the photos' own (1920 px).
@@ -664,6 +711,8 @@ struct GaussianTrainingView: View {
     /// The run a quality choice starts: a new model, or `iterations` more on the saved model.
     private func configuration(for preset: GaussianTrainingConfiguration.Preset, enhance: Bool) -> GaussianTrainingConfiguration {
         var c = GaussianTrainingConfiguration.preset(preset)
+        c.iterations = preset == self.preset ? customIterations ?? GaussianTrainingConfiguration.automaticIterations(preset, trainingPhotos: frameCount)
+                                             : GaussianTrainingConfiguration.automaticIterations(preset, trainingPhotos: frameCount)
         c.longEdge = resolution.longEdge
         c.poseOptimization = poseOptimization
         c.ppisp = ppisp
@@ -685,6 +734,7 @@ struct GaussianTrainingView: View {
         ppisp = c.ppisp
         mipFilter = c.mipFilter
         preset = .standard
+        customIterations = nil
         enhancing = true
         Task { await updateEstimate() }
     }

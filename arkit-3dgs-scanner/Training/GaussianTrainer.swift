@@ -6,7 +6,18 @@ import simd
 
 /// User-facing training settings; persisted with checkpoints so a resume uses the same run.
 nonisolated struct GaussianTrainingConfiguration: Codable, Equatable, Sendable {
-    enum Preset: String, Codable, CaseIterable, Sendable { case quick, standard, high }
+    enum Preset: String, Codable, CaseIterable, Sendable {
+        case quick, standard, high
+        /// Times each training photo is used by the automatic iteration count (the presets'
+        /// counts over about 333 photos, like the scans they were measured on).
+        var updatesPerPhoto: Int {
+            switch self {
+            case .quick: return 12
+            case .standard: return 30
+            case .high: return 60
+            }
+        }
+    }
 
     /// Training image resolution, chosen separately from the preset. `high` is the photos'
     /// own resolution (1920 px on current iPhones); images are never upscaled.
@@ -59,9 +70,14 @@ nonisolated struct GaussianTrainingConfiguration: Codable, Equatable, Sendable {
     var runIterations: Int { max(0, iterations - startIteration) }
     var usesHoleFilling: Bool { holeFilling ?? true }
     var usesDepthSeeds: Bool { depthSeeds ?? true }
-    /// At most a quarter of the Gaussian cap comes from depth seeds, leaving room to densify.
-    /// An enhancement starts from the saved model, so it needs no seeds.
-    var depthSeedLimit: Int { usesDepthSeeds && !isEnhancement ? maxGaussians / 4 : 0 }
+    /// Seeds (the saved cloud and LiDAR depth seeds together) make up at most half the Gaussian
+    /// cap, leaving room to densify; initialisation applies the memory plan's cap again.
+    var seedBudget: Int { maxGaussians / 2 }
+    /// LiDAR depth seeds fill what the saved cloud leaves of the seed budget, and at least a
+    /// quarter of the cap. An enhancement starts from the saved model, so it needs no seeds.
+    func depthSeedLimit(cloudPoints: Int) -> Int {
+        usesDepthSeeds && !isEnhancement ? max(maxGaussians / 4, seedBudget - cloudPoints) : 0
+    }
 
     /// The capture motion rendered for training photos, or nil for none.
     var captureMotion: (blur: Bool, readout: Double)? {
@@ -79,6 +95,18 @@ nonisolated struct GaussianTrainingConfiguration: Codable, Equatable, Sendable {
         c.shDegree = min(3, max(shDegree, savedSHDegree))
         return c
     }
+
+    /// Automatic iteration count: the preset's, or more for scans with many photos, so every
+    /// training photo is still used about `updatesPerPhoto` times (a Standard run of 10,000 over
+    /// 333 photos). Rounded up to a thousand; the setup screen lets the user change it.
+    static func automaticIterations(_ preset: Preset, trainingPhotos: Int?) -> Int {
+        let base = Self.preset(preset).iterations
+        guard let photos = trainingPhotos, photos > 0 else { return base }
+        return max(base, (photos * preset.updatesPerPhoto + 999) / 1_000 * 1_000)
+    }
+
+    /// The range the setup screen offers for the iteration count.
+    static let iterationRange = 1_000...200_000
 
     /// About 1.4× the iterations of the first trainer (3,000 / 7,000 / 15,000), paid for by its
     /// faster backward pass: a Standard run of FBDA13 took 319 s instead of 354 s on the Mac and

@@ -16,6 +16,10 @@
   | High quality | 20,000 | 1,000,000 | 3 |
 
   The memory plan may lower the Gaussian cap (see [memory](#memory-safety)). The iteration counts were raised from 3,000 / 7,000 / 15,000 when the trainer became faster; see [speed](#speed-and-longer-presets).
+- **Iterations:** below the quality cards the setup shows the run's iteration count, computed from the scan's training photos. It is the quality's count, or more for scans with many photos, so that each photo is still used about 12 / 30 / 60 times (Quick / Standard / High); the quality counts cover about 333 photos. A Standard run of 1,000 photos gets 30,000 iterations.
+  - − and + change it in steps of 1,000 (1,000–200,000); **Use automatic** returns to the computed count. Changing the quality resets it.
+  - The line below shows how long the run would take at this phone's last measured speed for that quality and resolution. Before a first run on the phone it says that the estimate follows one.
+  - For **Enhance model** the row sets how many more iterations to train.
 - **Training resolution:** chosen separately from the quality. Photos are downscaled, never upscaled, and a saved run keeps its resolution when resumed.
 
   | Choice | Training image long edge | Relative time per iteration |
@@ -239,7 +243,9 @@ The regular pattern is not the problem. Giving the seeds some depth is what help
 
 Two changes, both on by default:
 
-- **LiDAR depth seeds.** Before training, a grid of each training photo's LiDAR depth is back-projected. One seed, coloured from the photo, goes into every empty 4 cm cell. Medium- and high-confidence depth is used first; low-confidence depth under 4 m fills cells that are still empty. Seeds are capped at a quarter of the Gaussian cap. FBDA13 gained 48,950 seeds in 3.5 s on the Mac.
+- **LiDAR depth seeds.** Before training, a grid of each training photo's LiDAR depth is back-projected. One seed, coloured from the photo, goes into every empty 4 cm cell. Medium- and high-confidence depth is used first; low-confidence depth under 4 m fills cells that are still empty. FBDA13 gained 48,950 seeds in 3.5 s on the Mac.
+  - **Budget:** the saved cloud and the depth seeds together are at most half the Gaussian cap. The cloud is read up to that budget (before, a fixed 250,000 points), and depth seeds fill what it leaves, at least a quarter of the cap. When the memory plan lowers the cap, initialisation thins the seeds to half of it.
+  - **Large scenes:** when there are more empty cells than the budget, every photo gets an equal share of the candidates (sampling its depth more sparsely only when needed), photos are visited interleaved across the capture, and the candidates are thinned on a coarser grid. Seeds cover the whole capture; before, the first photos used up the budget and the rest of a long capture got none. On a synthetic walk past 8 walls with room for 400 seeds, all 8 walls got seeds.
 - **Hole filling during training.** While densification runs, each refine looks at the last rendered view for pixels the Gaussians barely cover (transmittance > 0.4) that differ from the photo (colour error > 0.08). A faint seed goes on each such pixel's ray, at the pixel's LiDAR depth or else the median depth of covered pixels nearby. Hole seeds take at most half of the free slots, and at most 2,000 per refine. Wrong guesses fade and are pruned.
 
 | Pose rate 10⁻³, seed spread | Held-out, aligned | Empty held-out pixels |
@@ -388,8 +394,9 @@ Measured on the Mac GPU with the same Metal source:
 
 - **`tools/test_gaussian_raster.swift`:** forward against a double-precision reference, with parameter and pose gradients checked by finite differences. It covers the Mip filter on and off, with and without capture motion and the LiDAR depth loss, and shows that the banded backward pass matches the single pass (20 checks).
 - **`tools/test_gaussian_loss.swift`:** loss, image and PPISP gradients.
-- **`tools/test_gaussian_training.swift`:** 65 end-to-end checks.
+- **`tools/test_gaussian_training.swift`:** 68 end-to-end checks.
   - Memory-plan fitting and overflow checks; resolution tiers, the full-resolution plan, tile bands, and the held-out segment.
+  - The seed budget, depth seeds spreading over a long capture, and the automatic iteration count.
   - MRNF units, the growth ramp and its ceiling, relocation (evidence, rate, taper, no receivers), PLY export frame, and convergence.
   - SOG: lossless WebP texels through ImageIO, stored ZIP archives against `unzip` and `zip`, palette and texture sizes, and a trained SH 3 model written and read back (positions within 0.04 mm, rotations 0.6°, rendering within 0.1 dB).
   - PPISP exposure recovery, pose refinement, and capture motion.

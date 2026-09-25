@@ -63,12 +63,13 @@ nonisolated struct TrainingDataset: Sendable {
     /// Uses the same inputs as the COLMAP export: the latest review poses (anchor-corrected and
     /// bundle-adjusted when validated), the RGB frame selection, per-frame intrinsics and the
     /// saved point cloud. `holdOutEvery` > 0 keeps every n-th selected frame for validation.
-    /// `depthSeedLimit` > 0 adds up to that many seeds from the photos' LiDAR depth where the
+    /// `maxPoints` caps the saved cloud read as seeds; `depthSeedLimit` (given the number of
+    /// cloud points read) adds up to that many seeds from the photos' LiDAR depth where the
     /// saved cloud has none (see `depthSeeds`).
     /// `holdOutSegment` > 0 instead holds out one contiguous stretch of that fraction of the
     /// selected frames, from the middle of the capture (novel views away from the training path).
     static func prepare(scan directory: URL, longEdge: Int, holdOutEvery: Int, maxPoints: Int,
-                        depthSeedLimit: Int = 0, holdOutSegment: Double = 0,
+                        depthSeedLimit: (_ cloudPoints: Int) -> Int = { _ in 0 }, holdOutSegment: Double = 0,
                         isCancelled: () -> Bool = { false }) throws -> TrainingDataset {
         let (records, _) = ScanLibrary.savedRecords(in: directory)
         let usable = records.filter {
@@ -123,10 +124,11 @@ nonisolated struct TrainingDataset: Sendable {
                 points = saved; break
             }
         }
-        if depthSeedLimit > 0 {
+        let seedLimit = depthSeedLimit(points.count)
+        if seedLimit > 0 {
             let training = Set(frames.filter { !$0.isValidation }.map(\.id))
             points += depthSeeds(records: chosen.filter { training.contains($0.id) }, directory: directory, existing: points,
-                                 limit: depthSeedLimit, isCancelled: isCancelled)
+                                 limit: seedLimit, isCancelled: isCancelled)
         }
         let size = trainingSize(width: first.width, height: first.height, longEdge: longEdge)
         return TrainingDataset(directory: directory, frames: frames, points: points, width: size.0, height: size.1)
@@ -138,18 +140,30 @@ nonisolated struct TrainingDataset: Sendable {
     /// training photo's LiDAR depth and adds one seed (coloured from the photo) per empty
     /// `voxel` cell: medium/high-confidence depth first, then low-confidence depth closer than
     /// 4 m for cells still empty. Reads the scan only.
+    ///
+    /// Large scenes have more empty cells than `limit`. Every photo gets an equal share of a
+    /// candidate budget (8 × `limit`; a photo samples its depth more sparsely only when its
+    /// share is smaller than its grid), photos are visited interleaved across the capture, and
+    /// more candidates than `limit` are thinned on a coarser grid. Seeds thus spread over the
+    /// whole scene instead of filling the first photos' surfaces and leaving the rest without.
     static func depthSeeds(records: [FrameRecord], directory: URL, existing: [CloudPoint], limit: Int,
                            voxel: Float = 0.04, stride: Int = 4, isCancelled: () -> Bool = { false }) -> [CloudPoint] {
         struct Key: Hashable { var x, y, z: Int32 }
-        func key(_ p: SIMD3<Float>) -> Key {
-            Key(x: Int32((p.x / voxel).rounded(.down)), y: Int32((p.y / voxel).rounded(.down)), z: Int32((p.z / voxel).rounded(.down)))
+        func key(_ p: SIMD3<Float>, _ size: Float = voxel) -> Key {
+            Key(x: Int32((p.x / size).rounded(.down)), y: Int32((p.y / size).rounded(.down)), z: Int32((p.z / size).rounded(.down)))
         }
+        guard limit > 0 else { return [] }
         var occupied = Set<Key>(minimumCapacity: existing.count)
         for p in existing { occupied.insert(key(SIMD3(p.x, p.y, p.z))) }
+        // Candidates are kept up to a few times the limit (memory), then thinned.
+        let candidateCap = limit * 8
+        let perPhoto = max(64, candidateCap / max(1, records.count))
+        let spacing = max(1, Int(Double(records.count).squareRoot()))
+        let interleaved = (0..<spacing).flatMap { offset in Swift.stride(from: offset, to: records.count, by: spacing).map { records[$0] } }
         var seeds: [CloudPoint] = []
         let depthDirectory = directory.appendingPathComponent("depth"), images = directory.appendingPathComponent("images")
         for pass in 0..<2 {
-            for record in records where seeds.count < limit {
+            for record in interleaved where seeds.count < candidateCap {
                 if isCancelled() { return seeds }
                 guard let depthFile = record.depthFile, let confidenceFile = record.confidenceFile,
                       let w = record.depthWidth, let h = record.depthHeight, w > 0, h > 0, record.transform.count == 16,
@@ -160,10 +174,12 @@ nonisolated struct TrainingDataset: Sendable {
                 let sx = Double(w) / Double(k.width), sy = Double(h) / Double(k.height)
                 let fx = Float(k.fx * sx), fy = Float(k.fy * sy), cx = Float(k.cx * sx), cy = Float(k.cy * sy)
                 let t = record.transform.map(Float.init)
+                // This photo's share of the candidate budget sets its sampling step.
+                let sampleStep = max(stride, Int((Double(w * h) / Double(perPhoto)).squareRoot().rounded(.up)))
                 depthData.withUnsafeBytes { raw in
                     let depth = raw.bindMemory(to: Float.self)
-                    for y in Swift.stride(from: stride / 2, to: h, by: stride) {
-                        for x in Swift.stride(from: stride / 2, to: w, by: stride) where seeds.count < limit {
+                    for y in Swift.stride(from: sampleStep / 2, to: h, by: sampleStep) {
+                        for x in Swift.stride(from: sampleStep / 2, to: w, by: sampleStep) where seeds.count < candidateCap {
                             let i = y * w + x
                             let z = depth[i], c = confidence[i]
                             guard z.isFinite, z > 0.1, pass == 0 ? c >= 1 : (c == 0 && z < 4) else { continue }
@@ -179,7 +195,27 @@ nonisolated struct TrainingDataset: Sendable {
                 }
             }
         }
-        return seeds
+        return thinned(seeds, limit: limit, voxel: voxel)
+    }
+
+    /// At most `limit` of `seeds`, one per cell of a grid coarse enough for the count: surface
+    /// seeds scale with the area, so the cell grows with √(count / limit). Earlier candidates
+    /// (confident depth, interleaved photos) win their cell.
+    static func thinned(_ seeds: [CloudPoint], limit: Int, voxel: Float) -> [CloudPoint] {
+        guard seeds.count > limit else { return seeds }
+        var size = voxel * Float(Double(seeds.count) / Double(limit)).squareRoot()
+        var kept: [CloudPoint] = []
+        for _ in 0..<8 {
+            struct Key: Hashable { var x, y, z: Int32 }
+            var cells = Set<Key>(minimumCapacity: limit)
+            kept = seeds.filter { p in
+                cells.insert(Key(x: Int32((p.x / size).rounded(.down)), y: Int32((p.y / size).rounded(.down)),
+                                 z: Int32((p.z / size).rounded(.down)))).inserted
+            }
+            if kept.count <= limit { break }
+            size *= 1.2
+        }
+        return Array(kept.prefix(limit))
     }
 
     /// Camera-frame angular (rad/s) and linear (m/s) velocity of every record from its
