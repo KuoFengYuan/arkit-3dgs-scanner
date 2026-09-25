@@ -321,11 +321,13 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
 
     static let maxSeedJitter: Float = 0.03
 
-    /// Enhance model: loads the saved model folder (`gaussians.ply`, the refined training poses
-    /// and `ppisp.json`) and continues its schedule at `configuration.startIteration`. The
-    /// optimiser moments start fresh; poses and the colour model resume where they were.
+    /// Enhance model: loads the saved model folder (`gaussians.sog` or an older `gaussians.ply`,
+    /// the refined training poses and `ppisp.json`) and continues its schedule at
+    /// `configuration.startIteration`. The optimiser moments start fresh; poses and the colour
+    /// model resume where they were. A SOG model starts from its compressed values.
     func initializeModel(fromSaved directory: URL) throws {
-        _ = try GaussianExport.readPLY(directory.appendingPathComponent(GaussianExport.plyName), into: model)
+        guard let file = GaussianExport.modelFile(in: directory) else { throw GaussianExport.ExportError.empty }
+        try GaussianExport.readModel(file, into: model)
         guard model.activeCount > 0 else { throw GaussianExport.ExportError.empty }
         strategy.updateBounds(model)
         iteration = configuration.startIteration

@@ -29,6 +29,9 @@ which are licensed for non-commercial use only, nor from LichtFeld Studio
 - Speedy-Splat (Hanson et al., 2025) for the idea of listing a splat only in the
   tiles it actually intersects
 - Taming 3DGS (Mallick et al., 2024) for the sparse Adam tested as an experiment
+- The SOG compressed Gaussian format as documented by PlayCanvas
+  (https://developer.playcanvas.com/user-manual/gaussian-splatting/formats/sog/);
+  the WebP encoder, ZIP handling and k-means are this project's own code
 
 Third-party patents may cover some of these methods. This notice is not legal
 advice; check before commercial use.

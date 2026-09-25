@@ -3,10 +3,11 @@
 import Foundation
 import simd
 
-/// Trained-model files. `gaussians.ply` is the standard INRIA 3DGS layout (positions, zero
-/// normals, SH DC + rest, opacity logit, log scales, wxyz rotation) read by common 3DGS
-/// viewers and trainers. It uses the same world frame as the dataset export's `sparse/0`
-/// (ARKit world rotated 180° about X, metres) so it lines up with the COLMAP cameras.
+/// Trained-model files. A saved model is `gaussians.sog` (SOG, see `GaussianSOG`, about 12×
+/// smaller); models saved before SOG, and the PLY helpers below, use `gaussians.ply`, the
+/// standard INRIA 3DGS layout (positions, zero normals, SH DC + rest, opacity logit, log
+/// scales, wxyz rotation). Both use the same world frame as the dataset export's `sparse/0`
+/// (ARKit world rotated 180° about X, metres) so they line up with the COLMAP cameras.
 /// Colours are pre-ISP radiance: the per-image PPISP compensation lives in `ppisp.json`.
 nonisolated enum GaussianExport {
     static let plyName = "gaussians.ply"
@@ -24,6 +25,27 @@ nonisolated enum GaussianExport {
             case .damaged: return L10n.text("3DGS 模型檔案不完整")
             }
         }
+    }
+
+    // MARK: Model file
+
+    /// The saved model in `directory`: SOG, else a PLY from before SOG, else nil.
+    static func modelFile(in directory: URL) -> URL? {
+        [GaussianSOG.fileName, plyName].map { directory.appendingPathComponent($0) }
+            .first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// Gaussian count and SH degree of a saved model file (SOG or PLY).
+    static func modelInfo(_ url: URL) throws -> (count: Int, shDegree: Int) {
+        if url.pathExtension == "sog" { return try GaussianSOG.info(url) }
+        let header = try readHeader(url)
+        return (header.count, header.shDegree)
+    }
+
+    /// Reads a saved model file (SOG or PLY) into `model`, in the ARKit frame.
+    @discardableResult
+    static func readModel(_ url: URL, into model: GaussianModel) throws -> Int {
+        url.pathExtension == "sog" ? try GaussianSOG.read(url, into: model) : try readPLY(url, into: model)
     }
 
     // MARK: Coordinate frame
@@ -160,7 +182,8 @@ nonisolated enum GaussianExport {
     // MARK: Sidecars
 
     struct Metadata: Codable {
-        var format = "3dgs-ply"
+        /// "3dgs-sog" for `gaussians.sog`; models saved before SOG say "3dgs-ply".
+        var format = "3dgs-sog"
         var version = 1
         var gaussians: Int
         var shDegree: Int
@@ -186,7 +209,7 @@ nonisolated enum GaussianExport {
         var pipeline = ["exposure: rgb * 2^EV", "vignetting: rgb_c * clamp(1 + a0 r² + a1 r⁴ + a2 r⁶, 0, 1), r from (cx, cy) in max(W, H)-normalised coordinates",
                         "colour: chromaticity homography on (R, G, R+G+B), intensity preserving",
                         "response: toe/shoulder curve (tau, eta, centre) then gamma, per channel"]
-        var appliesTo = "images rendered from gaussians.ply"
+        var appliesTo = "images rendered from the model (gaussians.sog)"
         var novelView = "0 EV, identity colour, camera 0 vignetting and response"
         var seedMeanEV: Double?
         var cameras: [Camera]
@@ -219,7 +242,7 @@ nonisolated enum GaussianExport {
 
     static func viewerNotes(mipFilter: Bool, ppisp: Bool) -> [String] {
         var notes = [
-            "Standard 3DGS viewers read gaussians.ply directly. Most assume a Y-up world and show this COLMAP-frame model upside down; rotate it 180° about X.",
+            "gaussians.sog is a SOG file (lossless WebP textures and meta.json in a ZIP) that SuperSplat, PlayCanvas and LichtFeld Studio open directly; PlayCanvas splat-transform converts it to PLY for other tools. Most viewers assume a Y-up world and show this COLMAP-frame model upside down; rotate it 180° about X.",
         ]
         if mipFilter {
             notes.append("Trained with the Mip-Splatting 2D filter (0.1 px² dilation with opacity compensation). Viewers without an anti-aliased mode dilate by 0.3 px² without compensation, so small splats look slightly thicker and brighter.")

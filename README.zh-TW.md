@@ -108,8 +108,8 @@ iOS 26 以上，切到其他 App 後仍可繼續訓練。iOS 會以系統通知�
 
 - 模型會跟著這筆掃描保存，重開 App 後仍在。「掃描紀錄」的卡片會標示已有模型、訓練中或可續訓；點「檢視 3DGS 模型」即可環繞檢視。
 - 「加強模型」會讀取已保存的模型繼續訓練：可選再訓練 4,000、10,000 或 20,000 次，以及訓練解析度，例如先用「低」訓練，再用「高（原始）」加強。相機姿態微調與色彩模型都會延續。加強完成前會保留目前的模型；以「刪除」停止加強時，已保存的模型維持原樣。
-- 「分享 3DGS 模型」會送出 `scan_…-3dgs.zip`，內含 `gaussians.ply`（標準 3DGS PLY）、中繼資料、微調後的相機姿態；有用 PPISP 時另含 `ppisp.json`。
-- 用其他 3DGS 檢視器開啟時，PLY 採用 COLMAP 座標系，Y 軸朝上的檢視器會看到上下顛倒，請繞 X 軸旋轉 180°。這些檢視器會忽略 `ppisp.json`。
+- 「分享 3DGS 模型」會送出 `scan_…-3dgs.zip`，內含 `gaussians.sog`、中繼資料、微調後的相機姿態；有用 PPISP 時另含 `ppisp.json`。SOG 是壓縮的 3DGS 格式，大小約為 PLY 的 1/12（60 萬個高斯為 12 MB，PLY 是 149 MB），PSNR 約低 0.2 dB。SuperSplat、PlayCanvas 與 LichtFeld Studio 可直接開啟；PlayCanvas 的 `splat-transform` 可轉成 PLY。SOG 之前以 PLY 保存的模型仍維持 PLY。
+- 用其他 3DGS 檢視器開啟時，模型採用 COLMAP 座標系，Y 軸朝上的檢視器會看到上下顛倒，請繞 X 軸旋轉 180°。這些檢視器會忽略 `ppisp.json`。
 - 右上角的選項選單：
   - 「重新訓練」：在新模型完成前保留目前的模型。
   - 「刪除 3DGS 模型」：只刪除訓練結果，掃描的照片、深度與姿態都保留。
@@ -200,7 +200,7 @@ scan_…/
 
 新掃描使用 `capture-meta.json`；舊 `meta.json` 仍可讀取，匯出時自動改名，避免與外部訓練器的格式判斷衝突。兩者同時存在時優先使用新檔，舊檔另存為不衝突的 capture 中繼資料檔。
 
-依啟用功能及成功結果，可能另有平面圖、世界地圖、影像重建及採集效能報告。手機端訓練寫在掃描內的 `gaussian-training/`（檢查點、狀態與 `model/gaussians.ply` 及附屬檔）；資料集 ZIP 不含這個資料夾，模型另有自己的 ZIP。舊版掃描既有模型仍隨原資料保留與分享。
+依啟用功能及成功結果，可能另有平面圖、世界地圖、影像重建及採集效能報告。手機端訓練寫在掃描內的 `gaussian-training/`（檢查點、狀態與 `model/gaussians.sog` 及附屬檔；較舊的模型保留 `gaussians.ply`）；資料集 ZIP 不含這個資料夾，模型另有自己的 ZIP。舊版掃描既有模型仍隨原資料保留與分享。
 
 COLMAP 相機與 `points3D.bin` 預設一起繞世界 X 軸旋轉 180°；`points.ply`、`review.ply` 與 JSONL 保留 ARKit 世界座標。不要把不同座標系的點雲與姿態直接混用。詳見 [座標系](docs/COORDINATES.zh-TW.md) 與 [歷史訓練匯出](docs/HISTORY_TRAINING_EXPORT.zh-TW.md)。
 

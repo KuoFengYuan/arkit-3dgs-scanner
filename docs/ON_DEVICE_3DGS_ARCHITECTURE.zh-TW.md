@@ -53,11 +53,12 @@ flowchart TB
 | `TrainingDataset.swift` | 影格選擇、保留影像、種子點雲與 LiDAR 深度種子、相機、LiDAR 深度目標、串流解碼影像 |
 | `TrainingMemoryPlan.swift` | 有溢位檢查的記憶體配置與自動預算 |
 | `GaussianCheckpoint.swift` | 可續訓的 `checkpoint.gsck` 格式 |
-| `GaussianExport.swift` | PLY 寫入與讀取、中繼資料、`ppisp.json`、COLMAP 座標系轉換 |
+| `GaussianExport.swift` | 保存的模型檔（SOG，或 SOG 之前的 PLY）、PLY 寫入與讀取、中繼資料、`ppisp.json`、COLMAP 座標系轉換 |
+| `GaussianSOG.swift`、`WebPLossless.swift`、`StoredZip.swift` | SOG 模型檔：Morton 排序、量化與代碼本、SH 調色盤的 GPU k-means；無損 WebP（VP8L）編碼器；不壓縮的 ZIP |
 | `TrainingWorkspace.swift` | `state.json`（`TrainingRecord`）、資料夾結構、刪除與捨棄規則、分享壓縮檔 |
 | `GaussianRenderer.swift`、`GaussianModelViewer.swift` | 以環繞相機渲染預覽與已存模型 |
 | `GaussianMetal.swift` | 裝置、pipeline、緩衝區與精簡的 dispatch 輔助 |
-| `*.metal` | Kernel：`GaussianRaster`、`GaussianSort`、`GaussianLoss`、`GaussianOptim` |
+| `*.metal` | Kernel：`GaussianRaster`、`GaussianSort`、`GaussianLoss`、`GaussianOptim`、`GaussianSOG`（調色盤指派） |
 | `UI/TrainingCenter.swift` | 全 App 唯一的訓練擁有者：生命週期與記憶體監聽、電池、螢幕常亮、背景繼續 |
 | `UI/GaussianTrainingView.swift`、`UI/GaussianViewport.swift`、`UI/TrainingPresentation.swift` | 訓練畫面、手勢檢視區，以及共用的文字、卡片與速度紀錄 |
 
@@ -105,11 +106,11 @@ stateDiagram-v2
 2. **初始化：** 三種方式之一。
    - 新的訓練：從點雲產生種子。
    - 續訓：讀取 `checkpoint.gsck`。
-   - **加強模型：** 以 `initializeModel(fromSaved:)` 讀取 `model/`，把 PLY 轉回 ARKit 座標系，依影格 id 把微調後的姿態換回修正量，並讀回 `ppisp.json`，再從已保存的迭代接續排程。
+   - **加強模型：** 以 `initializeModel(fromSaved:)` 讀取 `model/`，把 SOG（或較舊的 PLY）模型轉回 ARKit 座標系，依影格 id 把微調後的姿態換回修正量，並讀回 `ppisp.json`，再從已保存的迭代接續排程。
 3. **迴圈：**
    - 每次迭代前檢查：控制項、記憶體、溫度與電量。
    - 執行 `trainer.step()`。
-   - 每 1,000 次迭代或 180 秒存一次檢查點，每次暫停時也會存。
+   - 每次暫停、App 離開前景，以及停止並保留進度時存檢查點；不再定時存。
 4. **完成：**
    - 評估保留影像。
    - 把模型資料夾寫到暫存目錄，再以原子替換換上。
@@ -180,7 +181,8 @@ stateDiagram-v2
 - **自動預算：** 程序仍可配置記憶體的 55%，扣除 450 MB 保留空間，並受裝置等級上限限制。
 - **訓練期間：**
   - 容量永遠不會增加。
-  - 檢查點以 8 MB 為單位串流寫出，PLY 匯出以 4 MB 為單位。
+  - 檢查點以 8 MB 為單位串流寫出。
+  - 保存 SOG 模型時，重用訓練已用不到的梯度緩衝區（半精度 SH 向量）與 tile 配對緩衝區（調色盤、標籤）。
   - 收到記憶體警告時停止生長並清空影像快取；記憶體嚴重不足時存檢查點並暫停。
 - **檢視器：** 已存模型的檢視器會在讀取前自行估算所需記憶體。
 
@@ -188,20 +190,20 @@ stateDiagram-v2
 
 - **訓練：** 在 ARKit 世界座標（公尺、Y 朝上）中進行。每台相機的世界到相機矩陣，由記錄的相機到世界變換翻轉相機的 Y、Z 軸而來：ARKit 的 OpenGL 相機（y 朝上、看向 −z）轉成光柵化器使用的 OpenCV 相機（y 朝下、看向 +z）。世界座標軸不變。
 - **姿態微調：** 在各自的相機座標系中修正每個視角：w2c′ = [R(ω) | τ] · w2c，並以先驗讓它維持在 ARKit 姿態附近。`training-poses.jsonl` 以 ARKit 慣例儲存修正後的相機到世界變換。
-- **匯出的 PLY：** 使用 COLMAP 匯出座標系，也就是 ARKit 世界座標繞 X 軸轉 180°：
+- **保存的模型（SOG 或 PLY）：** 使用 COLMAP 匯出座標系，也就是 ARKit 世界座標繞 X 軸轉 180°：
   - 位置變成 (x, −y, −z)；
   - 四元數跟著旋轉；
   - 高階 SH 係數依各基底函數的奇偶性改變正負號。
-- **讀回 PLY：** 檢視器與加強模型會反向還原這些步驟。
+- **讀回：** 檢視器與加強模型會反向還原這些步驟。
 
 ## 檔案
 
 | 檔案 | 寫入時機 | 格式 |
 | --- | --- | --- |
 | `state.json` | 每次狀態改變與存檢查點時 | `TrainingRecord`：狀態、原因、設定、迭代、高斯數、指標、時間、記憶體。停在「running」的紀錄會顯示為「中斷」 |
-| `checkpoint.gsck` | 每 1,000 次迭代或 180 秒、暫停時、使用者要求時 | 魔術字 `GSCK`，接著是 JSON 標頭與資料本體（見下方）。先寫入暫存檔，再以原子方式改名 |
+| `checkpoint.gsck` | 暫停時、App 離開前景時、停止並保留進度時、使用者要求時 | 魔術字 `GSCK`，接著是 JSON 標頭與資料本體（見下方）。先寫入暫存檔，再以原子方式改名取代前一個；殘留的暫存檔會被清除 |
 | `snapshot.jpg` | 每次存檢查點時 | 續訓畫面上的圖片 |
-| `model/` | 完成時 | `gaussians.ply`（INRIA 格式、COLMAP 座標系）、`gaussians.json`、`ppisp.json`、`training-poses.jsonl`、`training-report.json`、`preview.jpg`。先放暫存目錄，再整個換上 |
+| `model/` | 完成時 | `gaussians.sog`（SOG 第 2 版、COLMAP 座標系；SOG 之前保存的模型為 `gaussians.ply`）、`gaussians.json`、`ppisp.json`、`training-poses.jsonl`、`training-report.json`、`preview.jpg`。先放暫存目錄，再整個換上 |
 
 **`checkpoint.gsck` 的內容：**
 - **標頭：** 設定、資料集簽章、迭代、epoch 位置、列數、Adam 步數、`MRNFStrategy`、`PPISPModel`、姿態修正與已用時間。
@@ -228,7 +230,7 @@ stateDiagram-v2
 | --- | --- |
 | `tools/test_gaussian_raster.swift` | 前向渲染對照雙精度 CPU 參考實作；以有限差分驗證參數與姿態梯度（Mip 濾波、拍攝運動、LiDAR 深度損失）；分段反向傳播與一次算完相同（20 項） |
 | `tools/test_gaussian_loss.swift` | 損失、影像與 PPISP 梯度（7 項） |
-| `tools/test_gaussian_training.swift` | 59 項端對端檢查：記憶體配置、解析度分級、MRNF（含成長漸進與重新分配）、匯出座標、收斂、加強模型、PPISP、姿態、拍攝運動、深度種子、補洞、檢查點（含第 1 版）、工作階段狀態機、檢視器、壓縮檔，以及 1,200 張影像的訓練。`GS_ONLY=session,enhancement` 可只跑部分測試 |
+| `tools/test_gaussian_training.swift` | 65 項端對端檢查：記憶體配置、解析度分級、MRNF（含成長漸進與重新分配）、SOG 檔（WebP、ZIP、寫入讀回）、匯出座標、收斂、加強模型、PPISP、姿態、拍攝運動、深度種子、補洞、檢查點（含第 1 版與離開 App 時存檔）、工作階段狀態機、檢視器、壓縮檔，以及 1,200 張影像的訓練。`GS_ONLY=session,enhancement` 可只跑部分測試 |
 | `tools/train_gaussians.swift` | 在 Mac GPU 上重跑真實掃描，每個實驗都有開關，例如 `--long-edge`、`--align-eval`、`--eval-full-res`、`--holdout-segment`、`--save-model`、`--enhance-from`、`--depth-loss`、`--per-frame` |
 
 Mac 上的結果無法代表 iPhone 的速度、記憶體或發熱，這些都需要實機測試。
@@ -237,7 +239,7 @@ Mac 上的結果無法代表 iPhone 的速度、記憶體或發熱，這些都�
 
 - **新的緩衝區：** 每一個都要計入 `TrainingMemoryPlan.components`，否則配置就無法限制整個訓練的記憶體。
 - **新的設定欄位：** 宣告成 optional，舊的 `state.json` 與檢查點才能繼續解碼。
-- **新的逐高斯參數：** 同時修改 `GaussianLayout`、檢查點（提高版本號）以及 PLY 的寫入與讀取。
+- **新的逐高斯參數：** 同時修改 `GaussianLayout`、檢查點（提高版本號）以及 SOG 與 PLY 的寫入與讀取。
 - **修改 kernel：** 擴充 `test_gaussian_raster.swift` 的有限差分檢查，並同步更新 CPU 參考實作。
 - **較長的運算：** command buffer 會隨解析度或模型大小變長的運算都要拆開送出，就像反向傳播分段那樣。
 - **使用者看到的文字：** 使用 `L10n`，並在 `en.lproj` 與 `zh-Hant.lproj` 都加上對應字串。

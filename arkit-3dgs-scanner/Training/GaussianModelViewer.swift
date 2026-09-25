@@ -4,7 +4,8 @@ import Foundation
 import CoreGraphics
 import simd
 
-/// Interactive viewer of a completed model: loads `gaussians.ply` (+ `ppisp.json`) into an
+/// Interactive viewer of a completed model: loads `gaussians.sog` (or an older `gaussians.ply`,
+/// + `ppisp.json`) into an
 /// inference-only model and renders on its own serial queue with the training rasterizer and
 /// ISP, so the saved result looks exactly like the live preview. Memory is checked before
 /// loading; requests are coalesced (the latest camera wins).
@@ -44,7 +45,7 @@ nonisolated final class GaussianModelViewer: @unchecked Sendable {
     init(workspace: TrainingWorkspace, metal: GaussianMetal? = nil) throws {
         let data = try Data(contentsOf: workspace.modelDirectory.appendingPathComponent(GaussianExport.metadataName))
         metadata = try JSONDecoder.training.decode(GaussianExport.Metadata.self, from: data)
-        let header = try GaussianExport.readHeader(workspace.modelURL)
+        let header = try GaussianExport.modelInfo(workspace.modelURL)
         guard header.count > 0, header.count <= Self.maxGaussians, (0...3).contains(header.shDegree) else {
             throw GaussianExport.ExportError.damaged
         }
@@ -55,7 +56,7 @@ nonisolated final class GaussianModelViewer: @unchecked Sendable {
         let metal = try metal ?? GaussianMetal()
         let rows = (header.count + 1023) / 1024 * 1024
         model = try GaussianModel(metal: metal, capacity: rows, shDegree: header.shDegree, trainable: false)
-        _ = try GaussianExport.readPLY(workspace.modelURL, into: model)
+        try GaussianExport.readModel(workspace.modelURL, into: model)
         let raster = try GaussianRasterizer(metal: metal, capacity: rows,
                                             intersectionCapacity: rows * TrainingMemoryPlan.intersectionsPerGaussian,
                                             maxTiles: 65_536)

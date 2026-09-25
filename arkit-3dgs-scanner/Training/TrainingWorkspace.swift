@@ -60,7 +60,8 @@ nonisolated struct TrainingWorkspace: Sendable {
     var stateURL: URL { root.appendingPathComponent("state.json") }
     var checkpointURL: URL { root.appendingPathComponent(GaussianCheckpoint.fileName) }
     var modelDirectory: URL { root.appendingPathComponent("model", isDirectory: true) }
-    var modelURL: URL { modelDirectory.appendingPathComponent(GaussianExport.plyName) }
+    /// The saved model: `gaussians.sog`, or the `gaussians.ply` of a model saved before SOG.
+    var modelURL: URL { GaussianExport.modelFile(in: modelDirectory) ?? modelDirectory.appendingPathComponent(GaussianSOG.fileName) }
     var previewURL: URL { modelDirectory.appendingPathComponent("preview.jpg") }
     var snapshotURL: URL { root.appendingPathComponent("snapshot.jpg") }
 
@@ -91,7 +92,10 @@ nonisolated struct TrainingWorkspace: Sendable {
         if FileManager.default.fileExists(atPath: root.path) { try FileManager.default.removeItem(at: root) }
     }
 
-    func removeCheckpoint() { try? FileManager.default.removeItem(at: checkpointURL) }
+    func removeCheckpoint() {
+        try? FileManager.default.removeItem(at: checkpointURL)
+        GaussianCheckpoint.removePartialFiles(in: root)
+    }
 
     /// The saved model's share archive, next to the scan.
     var modelArchiveURL: URL { scan.deletingLastPathComponent().appendingPathComponent(scan.lastPathComponent + "-3dgs.zip") }

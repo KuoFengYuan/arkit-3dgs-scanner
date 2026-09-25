@@ -245,6 +245,7 @@ import simd
             ("resolutionAndHoldOut", resolutionAndHoldOut),
             ("strategyUnits", strategyUnits),
             ("exportFrame", exportFrame),
+            ("sogFormat", sogFormat),
             ("depthSeeding", depthSeeding),
             ("holeFilling", holeFilling),
             ("convergence", convergence),
@@ -432,6 +433,101 @@ import simd
               "a strategy saved without the growth ramp decodes and grows as before")
     }
 
+    /// SOG model files: lossless WebP, stored ZIP, and a trained model written and read back.
+    static func sogFormat() throws {
+        // WebP: exact texels through ImageIO, with and without alpha.
+        var rng = SplitMix64(seed: 17)
+        var exact = true
+        for opaque in [true, false] {
+            let w = 37, h = 23
+            var rgba = (0..<(w * h * 4)).map { _ in UInt8(truncatingIfNeeded: rng.next()) }
+            if opaque { for i in 0..<(w * h) { rgba[4 * i + 3] = 255 } }
+            let decoded = try GaussianSOG.decodeRGBA(try WebPLossless.encode(rgba: rgba, width: w, height: h))
+            exact = exact && decoded.rgba == rgba && decoded.width == w && decoded.height == h
+        }
+        let smooth: [UInt8] = (0..<(256 * 64 * 4)).map { (i: Int) -> UInt8 in UInt8(truncatingIfNeeded: i / 64) }
+        let smoothFile = try WebPLossless.encode(rgba: smooth, width: 256, height: 64)
+        let smoothBack = try GaussianSOG.decodeRGBA(smoothFile).rgba
+        check(exact && smoothBack == smooth && smoothFile.count < smooth.count / 4,
+              "lossless WebP decodes to the same texels, alpha included, and compresses smooth data")
+        // ZIP: our stored archives read back, and system zip tools agree both ways.
+        let entries: [(name: String, data: Data)] = [("meta.json", Data("{\"a\":1}".utf8)), ("b.webp", smoothFile)]
+        let archive = StoredZip.archive(entries)
+        let back = try StoredZip.entries(archive)
+        var interop = true
+        let archiveURL = temp.appendingPathComponent("stored.zip")
+        try archive.write(to: archiveURL)
+        if FileManager.default.isExecutableFile(atPath: "/usr/bin/unzip") && FileManager.default.isExecutableFile(atPath: "/usr/bin/zip") {
+            func tool(_ path: String, _ args: [String], in dir: URL) throws -> Int32 {
+                let p = Process(); p.executableURL = URL(fileURLWithPath: path); p.arguments = args
+                p.currentDirectoryURL = dir; p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+                try p.run(); p.waitUntilExit(); return p.terminationStatus
+            }
+            let folder = temp.appendingPathComponent("zipdir", isDirectory: true)
+            try? FileManager.default.removeItem(at: folder)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try Data(smooth).write(to: folder.appendingPathComponent("raw.bin"))
+            let deflated = temp.appendingPathComponent("deflated.zip")
+            try? FileManager.default.removeItem(at: deflated)
+            let tested = try tool("/usr/bin/unzip", ["-tq", archiveURL.path], in: temp) == 0
+            let zipped = try tool("/usr/bin/zip", ["-q", "-9", "-X", deflated.path, "raw.bin"], in: folder) == 0
+            let inflated = zipped ? try StoredZip.entries(Data(contentsOf: deflated))["raw.bin"] : nil
+            interop = tested && inflated == Data(smooth)
+        }
+        check(back["meta.json"] == entries[0].data && back["b.webp"] == smoothFile && interop,
+              "stored ZIP archives round-trip, pass unzip's test, and deflated archives from zip read back")
+        check(GaussianSOG.paletteSize(600_000) == 65_536 && GaussianSOG.paletteSize(10_000) == 8_192 && GaussianSOG.paletteSize(500) == 500
+              && GaussianSOG.textureSize(600_000) == (776, 776) && GaussianSOG.textureSize(5) == (4, 4),
+              "SOG palette and texture sizes follow the format (1,024 × a power of two ≤ n / 1,024, at most 65,536)")
+        // A trained SH 3 model through SOG and back.
+        let scan = try writeScan(name: "sog", frames: 24)
+        let t = try trainer(scan.directory, config(iterations: 400, holdOut: 6, sh: 3))
+        _ = try train(t, until: 400)
+        let views = t.dataset.trainFrames
+        let before = try meanPSNR(t, frames: views)
+        let rows = t.model.liveRows
+        let p = t.model.floats(t.model.params), L = t.model.layout
+        let original = rows.map { row in (mean: SIMD3(p[Int(L.means) + 3 * row], p[Int(L.means) + 3 * row + 1], p[Int(L.means) + 3 * row + 2]),
+                                          quat: simd_normalize(SIMD4(p[Int(L.quats) + 4 * row], p[Int(L.quats) + 4 * row + 1],
+                                                                     p[Int(L.quats) + 4 * row + 2], p[Int(L.quats) + 4 * row + 3])),
+                                          opacity: 1 / (1 + exp(-p[Int(L.opacities) + row]))) }
+        let url = temp.appendingPathComponent("model.sog")
+        let report = try GaussianSOG.write(t.model, to: url, metal: metal)
+        let meta = try JSONDecoder().decode(GaussianSOG.Meta.self, from: try StoredZip.entries(Data(contentsOf: url))["meta.json"]!)
+        let loaded = try GaussianModel(metal: metal, capacity: t.model.capacity, shDegree: 3, trainable: false)
+        try GaussianSOG.read(url, into: loaded)
+        // Rows come back in Morton order: match each original Gaussian to its nearest read-back one.
+        let q = loaded.floats(loaded.params)
+        let back3 = (0..<loaded.count).map { SIMD3(q[Int(L.means) + 3 * $0], q[Int(L.means) + 3 * $0 + 1], q[Int(L.means) + 3 * $0 + 2]) }
+        let index = Dictionary(grouping: back3.indices) { i -> SIMD3<Int32> in SIMD3<Int32>(Int32((back3[i].x * 50).rounded(.down)), Int32((back3[i].y * 50).rounded(.down)), Int32((back3[i].z * 50).rounded(.down))) }
+        var worstMean: Float = 0, worstAngle: Float = 0, worstOpacity: Float = 0
+        for o in original {
+            let cell = SIMD3<Int32>(Int32((o.mean.x * 50).rounded(.down)), Int32((o.mean.y * 50).rounded(.down)), Int32((o.mean.z * 50).rounded(.down)))
+            var best = -1, bestDistance = Float.infinity
+            for dx in -1...1 { for dy in -1...1 { for dz in -1...1 {
+                for i in index[cell &+ SIMD3(Int32(dx), Int32(dy), Int32(dz))] ?? [] {
+                    let d = simd_distance(back3[i], o.mean)
+                    if d < bestDistance { bestDistance = d; best = i }
+                }
+            } } }
+            guard best >= 0 else { worstMean = .infinity; continue }
+            worstMean = max(worstMean, bestDistance)
+            let rq = simd_normalize(SIMD4(q[Int(L.quats) + 4 * best], q[Int(L.quats) + 4 * best + 1], q[Int(L.quats) + 4 * best + 2], q[Int(L.quats) + 4 * best + 3]))
+            worstAngle = max(worstAngle, 2 * acos(min(1, abs(simd_dot(rq, o.quat)))) * 180 / .pi)
+            worstOpacity = max(worstOpacity, abs(1 / (1 + exp(-q[Int(L.opacities) + best])) - o.opacity))
+        }
+        let extent = original.map(\.mean).reduce(SIMD3<Float>(repeating: 0)) { simd_max($0, simd_abs($1)) }.max()
+        try GaussianSOG.read(url, into: t.model)
+        let after = try meanPSNR(t, frames: views)
+        print(String(format: "  %d Gaussians, %d bytes (%.1f× smaller than PLY), palette %d; worst position %.2e m of %.1f m, rotation %.2f°, opacity %.4f; training views %.2f -> %.2f dB",
+                     report.gaussians, report.bytes, Double(rows.count * 62 * 4) / Double(report.bytes), report.paletteEntries,
+                     worstMean, extent, worstAngle, worstOpacity, before, after))
+        check(meta.version == 2 && meta.count == rows.count && meta.shN?.bands == 3 && meta.shN?.count == report.paletteEntries
+              && loaded.count == rows.count && worstMean < 2e-4 * max(1, extent) * 8 && worstAngle < 1.0 && worstOpacity <= 0.6 / 255
+              && after > before - 1.0,
+              "a trained SH 3 model survives SOG: positions, rotations and opacities within their quantisation, renders within 1 dB")
+    }
+
     static func exportFrame() throws {
         let scan = try writeScan(name: "export", frames: 8)
         let t = try trainer(scan.directory, config(iterations: 40, sh: 3))
@@ -548,14 +644,21 @@ import simd
         reference.holeFilling = false
         let complete = try measure({ let t = try trainer(scan.directory, reference); _ = try train(t, until: 1500); return t }())
         try ExportManager.writePLY(full.filter { $0.x > -1.1 }, to: ply)     // the whole left wall
+        // Two seeds each: GPU atomics add in a different order every run, which moves this small
+        // scene's held-out PSNR by a few tenths of a dB.
         var results: [Bool: (psnr: Double, empty: Double, holes: Int)] = [:]
         for fill in [false, true] {
-            var c = config(iterations: 1500, holdOut: 6)
-            c.holeFilling = fill
-            let t = try trainer(scan.directory, c)
-            _ = try train(t, until: 1500)
-            let m = try measure(t)
-            results[fill] = (m.psnr, m.empty, t.holeSeedsAdded)
+            var sum = (psnr: 0.0, empty: 0.0, holes: 0)
+            for seed: UInt64 in [0x3D65, 0x3D66] {
+                var c = config(iterations: 1500, holdOut: 6)
+                c.holeFilling = fill
+                c.seed = seed
+                let t = try trainer(scan.directory, c)
+                _ = try train(t, until: 1500)
+                let m = try measure(t)
+                sum = (sum.psnr + m.psnr / 2, sum.empty + m.empty / 2, sum.holes + t.holeSeedsAdded)
+            }
+            results[fill] = sum
         }
         print(String(format: "  full seed cloud: held-out PSNR %.2f dB, empty scene pixels %.2f%%", complete.psnr, complete.empty * 100))
         let off = results[false]!, on = results[true]!
@@ -597,8 +700,23 @@ import simd
         let moved = views.filter { !t.poses[$0].isIdentity }.count
         print(String(format: "  saved %.3f dB, reloaded %.3f dB, pose difference %.2e over %d refined views", before, loaded, poseError, moved))
         check(e.iteration == 600 && e.configuration.iterations == 1_200 && e.model.shDegree == 2
-              && e.model.activeCount == t.model.activeCount && abs(loaded - before) < 0.02 && moved > 0 && poseError < 1e-6,
-              "a saved model reloads with its refined poses and renders as saved (SH 1 raised to 2)")
+              && e.model.activeCount == t.model.activeCount && loaded > before - 0.5 && moved > 0 && poseError < 1e-6
+              && FileManager.default.fileExists(atPath: directory.appendingPathComponent(GaussianSOG.fileName).path),
+              "a saved SOG model reloads with its refined poses and renders within 0.5 dB of the trained one (SH 1 raised to 2)")
+        // A model saved before SOG (PLY) still reloads exactly.
+        let legacy = temp.appendingPathComponent("enhance-legacy", isDirectory: true)
+        try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
+        for name in [GaussianExport.metadataName, GaussianExport.posesName] {
+            try FileManager.default.copyItem(at: directory.appendingPathComponent(name), to: legacy.appendingPathComponent(name))
+        }
+        try GaussianExport.writePLY(t.model, to: legacy.appendingPathComponent(GaussianExport.plyName), comment: "test")
+        let old = try trainer(scan.directory, config(iterations: 600, pose: true, holdOut: 6, sh: 2)
+            .enhancing(savedIterations: saved.iterations, savedGaussians: saved.gaussians, savedSHDegree: saved.shDegree),
+                              initialize: false)
+        try old.initializeModel(fromSaved: legacy)
+        let oldLoaded = try meanPSNR(old, frames: views)
+        print(String(format: "  PLY reloaded %.3f dB", oldLoaded))
+        check(abs(oldLoaded - before) < 0.02, "a model saved as PLY before SOG reloads exactly")
         _ = try train(e, until: e.configuration.iterations)
         let heldAfter = try meanPSNR(e, frames: e.dataset.validationFrames)
         print(String(format: "  held-out %.2f -> %.2f dB after enhancing", heldBefore, heldAfter))
@@ -809,6 +927,28 @@ import simd
         check(paused && stopped.phase == .cancelled && workspace.hasCheckpoint && record?.status == .cancelled
               && (record?.checkpointIteration ?? 0) >= 300, "pause, resume and stop-with-checkpoint keep a resumable state")
         check(box.frames > 0, "the live viewer received renders while training and while paused")
+        // Leaving the app saves a checkpoint while training continues; a stale partial file of
+        // an interrupted write is removed by the next save. No other checkpoint is written.
+        let stale = workspace.root.appendingPathComponent(".checkpoint-stale.partial")
+        try Data([1, 2, 3]).write(to: stale)
+        var leftAt = 0
+        _ = run(resume: true) { s in
+            box.lock.lock(); let start = box.snapshots.last?.iteration ?? 0; box.lock.unlock()
+            waitIteration(s, start + 50)
+            s.setAppInBackground(true)
+            box.lock.lock(); leftAt = box.snapshots.last?.iteration ?? 0; box.lock.unlock()
+            waitIteration(s, leftAt + 60)
+            s.setAppInBackground(false)
+            s.cancel(keepCheckpoint: false)
+        }
+        box.lock.lock()
+        let savedOnLeaving = box.snapshots.contains { $0.phase == .running && ($0.checkpointIteration ?? 0) >= leftAt }
+        box.lock.unlock()
+        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: workspace.root.path))?.filter { $0.hasSuffix(".partial") } ?? []
+        check(savedOnLeaving && leftovers.isEmpty && !FileManager.default.fileExists(atPath: stale.path),
+              "leaving the app saves a checkpoint while training continues, and stale partial files are removed")
+        // Stop-with-keep again, for the resume below.
+        _ = run(resume: false) { s in waitIteration(s, 300); s.cancel(keepCheckpoint: true) }
         // An app kill mid-run leaves "running" on disk; it reads as interrupted.
         var running = record!
         running.status = .running
@@ -824,7 +964,7 @@ import simd
         // Resume to the end: model files are exported and the checkpoint is removed.
         let resumeFrom = GaussianCheckpoint.header(at: workspace.checkpointURL)!.iteration
         let done = run(resume: true)
-        let files = [GaussianExport.plyName, GaussianExport.metadataName, GaussianExport.ppispName, GaussianExport.posesName,
+        let files = [GaussianSOG.fileName, GaussianExport.metadataName, GaussianExport.ppispName, GaussianExport.posesName,
                      GaussianExport.reportName, "preview.jpg"].allSatisfy { FileManager.default.fileExists(atPath: workspace.modelDirectory.appendingPathComponent($0).path) }
         check(done.phase == .completed && files && !FileManager.default.fileExists(atPath: workspace.checkpointURL.path)
               && workspace.record()?.status == .completed && resumeFrom >= 300,
@@ -855,8 +995,9 @@ import simd
               "the dataset archive excludes the training checkpoint and model")
         let model = try workspace.makeModelArchive()
         let modelListing = try String(decoding: Data(contentsOf: model), as: UTF8.self)
-        check(modelListing.contains(GaussianExport.plyName) && modelListing.contains(GaussianExport.ppispName),
-              "the model archive contains the PLY and its sidecars")
+        check(modelListing.contains(GaussianSOG.fileName) && !modelListing.contains(GaussianExport.plyName)
+              && modelListing.contains(GaussianExport.ppispName),
+              "the model archive contains the SOG model and its sidecars")
         // A retrain only replaces the saved model when it completes.
         let savedModel = try Data(contentsOf: workspace.modelURL)
         _ = run(resume: false) { s in waitIteration(s, 120); s.cancel(keepCheckpoint: false) }

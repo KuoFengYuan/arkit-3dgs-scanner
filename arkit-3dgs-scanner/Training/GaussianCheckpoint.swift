@@ -66,6 +66,16 @@ nonisolated enum GaussianCheckpoint {
         return result.filter { !$0.isEmpty }
     }
 
+    /// Removes temporary files of checkpoint writes that never finished (the app was ended
+    /// mid-write), so they cannot pile up. The published checkpoint is always a whole file.
+    static func removePartialFiles(in directory: URL) {
+        let fm = FileManager.default
+        for name in (try? fm.contentsOfDirectory(atPath: directory.path)) ?? []
+        where name.hasPrefix(".checkpoint-") && name.hasSuffix(".partial") {
+            try? fm.removeItem(at: directory.appendingPathComponent(name))
+        }
+    }
+
     /// Reads only the header (for History and resume decisions); validates magic and version.
     static func header(at url: URL) -> Header? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
@@ -95,6 +105,7 @@ nonisolated enum GaussianCheckpoint {
         try trainer.flushPendingFold()
         header.strategy = trainer.strategy
         let json = try JSONEncoder().encode(header)
+        removePartialFiles(in: directory)
         let temporary = directory.appendingPathComponent(".checkpoint-\(UUID().uuidString).partial")
         guard fm.createFile(atPath: temporary.path, contents: nil) else { throw CheckpointError.unreadable }
         var published = false
