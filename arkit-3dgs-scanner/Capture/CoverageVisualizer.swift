@@ -116,10 +116,21 @@ final class CoverageVisualizer {
     private var dollPlaced = false
     private var tileNodes: [Int64: SCNNode] = [:]  // tileKey → 節點（幾何為錨點局部座標）
     private var pathPoints: [SCNVector3] = []
+    /// All captured-view markers in one geometry (5 vertices per photo; see CameraMarkerLines).
+    private let markerNode = SCNNode()
+    private var markerVertices: [SIMD3<Float>] = []
+    private lazy var markerMaterial: SCNMaterial = {
+        let material = SCNMaterial()
+        material.diffuse.contents = UIColor.systemCyan.withAlphaComponent(0.6)
+        material.lightingModel = .constant
+        material.isDoubleSided = true
+        return material
+    }()
 
     init(config: CaptureConfig) {
         self.config = config
         root.addChildNode(pathNode)
+        root.addChildNode(markerNode)
         root.addChildNode(pointsRoot)
         root.addChildNode(roomRoot)
         dollRoot.addChildNode(dollContent)
@@ -133,8 +144,10 @@ final class CoverageVisualizer {
     func reset() {
         pathPoints.removeAll()
         pathNode.geometry = nil
+        markerVertices.removeAll()
+        markerNode.geometry = nil
         for child in root.childNodes
-        where child !== pathNode && child !== pointsRoot && child !== roomRoot
+        where child !== pathNode && child !== markerNode && child !== pointsRoot && child !== roomRoot
               && child !== dollRoot {
             child.removeFromParentNode()
         }
@@ -583,21 +596,17 @@ final class CoverageVisualizer {
         addDirectionMarker(pose: pose)
     }
 
-    /// 小箭錐標記已拍視角（線框，底面貼相機、尖端指向拍攝方向）
+    /// 小箭錐標記已拍視角（線框，底面貼相機、尖端指向拍攝方向）。
+    /// 全部標記共用一個幾何與材質：先前每張照片一個節點，SceneKit 每幀就多一次繪製呼叫，
+    /// 拍到數百張後這部分會佔掉大半幀時間。重建只在存下照片時發生（每秒數次、數千個頂點）。
     private func addDirectionMarker(pose: simd_float4x4) {
-        let pyramid = SCNPyramid(width: 0.045, height: 0.05, length: 0.036)
-        let mat = SCNMaterial()
-        mat.diffuse.contents = UIColor.systemCyan.withAlphaComponent(0.6)
-        mat.lightingModel = .constant
-        mat.fillMode = .lines
-        mat.isDoubleSided = true
-        pyramid.materials = [mat]
-
-        let node = SCNNode(geometry: pyramid)
-        // SCNPyramid 尖端朝 +Y；繞 X 轉 -90° 使尖端指向相機 -Z（視線方向）
-        let tilt = simd_float4x4(simd_quatf(angle: -.pi / 2, axis: SIMD3<Float>(1, 0, 0)))
-        node.simdTransform = pose * tilt
-        root.addChildNode(node)
+        CameraMarkerLines.append(pose: pose, to: &markerVertices)
+        let source = SCNGeometrySource(vertices: markerVertices.map { SCNVector3($0.x, $0.y, $0.z) })
+        let element = SCNGeometryElement(indices: CameraMarkerLines.indices(markers: markerVertices.count / CameraMarkerLines.corners.count),
+                                         primitiveType: .line)
+        let geometry = SCNGeometry(sources: [source], elements: [element])
+        geometry.materials = [markerMaterial]
+        markerNode.geometry = geometry
     }
 
 }

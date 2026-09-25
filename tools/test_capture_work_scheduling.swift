@@ -1,4 +1,5 @@
 import Foundation
+import simd
 
 actor BlockingWork {
     private var gate: CheckedContinuation<Void, Never>?
@@ -86,6 +87,43 @@ actor BlockingWork {
         let large = budget.next(width: 1024,height: 768)
         let sampled = ((1024+large.stride-1)/large.stride)*((768+large.stride-1)/large.stride)
         check(sampled <= 6000, "larger depth maps still obey the hard sample-count budget")
+
+        // Frame pacing: stalls (> 50 ms) are grouped by the photos saved so far, and pauses
+        // (review, background) never count as a stall.
+        let pacing = FramePacing()
+        pacing.frame(at: 0)
+        check(pacing.snapshot.frames == 0, "pacing ignores frames before a scan starts")
+        pacing.start(photos: 0)
+        var time = 10.0
+        for _ in 0..<60 { time += 1.0 / 60; pacing.frame(at: time) }
+        pacing.setPhotos(150)
+        time += 0.2; pacing.frame(at: time)
+        for _ in 0..<30 { time += 1.0 / 60; pacing.frame(at: time) }
+        pacing.pause()
+        time += 30
+        pacing.start(photos: 150)
+        pacing.frame(at: time); pacing.frame(at: time + 1.0 / 60)
+        let paced = pacing.snapshot
+        check(paced.frames == 59 + 1 + 30 + 1 && paced.stalls == 1 && abs(paced.maximumIntervalMS - 200) < 1e-6
+              && paced.framesByHundredPhotos == [59, 32] && paced.stallsByHundredPhotos == [0, 1],
+              "frame pacing counts one 200 ms stall in the 100–199 photo bucket and ignores the paused 30 s")
+        pacing.reset()
+        check(pacing.snapshot == FramePacing.Report(), "pacing resets for a new scan")
+
+        // Camera markers: every photo in one line list; the apex sits 5 cm along the view direction.
+        var vertices: [SIMD3<Float>] = []
+        var pose = matrix_identity_float4x4
+        pose.columns.3 = SIMD4(1, 2, 3, 1)
+        CameraMarkerLines.append(pose: pose, to: &vertices)
+        let yaw = simd_float4x4(simd_quatf(angle: .pi / 2, axis: SIMD3(0, 1, 0)))
+        CameraMarkerLines.append(pose: yaw, to: &vertices)
+        let indices = CameraMarkerLines.indices(markers: 2)
+        check(vertices.count == 10 && indices.count == 32 && indices.max() == 9 && indices.min() == 0,
+              "two photos give one line list of 10 vertices and 16 edges")
+        check(simd_distance(vertices[4], SIMD3(1, 2, 2.95)) < 1e-6 && simd_distance(vertices[9], SIMD3(-0.05, 0, 0)) < 1e-6,
+              "marker apexes point along each camera's view direction")
+        check(abs(simd_distance(vertices[0], vertices[1]) - 0.045) < 1e-6 && abs(simd_distance(vertices[1], vertices[2]) - 0.036) < 1e-6,
+              "marker bases keep the 4.5 × 3.6 cm size")
         print("\(count) checks passed")
     }
 }

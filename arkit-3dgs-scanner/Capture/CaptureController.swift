@@ -91,6 +91,11 @@ final class CaptureController: NSObject, ObservableObject {
     private var featureProcessor: LatestFrameProcessor<Keyframe>?
     private var fusionCancel = CancelFlag()
     private var capturePerformance = CapturePipelineReport()
+    /// Live-view pacing (render thread) and ARKit frame pacing (main thread) while scanning.
+    private let renderPacing = FramePacing()
+    private let arFramePacing = FramePacing()
+    private lazy var sceneDelegate = LiveSceneDelegate(pacing: renderPacing)
+    private var lastThermalTimestamp: TimeInterval?
     /// 建好的平面圖，於 processing 階段產生 → review 可顯示、匯出時寫檔
     @Published private(set) var floorPlanData: FloorPlanData?
     /// 是否以上次的 ARWorldMap 開始 —— 讓這次掃描與上次落在**同一個座標系**。
@@ -207,6 +212,7 @@ final class CaptureController: NSObject, ObservableObject {
         isAttached = true
         arView.session.delegateQueue = .main
         arView.session.delegate = self
+        arView.delegate = sceneDelegate
 
         let viz = CoverageVisualizer(config: config)
         viz.attach(to: arView.scene)
@@ -258,6 +264,7 @@ final class CaptureController: NSObject, ObservableObject {
         if !isActive {
             guard phase == .idle || phase == .scanning else { return }
             previewRenderTask?.cancel()
+            pausePacing()
             needsSessionResume = true
             sessionState = .interrupted
             arView?.session.pause()
@@ -282,7 +289,7 @@ final class CaptureController: NSObject, ObservableObject {
         sessionState = .relocalizing
         arView?.session.run(CaptureSessionConfiguration.make(config: config, useLiDAR: hasLiDAR), options: [])
         monitor.start()
-        if phase == .scanning { startPreviewRendering() }
+        if phase == .scanning { startPreviewRendering(); startPacing() }
         shutter.reset()
         if lockCameraParams { applyCameraLocks() }
         UIApplication.shared.isIdleTimerDisabled = true
@@ -389,6 +396,8 @@ final class CaptureController: NSObject, ObservableObject {
                               minDepth: cfg.pointMinDepthM, maxDepth: cfg.pointMaxDepthM)
         } : nil
         capturePerformance = CapturePipelineReport()
+        renderPacing.reset()
+        arFramePacing.reset()
         capturePerformance.configuredMinimumIntervalS = config.minKeyframeInterval
         capturePerformance.poseRefinementEnabled = config.baRounds > 0
         pendingWrites = 0
@@ -409,6 +418,7 @@ final class CaptureController: NSObject, ObservableObject {
         imageReconstructionReport = nil
         phase = .scanning
         startPreviewRendering()
+        startPacing()
         statusText = nil
         UIApplication.shared.isIdleTimerDisabled = true   // 掃描中不鎖屏
         captureHaptic.prepare()
@@ -423,6 +433,8 @@ final class CaptureController: NSObject, ObservableObject {
         processingStage = .preparing
         processingStartedAt = Date()
         previewRenderTask?.cancel()
+        pausePacing()
+        capturePerformance.anchorsAtStop = arView?.session.currentFrame?.anchors.count ?? 0
         exportProgress = 0
         statusText = L10n.text("正在儲存最後的影像…")
         UIApplication.shared.isIdleTimerDisabled = true
@@ -446,6 +458,8 @@ final class CaptureController: NSObject, ObservableObject {
             capturePerformance.retainedFeatureFrames = retained.descriptorFrames
             capturePerformance.archivedFeatureObservations = retained.archivedObservations
             capturePerformance.discardedFeatureObservations = retained.discardedObservations
+            capturePerformance.renderPacing = renderPacing.snapshot
+            capturePerformance.arFramePacing = arFramePacing.snapshot
             // Offline matching rebuilds from disk. Do not carry descriptors or JPEG GPU caches
             // through map snapshots, BA and refusion (also release when BA is disabled).
             await featureTracker.reset()
@@ -887,6 +901,7 @@ final class CaptureController: NSObject, ObservableObject {
         startFloorPlan(fresh: false)
         phase = .scanning
         startPreviewRendering()
+        startPacing()
         statusText = nil
         UIApplication.shared.isIdleTimerDisabled = true
     }
@@ -1312,6 +1327,26 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
         guard isAttached, !isInBackground, phase == .idle || phase == .scanning else { return }
         if case .failed = sessionState { return }
         frameCounter += 1
+        if phase == .scanning {
+            let started = CACurrentMediaTime()
+            arFramePacing.frame(at: frame.timestamp)
+            defer {
+                let ms = (CACurrentMediaTime() - started) * 1000
+                capturePerformance.frameHandlingTotalMS += ms
+                capturePerformance.frameHandlingMaxMS = max(capturePerformance.frameHandlingMaxMS, ms)
+            }
+            if ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue,
+               let last = lastThermalTimestamp, frame.timestamp > last, frame.timestamp - last < 1 {
+                capturePerformance.seriousThermalS += frame.timestamp - last
+            }
+            lastThermalTimestamp = frame.timestamp
+            handleScanFrame(frame)
+            return
+        }
+        handleScanFrame(frame)
+    }
+
+    private func handleScanFrame(_ frame: ARFrame) {
 
         let normalTracking: Bool
         if case .normal = frame.camera.trackingState { normalTracking = true } else { normalTracking = false }
@@ -1363,15 +1398,18 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
         recentRejects.removeAll { frame.timestamp - $0 > 4 }
         if recentRejectCount != recentRejects.count { recentRejectCount = recentRejects.count }
 
-        // ARKit 修正了磚錨點（漂移校正/重定位）→ 更新快照並讓點雲磚跟著實體表面移動（防殘影）
+        // ARKit 修正了磚錨點（漂移校正/重定位）→ 更新快照並讓點雲磚跟著實體表面移動（防殘影）。
+        // 融合用的快照照舊每幀完整讀取；畫面上只重設真的移動過的磚節點，
+        // 否則每幀都會對每塊磚重設一次變換，成本隨掃描範圍增加。
         if !tileKeyByAnchor.isEmpty {
             var current: [Int64: simd_float4x4] = [:]
             current.reserveCapacity(tileKeyByAnchor.count)
             for anchor in frame.anchors {
                 if let key = tileKeyByAnchor[anchor.identifier] { current[key] = anchor.transform }
             }
+            let moved = current.filter { latestTileTransforms[$0.key] != $0.value }
             latestTileTransforms = current
-            visualizer?.syncTileTransforms(current)
+            if !moved.isEmpty { visualizer?.syncTileTransforms(moved) }
         }
 
         // 點雲連續融合（~10Hz，與快門解耦）：只收「姿態可靠 + 清晰 + 相機夠穩」的幀。
@@ -1422,6 +1460,18 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
             integratePreview(frame, blurPixels: a.blurPixels)
         }
         captureKeyframe(frame, assessment: a)
+    }
+
+    private func startPacing() {
+        renderPacing.start(photos: keyframeCount)
+        arFramePacing.start(photos: keyframeCount)
+        lastThermalTimestamp = nil
+    }
+
+    private func pausePacing() {
+        renderPacing.pause()
+        arFramePacing.pause()
+        lastThermalTimestamp = nil
     }
 
     /// 擷取時只複製自有 buffer；actor 處理驗證與融合，渲染由獨立排程更新。
@@ -1634,6 +1684,8 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
                 capturePerformance.fileWriteTotalMS += timing.fileWriteMS
                 capturePerformance.fileWriteMaxMS = max(capturePerformance.fileWriteMaxMS, timing.fileWriteMS)
                 keyframeCount += 1
+                renderPacing.setPhotos(keyframeCount)
+                arFramePacing.setPhotos(keyframeCount)
                 visualizer?.addKeyframe(pose: keyframe.c2w)
                 if phase == .scanning { captureHaptic.impactOccurred(intensity: 0.6) }
             } catch {
@@ -1709,3 +1761,18 @@ extension CaptureController {
     }
 }
 #endif
+
+/// ARSCNView adds an empty node for every ARAnchor unless its delegate declines, and keeps
+/// each one in step with its anchor on every frame. The scan adds an anchor per photo and per
+/// preview tile but draws nothing on them (tiles have their own nodes), so it declines all of
+/// them. It also records the live view's frame pacing from the render thread.
+nonisolated private final class LiveSceneDelegate: NSObject, ARSCNViewDelegate {
+    private let pacing: FramePacing
+    init(pacing: FramePacing) { self.pacing = pacing }
+
+    func renderer(_ renderer: any SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? { nil }
+
+    func renderer(_ renderer: any SCNSceneRenderer, updateAtTime time: TimeInterval) {
+        pacing.frame(at: time)
+    }
+}

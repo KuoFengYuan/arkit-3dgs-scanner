@@ -26,6 +26,16 @@ Work exceeding 35 ms increases the next stride. Twelve consecutive updates below
 
 Original RGB/depth resolution, consistency thresholds, voxel size, and offline sampling are unchanged. A memory-pressure fallback to live preview can inherit its sparser sampling. Camera-only sparse features do not use this depth budget.
 
+## Long scans (600+ photos)
+
+Scans with more than about 600 photos felt laggy. The per-photo work is bounded: the background feature work of FBDA13 (405 photos) averaged 10 ms per photo and its history is capped (above). What grew with every photo was work repeated on **every frame**:
+
+- **Camera markers.** Each saved photo added its own SceneKit node, pyramid geometry, and material, which SceneKit cannot batch, so every rendered frame issued one more draw call per photo. On the Mac GPU (offscreen `SCNRenderer`, CPU time per frame), separate markers cost 0.35 ms at 100 photos, 2.38 ms at 600, and 4.13 ms at 1,000. The same markers as one line list cost 0.017 ms at every count. They are now one geometry (`CameraMarkerLines`) rebuilt when a photo is saved; the path line was already a single node. An iPhone CPU is slower and shares the frame with ARKit, so its share of the 16.7 ms frame is larger than on the Mac; it was not measured on a device.
+- **Anchor nodes.** Every photo and every preview tile has an ARKit anchor. Without a delegate, `ARSCNView` adds an empty node per anchor and moves each one with its anchor on every frame. The view now declines those nodes (`LiveSceneDelegate`); tiles already have their own nodes. The anchors themselves are unchanged, so ARKit still corrects them and the photo poses are read back from them at stop, as before.
+- **Tile transforms.** Every frame reset the transform of every tile node. The fusion snapshot (`latestTileTransforms`) is still read in full from the frame's anchors on every frame, unchanged; only nodes whose anchor actually moved are updated on screen.
+
+None of these change what is saved or fused: photos, depth, poses, the ARKit corrections, and the point-cloud data are the same.
+
 ## Diagnostic files
 
 `capture-performance.json` is saved before refusion and included in scan exports:
@@ -42,6 +52,10 @@ Original RGB/depth resolution, consistency thresholds, voxel size, and offline s
 | `configuredMinimumIntervalS`, `poseRefinementEnabled` | Capture settings |
 | `featureWork` | Submitted, completed, replaced, peak retained jobs, total/maximum matching time |
 | `retainedFeatureFrames`, `archivedFeatureObservations`, `discardedFeatureObservations` | Descriptor/history budget diagnostics |
+| `renderPacing`, `arFramePacing` (v2) | While scanning: live-view frames from the render thread and ARKit frames reaching the main thread. Each has `frames`, `stalls` (intervals above 50 ms), `maximumIntervalMS`, and `framesByHundredPhotos` / `stallsByHundredPhotos` (index 0 = photos 0–99, 1 = 100–199, …), which show whether stalls grow with the photo count |
+| `frameHandlingTotalMS`, `frameHandlingMaxMS` (v2) | Main-thread time handling each ARKit frame while scanning |
+| `seriousThermalS` (v2) | Scanning time with the thermal state serious or critical, when iOS throttles the device |
+| `anchorsAtStop` (v2) | ARKit anchors in the session at stop (one per photo plus the preview tiles) |
 
 Preview report v2 adds `extractionTotalMS`, `consistencyTotalMS`, `gridInsertTotalMS`, `maximumSampleStride`, and `overBudgetFrames`. These measure CPU work, not screen FPS. Older scans do not acquire these fields retroactively.
 
@@ -66,6 +80,6 @@ swiftc arkit-3dgs-scanner/Capture/TrainingFrameSelector.swift -O -module-cache-p
 
 Scheduling tests block the first feature job while 99 later submissions return, retain only the newest pending job, and verify draining, resume/close isolation, sampling caps, offset rotation, and feedback hysteresis. Twelve synthetic textured images exercise descriptor eviction with retained tracks, pixel coordinates, depth, history limits, and reset. Writer tests cover timings plus success/failure/retry behavior.
 
-Historical checks passed: 17 scheduling/sampling, five feature-retention, five capture/export, 39 depth-consistency, and spatial-index regression with 28,000 brute-force comparisons; iPhone/Simulator unsigned Debug builds also passed. The pre-existing parallel refusion Sendable warning remains.
+The scheduling test also checks that pacing counts a stall in the right photo bucket and ignores pauses, and that camera markers form one line list with apexes along each view direction (23 checks). Historical checks passed: 17 scheduling/sampling, five feature-retention, five capture/export, 39 depth-consistency, and spatial-index regression with 28,000 brute-force comparisons; iPhone/Simulator unsigned Debug builds also passed. The pre-existing parallel refusion Sendable warning remains.
 
 For device comparisons, keep hardware, light, path, and build mode fixed. Record median/P90 capture intervals, backpressure, feature replacements, mean/max fusion time, and over-budget fraction; then compare physical surface thickness and known dimensions. Denser photos or more candidate points alone do not establish accuracy. Updated device performance remains to be measured.
