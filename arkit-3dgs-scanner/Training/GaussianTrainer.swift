@@ -8,6 +8,21 @@ import simd
 nonisolated struct GaussianTrainingConfiguration: Codable, Equatable, Sendable {
     enum Preset: String, Codable, CaseIterable, Sendable { case quick, standard, high }
 
+    /// Training image resolution, chosen separately from the preset. `high` is the photos'
+    /// own resolution (1920 px on current iPhones); images are never upscaled.
+    enum Resolution: String, Codable, CaseIterable, Sendable {
+        case low, medium, high
+        var longEdge: Int {
+            switch self {
+            case .low: return 960
+            case .medium: return 1_440
+            case .high: return 1_920
+            }
+        }
+        init(longEdge: Int) { self = longEdge >= 1_920 ? .high : longEdge >= 1_440 ? .medium : .low }
+    }
+    var resolution: Resolution { Resolution(longEdge: longEdge) }
+
     var preset: Preset
     var iterations: Int
     /// Long edge of the training images (photos are downscaled, never upscaled).
@@ -34,10 +49,19 @@ nonisolated struct GaussianTrainingConfiguration: Codable, Equatable, Sendable {
     /// default 0.1; 0 = off). It only acts on photos with LiDAR depth.
     var depthLoss: Double?
     var depthLossWeight: Double { depthLoss ?? 0.1 }
+    /// Enhance model: the iteration the scan's saved model reached. The run loads that model
+    /// and continues its schedule up to `iterations` in total (nil = a new model from the
+    /// point cloud; optional so older records and checkpoints still decode).
+    var enhancedFrom: Int?
+    var startIteration: Int { enhancedFrom ?? 0 }
+    var isEnhancement: Bool { startIteration > 0 }
+    /// Iterations this run trains (all of them for a new model, the extra ones for an enhancement).
+    var runIterations: Int { max(0, iterations - startIteration) }
     var usesHoleFilling: Bool { holeFilling ?? true }
     var usesDepthSeeds: Bool { depthSeeds ?? true }
     /// At most a quarter of the Gaussian cap comes from depth seeds, leaving room to densify.
-    var depthSeedLimit: Int { usesDepthSeeds ? maxGaussians / 4 : 0 }
+    /// An enhancement starts from the saved model, so it needs no seeds.
+    var depthSeedLimit: Int { usesDepthSeeds && !isEnhancement ? maxGaussians / 4 : 0 }
 
     /// The capture motion rendered for training photos, or nil for none.
     var captureMotion: (blur: Bool, readout: Double)? {
@@ -45,11 +69,22 @@ nonisolated struct GaussianTrainingConfiguration: Codable, Equatable, Sendable {
         return blur || readout != 0 ? (blur, readout) : nil
     }
 
+    /// This configuration as an enhancement of a saved model: `iterations` more on top of the
+    /// model's, keeping at least its Gaussians and SH degree.
+    func enhancing(savedIterations: Int, savedGaussians: Int, savedSHDegree: Int) -> Self {
+        var c = self
+        c.enhancedFrom = max(1, savedIterations)
+        c.iterations = max(1, savedIterations) + iterations
+        c.maxGaussians = max(maxGaussians, savedGaussians)
+        c.shDegree = min(3, max(shDegree, savedSHDegree))
+        return c
+    }
+
     static func preset(_ preset: Preset) -> Self {
         switch preset {
-        case .quick: return Self(preset: preset, iterations: 3_000, longEdge: 720, maxGaussians: 300_000, shDegree: 2)
-        case .standard: return Self(preset: preset, iterations: 7_000, longEdge: 960, maxGaussians: 600_000, shDegree: 3)
-        case .high: return Self(preset: preset, iterations: 15_000, longEdge: 1_280, maxGaussians: 1_000_000, shDegree: 3)
+        case .quick: return Self(preset: preset, iterations: 3_000, longEdge: Resolution.low.longEdge, maxGaussians: 300_000, shDegree: 2)
+        case .standard: return Self(preset: preset, iterations: 7_000, longEdge: Resolution.low.longEdge, maxGaussians: 600_000, shDegree: 3)
+        case .high: return Self(preset: preset, iterations: 15_000, longEdge: Resolution.low.longEdge, maxGaussians: 1_000_000, shDegree: 3)
         }
     }
 }
@@ -75,6 +110,17 @@ nonisolated struct PoseCorrection: Codable, Equatable, Sendable {
         return simd_double4x4(columns: (SIMD4(r[0], 0), SIMD4(r[1], 0), SIMD4(r[2], 0), SIMD4(translation, 1)))
     }
     var isIdentity: Bool { rotation == .zero && translation == .zero }
+
+    init() {}
+
+    /// The correction [R | τ] of a rigid matrix (fresh optimiser state).
+    init(matrix m: simd_double4x4) {
+        let r = simd_double3x3(SIMD3(m[0][0], m[0][1], m[0][2]), SIMD3(m[1][0], m[1][1], m[1][2]), SIMD3(m[2][0], m[2][1], m[2][2]))
+        let q = simd_quatd(r)
+        let angle = q.angle
+        rotation = angle > 1e-12 && angle.isFinite ? q.axis * (angle > .pi ? angle - 2 * .pi : angle) : .zero
+        translation = SIMD3(m[3][0], m[3][1], m[3][2])
+    }
     var rotationDegrees: Double { simd_length(rotation) * 180 / .pi }
     var translationMeters: Double { simd_length(translation) }
 
@@ -164,6 +210,7 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
     private var order: [Int] = []
     private var edgeMedians: [Float?]
     private var pendingFold: Float? = nil      // edge scale of the last backward, folded next step
+    private var gpuSkipStreak = 0
     private var overflowStreak = 0
     /// Stops densification after a tile overflow or memory pressure.
     var growthFrozen = false
@@ -259,6 +306,33 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
     }
 
     static let maxSeedJitter: Float = 0.03
+
+    /// Enhance model: loads the saved model folder (`gaussians.ply`, the refined training poses
+    /// and `ppisp.json`) and continues its schedule at `configuration.startIteration`. The
+    /// optimiser moments start fresh; poses and the colour model resume where they were.
+    func initializeModel(fromSaved directory: URL) throws {
+        _ = try GaussianExport.readPLY(directory.appendingPathComponent(GaussianExport.plyName), into: model)
+        guard model.activeCount > 0 else { throw GaussianExport.ExportError.empty }
+        strategy.updateBounds(model)
+        iteration = configuration.startIteration
+        pendingFold = nil
+        if configuration.poseOptimization {
+            // Each refined camera-to-world back to its correction of this dataset's ARKit pose.
+            let refined = ScanLibrary.readRecords(directory.appendingPathComponent(GaussianExport.posesName))
+            let byID = Dictionary(refined.map { ($0.id, $0.transform) }, uniquingKeysWith: { a, _ in a })
+            for (index, frame) in dataset.frames.enumerated() where !frame.isValidation {
+                guard let transform = byID[frame.id], transform.count == 16, transform != frame.transform else { continue }
+                let base = GaussianCamera.worldToCamera(arkitRowMajorC2W: frame.transform)
+                let corrected = GaussianCamera.worldToCamera(arkitRowMajorC2W: transform)
+                let correction = PoseCorrection(matrix: corrected * GaussianCamera.rigidInverse(base))
+                if correction.rotationDegrees < 5 && correction.translationMeters < 0.1 { poses[index] = correction }
+            }
+        }
+        if configuration.ppisp, let data = try? Data(contentsOf: directory.appendingPathComponent(GaussianExport.ppispName)),
+           let file = try? JSONDecoder.training.decode(GaussianExport.PPISPFile.self, from: data) {
+            ppisp.restore(file, frames: dataset.frames)
+        }
+    }
 
     // MARK: Frame order
 
@@ -430,20 +504,37 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
         let live = max(1, model.activeCount)
         let pixels = dataset.width * dataset.height
         profile["intersections", default: 0] += Double(intersections)
-        try run("raster") { e in
-            e.dispatch(scale, threads: pixels, [.buffer(edgeMap), .value(SIMD2<Float>(median > 0 ? 1 / median : 0, Float(pixels)))])
-            try raster.encodeRaster(e, camera: cam, count: count, intersections: intersections, target: target,
-                                    background: .zero)
+        do {
+            try run("raster") { e in
+                e.dispatch(scale, threads: pixels, [.buffer(edgeMap), .value(SIMD2<Float>(median > 0 ? 1 / median : 0, Float(pixels)))])
+                try raster.encodeRaster(e, camera: cam, count: count, intersections: intersections, target: target,
+                                        background: .zero)
+            }
+            try run("loss") { e in
+                loss.encode(e, raw: target.image, target: targetImage, ppisp: uniforms)
+            }
+            let depthTarget = try lidarTarget(frame: frame, iteration: t)
+            try run("backward") { e in raster.encodeBackwardClear(e, count: count) }
+            for rows in GaussianRasterizer.backwardBands(tilesX: cam.tilesX, tilesY: cam.tilesY) {
+                try run("backward") { e in
+                    raster.encodeBackwardBlend(e, camera: cam, layout: model.layout, count: count, target: target, background: .zero,
+                                               imageGrad: loss.rawGrad, errorMap: loss.errorMap, edgeMap: edgeMap, lossSums: loss.sums,
+                                               depth: depthTarget, rows: rows)
+                }
+            }
+            try run("backward") { e in
+                raster.encodeProjectBackward(e, camera: cam, layout: model.layout, model: model.params, grads: model.grads, count: count)
+            }
+        } catch TrainingError.gpuFailure(let reason) {
+            // Nothing has touched the parameters yet (the backward pass overwrites the gradients),
+            // so a watchdog abort or transient GPU fault skips this view instead of ending the run.
+            model.adamStep -= 1
+            gpuSkipStreak += 1
+            if gpuSkipStreak >= 3 { throw TrainingError.gpuFailure(reason) }
+            return TrainingStepReport(iteration: t, frame: frame, loss: .nan, psnr: .nan, gaussians: model.activeCount,
+                                      seconds: Date().timeIntervalSince(started), skipped: true, refine: refineReport)
         }
-        try run("loss") { e in
-            loss.encode(e, raw: target.image, target: targetImage, ppisp: uniforms)
-        }
-        let depthTarget = try lidarTarget(frame: frame, iteration: t)
-        try run("backward") { e in
-            raster.encodeBackward(e, camera: cam, layout: model.layout, model: model.params, grads: model.grads,
-                                  count: count, target: target, background: .zero, imageGrad: loss.rawGrad,
-                                  errorMap: loss.errorMap, edgeMap: edgeMap, lossSums: loss.sums, depth: depthTarget)
-        }
+        gpuSkipStreak = 0
         try run("adam") { e in
             let lrs: [Float] = [strategy.meansLR(at: t), strategy.scalesLR(at: t), Float(MRNFConstants.rotationLR),
                                 Float(MRNFConstants.opacityLR), Float(MRNFConstants.sh0LR), Float(MRNFConstants.shNLR)]
@@ -602,6 +693,9 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
     /// exposure difference, like LichtFeld's evaluation without a controller). `alignSteps` > 0
     /// first aligns each held-out camera to the frozen model (test-time pose optimisation), the
     /// fair comparison when training refined the other poses.
+    /// Test-time pose corrections of held-out views from the last aligned evaluation.
+    private(set) var heldOutAlignment: [Int: PoseCorrection] = [:]
+
     func evaluate(frames: [Int]? = nil, alignSteps: Int = 0, captureMotion: Bool = true) throws -> (psnr: Double, ssim: Double, count: Int) {
         let list = frames ?? dataset.validationFrames
         guard !list.isEmpty, model.count > 0 else { return (0, 0, 0) }
@@ -638,6 +732,7 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
                 if aligning { correction.update(poseGradient: raster.poseGradient, base: base, learningRate: 3e-4) }
             }
             guard ok else { continue }
+            if heldOut && alignSteps > 0 { heldOutAlignment[index] = correction }
             let v = loss.values
             psnr += v.psnr; ssim += v.ssim; n += 1
         }
@@ -645,13 +740,19 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
     }
 
     /// Held-out PSNR/SSIM when rendering at `scale` × the training resolution against photos
-    /// downsampled to the same size (zoomed-out views; this is where the mip filter matters).
-    func evaluate(scale: Double, frames: [Int]? = nil) throws -> (psnr: Double, ssim: Double, count: Int) {
+    /// downsampled to the same size: zoomed-out views (where the mip filter matters) or, above 1,
+    /// the photos' own resolution (detail the training resolution cannot hold). `aligned` reuses
+    /// the test-time pose corrections of the last aligned evaluation. Larger renders get their
+    /// own rasterizer (evaluation tools only; the training plan does not include it).
+    func evaluate(scale: Double, frames: [Int]? = nil, aligned: Bool = false) throws -> (psnr: Double, ssim: Double, count: Int) {
         let list = frames ?? dataset.validationFrames
         guard !list.isEmpty, model.count > 0 else { return (0, 0, 0) }
         let w = max(16, Int((Double(dataset.width) * scale).rounded())), h = max(16, Int((Double(dataset.height) * scale).rounded()))
         let scaledLoss = try GaussianLossEvaluator(metal: metal, width: w, height: h)
         let scaledTarget = try GaussianRenderTarget(metal: metal, width: w, height: h)
+        let raster = scale > 1 ? try GaussianRasterizer(metal: metal, capacity: model.capacity,
+                                                        intersectionCapacity: Int(Double(self.raster.intersectionCapacity) * scale * scale),
+                                                        maxTiles: 65_536) : self.raster
         let photo = try metal.buffer(w * h * 4)
         var psnr = 0.0, ssim = 0.0, n = 0
         for index in list {
@@ -659,7 +760,11 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
             pixels.withUnsafeBytes { photo.contents().copyMemory(from: $0.baseAddress!, byteCount: w * h * 4) }
             let f = dataset.frames[index]
             let sx = Double(w) / Double(f.intrinsics.width), sy = Double(h) / Double(f.intrinsics.height)
-            var cam = GaussianCamera(worldToCamera: GaussianCamera.worldToCamera(arkitRowMajorC2W: f.transform),
+            var w2c = GaussianCamera.worldToCamera(arkitRowMajorC2W: f.transform)
+            if aligned, let correction = f.isValidation ? heldOutAlignment[index] : (configuration.poseOptimization ? poses[index] : nil) {
+                w2c = correction.matrix * w2c
+            }
+            var cam = GaussianCamera(worldToCamera: w2c,
                                      fx: f.intrinsics.fx * sx, fy: f.intrinsics.fy * sy, cx: f.intrinsics.cx * sx, cy: f.intrinsics.cy * sy,
                                      width: w, height: h, mipFilter: configuration.mipFilter)
             cam.sh = SIMD4(UInt32(activeDegree), UInt32((configuration.shDegree + 1) * (configuration.shDegree + 1)), UInt32(model.count), 0)

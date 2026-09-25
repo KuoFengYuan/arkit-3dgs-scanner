@@ -50,6 +50,9 @@ struct CaptureView: View {
                               showFurniture: $controller.showPlanFurniture)
             }
         }
+        // Capture needs the camera, AR tracking and the GPU: 3DGS training waits meanwhile.
+        .onAppear { TrainingCenter.shared.setCapturing(true) }
+        .onDisappear { TrainingCenter.shared.setCapturing(false) }
         .onChange(of: scenePhase) { _, phase in
             // 系統權限提示的 inactive 不等於離開 App。
             if phase == .background { controller.sceneActivityChanged(isActive: false) }

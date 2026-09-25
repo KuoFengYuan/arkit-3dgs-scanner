@@ -13,6 +13,8 @@ nonisolated struct TrainingRecord: Codable, Equatable, Sendable {
     /// Why training stopped or paused; language-independent (the UI localises it).
     enum Reason: String, Codable, Sendable {
         case user, background, thermal, battery, memory, overflow, error, completed
+        /// A capture is running (camera, AR tracking and fusion need the GPU and memory).
+        case capture
     }
 
     var status: Status
@@ -32,7 +34,13 @@ nonisolated struct TrainingRecord: Codable, Equatable, Sendable {
     var plannedMB: Int?
 
     var totalIterations: Int { configuration.iterations }
-    var progress: Double { Double(iteration) / Double(max(1, totalIterations)) }
+    /// Progress of this run (an enhancement counts from the saved model's iteration).
+    var progress: Double {
+        let start = configuration.startIteration
+        return Double(max(0, iteration - start)) / Double(max(1, totalIterations - start))
+    }
+    /// A completed run that was finished before its planned iterations.
+    var finishedEarly: Bool { status == .completed && iteration < totalIterations }
 }
 
 /// Files of the on-device training of one scan, inside the scan directory:

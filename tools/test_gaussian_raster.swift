@@ -334,6 +334,25 @@ enum Reference {
             } }
             print("  pose gradient worst relative error \(poseWorst)")
             check(poseWorst < 0.05, "camera pose gradient matches finite differences (\(label))")
+            // Replaying the tiles one row per command buffer (as large images do) gives the same gradients.
+            let single = Array(UnsafeBufferPointer(start: g, count: layout.totalFloats)), singlePose = pose
+            let bands = GaussianRasterizer.backwardBands(tilesX: camera.tilesX, tilesY: camera.tilesY, maxTiles: camera.tilesX)
+            func submit(_ body: (MTLComputeCommandEncoder) -> Void) {
+                let cb = metal.queue.makeCommandBuffer()!, e = cb.makeComputeCommandEncoder()!
+                body(e); e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+            }
+            submit { raster.encodeBackwardClear($0, count: gs.count) }
+            for rows in bands {
+                submit { raster.encodeBackwardBlend($0, camera: camera, layout: layout, count: gs.count, target: target,
+                                                   background: SIMD3<Float>(background), imageGrad: imageGrad, errorMap: zeros,
+                                                   edgeMap: zeros, lossSums: zeros, depth: depthTarget, rows: rows) }
+            }
+            submit { raster.encodeProjectBackward($0, camera: camera, layout: layout, model: model, grads: grads, count: gs.count) }
+            let banded = Array(UnsafeBufferPointer(start: g, count: layout.totalFloats)) + raster.poseGradient
+            var bandWorst: Float = 0
+            for (a, b) in zip(single + singlePose, banded) { bandWorst = max(bandWorst, abs(a - b) / max(abs(a), abs(b), 1e-3)) }
+            check(bands.count == camera.tilesY && bandWorst < 1e-4,
+                  "banded backward pass matches the single pass (\(label), \(bands.count) bands, worst \(bandWorst))")
         }
         print("\(checks) rasterizer checks passed")
     }

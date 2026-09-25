@@ -254,18 +254,46 @@ nonisolated final class GaussianRasterizer: @unchecked Sendable {
                         model: MTLBuffer, grads: MTLBuffer, count: Int, target: GaussianRenderTarget,
                         background: SIMD3<Float>, imageGrad: MTLBuffer, errorMap: MTLBuffer, edgeMap: MTLBuffer,
                         lossSums: MTLBuffer, depth: DepthTarget? = nil) {
-        let cam = Self.bind(camera, layout: layout, count: count)
+        encodeBackwardClear(encoder, count: count)
+        encodeBackwardBlend(encoder, camera: camera, layout: layout, count: count, target: target, background: background,
+                            imageGrad: imageGrad, errorMap: errorMap, edgeMap: edgeMap, lossSums: lossSums, depth: depth,
+                            rows: 0..<camera.tilesY)
+        if skipProjectBackward { return }
+        encodeProjectBackward(encoder, camera: camera, layout: layout, model: model, grads: grads, count: count)
+    }
+
+    /// The backward pass in three parts, so large images can replay their tiles in bands of rows
+    /// with one command buffer each (`backwardBands`).
+    func encodeBackwardClear(_ encoder: MTLComputeCommandEncoder, count: Int) {
         encoder.dispatch(clearF, threads: count * Self.grad2DStride, [.buffer(grad2d), .u32(UInt32(count * Self.grad2DStride))])
         encoder.dispatch(clearF, threads: 16, [.buffer(poseGrad), .u32(16)])
-        encoder.dispatch(backwardBlend, groups: (camera.tilesX, camera.tilesY), size: (16, 16),
+    }
+
+    func encodeBackwardBlend(_ encoder: MTLComputeCommandEncoder, camera: GaussianCamera, layout: GaussianLayout, count: Int,
+                             target: GaussianRenderTarget, background: SIMD3<Float>, imageGrad: MTLBuffer, errorMap: MTLBuffer,
+                             edgeMap: MTLBuffer, lossSums: MTLBuffer, depth: DepthTarget?, rows: Range<Int>) {
+        guard !rows.isEmpty else { return }
+        let cam = Self.bind(camera, layout: layout, count: count)
+        encoder.dispatch(backwardBlend, groups: (camera.tilesX, rows.count), size: (16, 16),
                          [.value(cam), .buffer(tileRanges), .buffer(values), .buffer(pixels), .buffer(conics),
                           .buffer(colors), .buffer(target.image), .buffer(target.lastIndex),
                           .value(SIMD4<Float>(background, 0)), .buffer(imageGrad), .buffer(grad2d),
                           .buffer(errorMap), .buffer(edgeMap), .buffer(lossSums), .buffer(depth?.buffer ?? noLidar),
-                          .value(depth.map { SIMD4<Float>($0.weight, Float($0.width), Float($0.height), 1) } ?? SIMD4<Float>(0, 1, 1, 0))])
-        if skipProjectBackward { return }
+                          .value(depth.map { SIMD4<Float>($0.weight, Float($0.width), Float($0.height), 1) } ?? SIMD4<Float>(0, 1, 1, 0)),
+                          .u32(UInt32(rows.lowerBound))])
+    }
+
+    func encodeProjectBackward(_ encoder: MTLComputeCommandEncoder, camera: GaussianCamera, layout: GaussianLayout,
+                               model: MTLBuffer, grads: MTLBuffer, count: Int) {
+        let cam = Self.bind(camera, layout: layout, count: count)
         encoder.dispatch(projectBack, threads: count, [.value(cam), .value(layout), .buffer(model), .buffer(grad2d),
                                                        .buffer(tiles), .buffer(grads), .buffer(poseGrad)])
+    }
+
+    /// Tile-row bands of at most ~2,048 tiles (two bands at 960 × 720, six at 1920 × 1440).
+    static func backwardBands(tilesX: Int, tilesY: Int, maxTiles: Int = 2_048) -> [Range<Int>] {
+        let rows = max(1, maxTiles / max(1, tilesX))
+        return Swift.stride(from: 0, to: tilesY, by: rows).map { $0..<min(tilesY, $0 + rows) }
     }
     var skipProjectBackward = false
 

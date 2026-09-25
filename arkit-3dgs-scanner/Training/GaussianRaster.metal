@@ -388,7 +388,8 @@ kernel void rasterize_backward(constant CameraParams& cam [[buffer(0)]],
                                device const float* lossSums [[buffer(13)]],  // [2] = sum of the error map
                                device const float* lidar [[buffer(14)]],     // LiDAR depth (m), 0 = unusable
                                constant float4& depthLoss [[buffer(15)]],    // weight per pixel, width, height, on
-                               uint2 tile [[threadgroup_position_in_grid]],
+                               constant uint& tileRowOffset [[buffer(16)]],  // first tile row of this band
+                               uint2 groupTile [[threadgroup_position_in_grid]],
                                uint2 local [[thread_position_in_threadgroup]],
                                uint tid [[thread_index_in_threadgroup]],
                                uint lane [[thread_index_in_simdgroup]],
@@ -397,6 +398,10 @@ kernel void rasterize_backward(constant CameraParams& cam [[buffer(0)]],
     // (no atomics); after the batch one thread per Gaussian adds the 8 partial sums and writes
     // them to device memory once per tile.
     constexpr uint kBatch = 64;
+    // Large images are replayed in bands of tile rows, one command buffer each, so no single
+    // command buffer runs long enough for the GPU watchdog to abort it.
+    const uint2 tile = uint2(groupTile.x, groupTile.y + tileRowOffset);
+    if (tile.y >= cam.dims.w) return;
     threadgroup float2 sPixel[kBatch];
     threadgroup float4 sConic[kBatch];
     threadgroup float4 sColor[kBatch];

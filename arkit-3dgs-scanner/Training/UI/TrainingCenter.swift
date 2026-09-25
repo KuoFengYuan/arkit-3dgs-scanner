@@ -3,6 +3,7 @@
 import SwiftUI
 import UIKit
 import Combine
+import BackgroundTasks
 
 /// A Bool shared between the main thread and the training thread.
 nonisolated final class LockedFlag: @unchecked Sendable {
@@ -31,6 +32,11 @@ final class TrainingCenter: ObservableObject {
     @Published private(set) var initialDepth = 1.5
     /// Bumped whenever a run ends so History re-reads training states.
     @Published private(set) var revision = 0
+    /// Training keeps running when the app leaves the foreground (a continued-processing task
+    /// with background GPU access is active, iOS 26+); otherwise it pauses with a checkpoint.
+    @Published private(set) var continuesInBackground = false
+    /// A capture is on screen; training pauses meanwhile.
+    private var capturing = false
 
     private var session: GaussianTrainingSession?
     private var observers: [NSObjectProtocol] = []
@@ -49,7 +55,11 @@ final class TrainingCenter: ObservableObject {
             MainActor.assumeIsolated { self?.leaveForeground() }
         })
         observers.append(center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.session?.setBackgrounded(false); self?.endBackgroundTask() }
+            MainActor.assumeIsolated {
+                self?.session?.setAppInBackground(false)
+                self?.session?.setBackgrounded(false)
+                self?.endBackgroundTask()
+            }
         })
         observers.append(center.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.session?.memoryPressure(critical: false) }
@@ -81,6 +91,11 @@ final class TrainingCenter: ObservableObject {
 
     private func leaveForeground() {
         guard let session else { return }
+        if continuesInBackground {
+            // The system granted background GPU time: keep training, without live previews.
+            session.setAppInBackground(true)
+            return
+        }
         session.setBackgrounded(true)
         if backgroundTask == .invalid {
             backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "gaussian-checkpoint") { [weak self] in
@@ -130,10 +145,13 @@ final class TrainingCenter: ObservableObject {
         self.session = session
         activeScan = scan
         self.configuration = configuration
-        snapshot = TrainingSnapshot(phase: .preparing, iteration: 0, total: configuration.iterations)
+        snapshot = TrainingSnapshot(phase: .preparing, iteration: configuration.startIteration, total: configuration.iterations,
+                                    startIteration: configuration.startIteration)
         frame = nil
         views = []
         UIApplication.shared.isIdleTimerDisabled = true
+        session.setCapturing(capturing)
+        if #available(iOS 26.0, *) { beginContinuedProcessing(total: configuration.runIterations) }
         let thread = Thread { session.run() }
         thread.name = "gaussian-training"
         thread.qualityOfService = .userInitiated
@@ -144,8 +162,11 @@ final class TrainingCenter: ObservableObject {
 
     private func receive(_ snapshot: TrainingSnapshot) {
         self.snapshot = snapshot
-        if snapshot.phase == .completed, let configuration, snapshot.total > 0 {
-            TrainingSpeedHistory.record(configuration.preset, secondsPerIteration: snapshot.elapsedSeconds / Double(snapshot.total))
+        if #available(iOS 26.0, *) { reportContinuedProgress(snapshot) }
+        // Speeds come from full new runs: early finishes and enhancements train a different mix.
+        if snapshot.phase == .completed, let configuration, !configuration.isEnhancement,
+           snapshot.total > 0, snapshot.iteration >= snapshot.total {
+            TrainingSpeedHistory.record(configuration, secondsPerIteration: snapshot.elapsedSeconds / Double(snapshot.total))
         }
         switch snapshot.phase {
         case .completed, .failed, .cancelled:
@@ -163,9 +184,88 @@ final class TrainingCenter: ObservableObject {
         }
     }
 
+    /// Pauses training while a capture is open (and resumes when it closes).
+    func setCapturing(_ value: Bool) {
+        capturing = value
+        session?.setCapturing(value)
+    }
+
     func pause() { session?.pause() }
-    func resume() { session?.resumeTraining() }
+    func resume() {
+        session?.resumeTraining()
+        // Resuming is a user action, so background time can be requested again after it expired.
+        if #available(iOS 26.0, *), session != nil, continuedTask == nil, let configuration {
+            beginContinuedProcessing(total: configuration.runIterations)
+        }
+    }
     func checkpoint() { session?.saveCheckpoint() }
+    func finishNow() { session?.finishNow() }
     func cancel(keepCheckpoint: Bool) { session?.cancel(keepCheckpoint: keepCheckpoint) }
     func updateViewer(_ request: ViewerRequest?, interactive: Bool) { session?.updateViewer(request, interactive: interactive) }
+
+    // MARK: Background continuation (iOS 26+)
+
+    /// The running continued-processing task (`BGContinuedProcessingTask`).
+    private var continuedTask: AnyObject?
+    private var reportedPercent = -1
+
+    /// Asks the system to keep this user-started run going if the app leaves the foreground.
+    /// Needs background GPU support on the device and the Background GPU Access capability
+    /// (paid developer teams); without either the submission fails and training pauses in the
+    /// background as before.
+    @available(iOS 26.0, *)
+    private func beginContinuedProcessing(total: Int) {
+        guard BGTaskScheduler.supportedResources.contains(.gpu), let bundle = Bundle.main.bundleIdentifier else { return }
+        let identifier = "\(bundle).training.\(UUID().uuidString)"
+        let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: .main) { [weak self] task in
+            MainActor.assumeIsolated {
+                guard let task = task as? BGContinuedProcessingTask, let self, self.session != nil else {
+                    task.setTaskCompleted(success: false)
+                    return
+                }
+                task.progress.totalUnitCount = Int64(max(1, total))
+                task.expirationHandler = { [weak self] in
+                    DispatchQueue.main.async { self?.continuedProcessingExpired() }
+                }
+                self.continuedTask = task
+                self.continuesInBackground = true
+                self.reportedPercent = -1
+            }
+        }
+        guard registered else { return }
+        let request = BGContinuedProcessingTaskRequest(identifier: identifier, title: L10n.text("訓練 3DGS"),
+                                                       subtitle: L10n.text("讀取照片與點雲"))
+        request.strategy = .fail
+        request.requiredResources = .gpu
+        do { try BGTaskScheduler.shared.submit(request) } catch { continuesInBackground = false }
+    }
+
+    @available(iOS 26.0, *)
+    private func reportContinuedProgress(_ snapshot: TrainingSnapshot) {
+        guard let task = continuedTask as? BGContinuedProcessingTask else { return }
+        task.progress.totalUnitCount = Int64(max(1, snapshot.total - snapshot.startIteration))
+        task.progress.completedUnitCount = Int64(max(0, min(snapshot.iteration, snapshot.total) - snapshot.startIteration))
+        let percent = TrainingPresentation.percent(snapshot)
+        if percent != reportedPercent {
+            reportedPercent = percent
+            task.updateTitle(L10n.text("訓練 3DGS"), subtitle: "\(percent)%・\(TrainingPresentation.stage(snapshot))")
+        }
+        switch snapshot.phase {
+        case .completed, .failed, .cancelled: endContinuedProcessing(success: snapshot.phase == .completed)
+        default: break
+        }
+    }
+
+    /// The system ended the background time (or the user cancelled it from the system UI):
+    /// pause with a checkpoint if the app is still in the background.
+    private func continuedProcessingExpired() {
+        if UIApplication.shared.applicationState != .active { session?.setBackgrounded(true) }
+        endContinuedProcessing(success: false)
+    }
+
+    private func endContinuedProcessing(success: Bool) {
+        if #available(iOS 26.0, *), let task = continuedTask as? BGContinuedProcessingTask { task.setTaskCompleted(success: success) }
+        continuedTask = nil
+        continuesInBackground = false
+    }
 }
