@@ -26,6 +26,9 @@ which are licensed for non-commercial use only, nor from LichtFeld Studio
 - PPISP, Physically-Plausible ISP (https://github.com/nv-tlabs/ppisp, Apache-2.0)
 - Gaussian Splatting on the Move (Seiskari et al., 2024) for the experimental
   capture-motion model
+- Speedy-Splat (Hanson et al., 2025) for the idea of listing a splat only in the
+  tiles it actually intersects
+- Taming 3DGS (Mallick et al., 2024) for the sparse Adam tested as an experiment
 
 Third-party patents may cover some of these methods. This notice is not legal
 advice; check before commercial use.

@@ -122,17 +122,16 @@ stateDiagram-v2
 
 ## One iteration
 
-`GaussianTrainer.step()` trains on one view from a shuffled epoch order. Each numbered stage is one command buffer.
+`GaussianTrainer.step()` trains on one view from a shuffled epoch order. Each numbered stage is one command buffer; the backward pass is one per band.
 
 | Stage | Where | Work (kernels) |
 | --- | --- | --- |
-| Refine | CPU | Every `refineEvery` iterations while refining: `MRNFStrategy.refine` edits rows in the shared buffers (prune, replace, grow, hole seeds, bounds). The GPU is idle meanwhile |
-| 1. Project | GPU | Fold the last backward pass into the statistics and add position noise (`mrnf_fold`, `mrnf_noise`). Build the photo's edge map (`edge_blur`, `edge_sobel_nms`). Project every Gaussian: EWA covariance, SH colour, Mip filter, optional capture motion (`project_forward`). Sort by depth (`iota_uint`, 32-bit radix). Scan tile counts (`gather_uint`, `scan_block`, `scan_add`). Record screen share (`screen_share`) |
+| Refine | CPU | Every `refineEvery` iterations while refining: `MRNFStrategy.refine` edits rows in the shared buffers (prune, replace, grow up to the growth-ramp ceiling, hole seeds, bounds, and the optional relocation). The GPU is idle meanwhile |
+| 1. Project | GPU | Fold the last backward pass into the statistics and add position noise (`mrnf_fold`, `mrnf_noise`). Build the photo's edge map (`edge_blur`, `edge_sobel_nms`). Project every Gaussian: EWA covariance, SH colour, Mip filter, optional capture motion, and the number of tiles its ellipse actually reaches, row by row (`project_forward`). Sort by depth (`iota_uint`, 32-bit radix). Scan tile counts (`gather_uint`, `scan_block`, `scan_add`). Record screen share (`screen_share`) |
 | Read back | CPU | Intersection count. Over capacity: skip the view and stop growth |
-| 2. Raster | GPU | Normalise the edge map (`scale_float`). Emit (tile, Gaussian) pairs (`emit_intersections`). Stable 16-bit tile sort (depth order is kept). Find tile ranges (`tile_ranges`). Blend front to back in 16 × 16 tiles, with depth (`rasterize_forward`) |
-| 3. Loss | GPU | Optional PPISP (`ppisp_forward`). 0.8 · L1 + 0.2 · D-SSIM (`ssim_forward`, `ssim_backward`). Gradients back through PPISP (`ppisp_backward`). The MRNF error map |
-| 4. Backward | GPU | Clear gradients. Replay each tile in reverse in bands of at most 2,048 tiles, one command buffer each: six bands at 1,920 × 1,440 (`rasterize_backward`, with the LiDAR depth loss). Screen-space to 3D parameter and camera-pose gradients (`project_backward`) |
-| 5. Adam | GPU | `adam_step` for the six parameter groups, with the MRNF opacity regulariser, the refining scale mode and the screen-share penalty |
+| 2. Forward | GPU | Normalise the edge map (`scale_float`). Emit (tile, Gaussian) pairs for the tiles each ellipse reaches (`emit_intersections`, `tileRowSpan`). Stable 16-bit tile sort (depth order is kept). Find tile ranges (`tile_ranges`). Blend front to back in 16 × 16 tiles, with depth (`rasterize_forward`). Then the loss in the same command buffer: optional PPISP (`ppisp_forward`), 0.8 · L1 + 0.2 · D-SSIM (`ssim_forward`, `ssim_backward`), gradients back through PPISP (`ppisp_backward`), and the MRNF error map. The CPU prepares the view's LiDAR target meanwhile |
+| 3. Backward | GPU | Replay each tile in reverse in bands of at most 2,048 tiles, one command buffer each; the first also clears the gradients. Two bands at 960 × 720, six at 1,920 × 1,440 (`rasterize_backward`, with the LiDAR depth loss). Each SIMD group sums its 32 pixels' 13 values per Gaussian with 16 shuffles (`simdSum16`) and adds them with device atomics. Then screen-space to 3D parameter and camera-pose gradients (`project_backward`), and while refining the relocation statistics of this view (`relocation_fold`), before a preview render can replace its tile counts |
+| 4. Adam | GPU | `adam_step` for the six parameter groups, with the MRNF opacity regulariser, the refining scale mode and the screen-share penalty |
 | Update | CPU | PPISP gradient and Adam (9 parameters per frame, 27 per camera). The view's pose correction Adam step, once pose refinement has started |
 
 Growth, SH degree, learning rates, pose refinement and PPISP warm-up all follow `MRNFSchedule`, which scales LichtFeld Studio's 30,000-iteration timings to the run length.
@@ -152,7 +151,7 @@ Growth, SH degree, learning rates, pose refinement and PPISP warm-up all follow 
   | shN | 3 · ((d + 1)² − 1) | higher bands, 45 at degree 3 |
 
   That is 59 floats per Gaussian at SH degree 3.
-- `stats` holds six per-row planes: visibility, error maximum, edge sum, share maximum, current share, active.
+- `stats` holds nine per-row planes: visibility, error maximum, edge sum, share maximum, current share, active, and for relocation the views that reached the row, the error sum and the count of consecutive low-contribution windows. All but the last restart at every refine.
 - **Capacity:** fixed from the memory plan. Pruned rows get a zero quaternion, which the rasterizer culls, and are refilled before the model grows, so densification never allocates.
 
 **Rasterizer:**
@@ -206,7 +205,7 @@ This is about 1.3 KB in total, or about 730 MiB for 600,064 Gaussians. The image
 
 **`checkpoint.gsck` contents:**
 - **Header:** configuration, dataset signature, iteration, epoch position, rows, Adam step, `MRNFStrategy`, `PPISPModel`, pose corrections and elapsed time.
-- **Payload:** every live row's parameters with both Adam moments and four statistics planes.
+- **Payload:** every live row's parameters with both Adam moments and seven statistics planes (format version 2). Version 1 files, with four planes, still resume; the three relocation planes then start at zero.
 - **Integrity:** a 64-bit FNV-1a checksum and an end marker, so a truncated or damaged file is refused.
 - **Signature:** a hash of the resolution and every frame's id, image, hold-out flag, intrinsics and pose. A checkpoint resumes only on the same inputs.
 
@@ -229,7 +228,7 @@ Run `bash tools/test_gaussian_training.sh`; it builds and runs all of the tests 
 | --- | --- |
 | `tools/test_gaussian_raster.swift` | Forward against a double-precision CPU reference; parameter and pose gradients by finite differences (Mip filter, capture motion, LiDAR depth loss); banded backward equals one pass (20 checks) |
 | `tools/test_gaussian_loss.swift` | Loss, image and PPISP gradients (7 checks) |
-| `tools/test_gaussian_training.swift` | 51 end-to-end checks: memory plan, resolution tiers, MRNF, export frame, convergence, enhancement, PPISP, poses, capture motion, depth seeds, hole filling, checkpoints, the session state machine, the viewer, archives, and a 1,200-frame run. `GS_ONLY=session,enhancement` runs a subset |
+| `tools/test_gaussian_training.swift` | 59 end-to-end checks: memory plan, resolution tiers, MRNF with the growth ramp and relocation, export frame, convergence, enhancement, PPISP, poses, capture motion, depth seeds, hole filling, checkpoints (including version 1), the session state machine, the viewer, archives, and a 1,200-frame run. `GS_ONLY=session,enhancement` runs a subset |
 | `tools/train_gaussians.swift` | Replays a real scan on the Mac GPU with every experiment switch, for example `--long-edge`, `--align-eval`, `--eval-full-res`, `--holdout-segment`, `--save-model`, `--enhance-from`, `--depth-loss`, `--per-frame` |
 
 Mac results say nothing about iPhone speed, memory or heat. Those need device runs.

@@ -13,6 +13,8 @@ constant uint kStatEdgeSum = 2;      // sum over views of the normalised edge sc
 constant uint kStatShareMax = 3;     // max screen share over the refine window
 constant uint kStatShareNow = 4;     // screen share in the current view
 constant uint kStatActive = 5;       // 1 = live row, 0 = free slot
+constant uint kStatViews = 6;        // views of the refine window whose frustum reached the row
+constant uint kStatErrorSum = 7;     // sum over views of the error-weighted footprint
 constant uint kGrad2DStride = 13;   // mirrors GaussianRasterizer.grad2DStride
 
 /// Mirrors `AdamParams` in Swift.
@@ -21,7 +23,8 @@ struct AdamParams {
     float biasCorrection1, biasCorrection2;   // 1 - beta^t
     uint offset, width;                        // group offset (floats) and floats per row
     uint rows, capacity, mode, skip;           // mode: 0 plain, 1 opacity reg, 2 scale hinge; skip: no update
-    float opacityReg, sharePenalty, shareLimit, unused;
+    float opacityReg, sharePenalty, shareLimit;
+    uint visibleOnly;                          // 1: skip rows the view did not reach
 };
 
 inline float sigmoidf(float x) { return 1.0f / (1.0f + exp(-x)); }
@@ -32,9 +35,11 @@ kernel void adam_step(device float* params [[buffer(0)]],
                       device float* v [[buffer(3)]],
                       device const float* stats [[buffer(4)]],
                       constant AdamParams& a [[buffer(5)]],
+                      device const uint* tiles [[buffer(6)]],
                       uint i [[thread_position_in_grid]]) {
     if (a.skip != 0 || i >= a.rows * a.width) return;
     const uint row = i / a.width;
+    if (a.visibleOnly != 0 && tiles[row] == 0) return;
     const uint index = a.offset + i;
     float g = grads[index];
     const bool active = stats[kStatActive * a.capacity + row] > 0.5f;
@@ -70,6 +75,20 @@ kernel void mrnf_fold(device const float* grad2d [[buffer(0)]],
     stats[kStatErrorMax * C + i] = max(stats[kStatErrorMax * C + i], g[10]);
     const float e = g[11] * edgeScale;
     if (isfinite(e)) stats[kStatEdgeSum * C + i] += e;
+}
+
+/// Relocation statistics of the backward pass that just ran, in its own command buffer (a
+/// preview render before the next step would replace `tiles`): views += 1 when the view's
+/// frustum reached the row, errorSum += sum w*E.
+kernel void relocation_fold(device const float* grad2d [[buffer(0)]],
+                            device float* stats [[buffer(1)]],
+                            constant uint2& countCapacity [[buffer(2)]],
+                            device const uint* tiles [[buffer(3)]],
+                            uint i [[thread_position_in_grid]]) {
+    if (i >= countCapacity.x) return;
+    const uint C = countCapacity.y;
+    if (tiles[i] > 0) stats[kStatViews * C + i] += 1.0f;
+    stats[kStatErrorSum * C + i] += grad2d[i * kGrad2DStride + 10];
 }
 
 /// Positive values of a per-row plane sampled at a fixed stride (for a median estimate).

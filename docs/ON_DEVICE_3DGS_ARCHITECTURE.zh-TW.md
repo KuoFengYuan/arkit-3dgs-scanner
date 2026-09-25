@@ -122,17 +122,16 @@ stateDiagram-v2
 
 ## 一次迭代
 
-`GaussianTrainer.step()` 依打亂後的 epoch 順序，每次訓練一個視角。每個編號階段是一個 command buffer。
+`GaussianTrainer.step()` 依打亂後的 epoch 順序，每次訓練一個視角。每個編號階段是一個 command buffer；反向傳播則是每段一個。
 
 | 階段 | 位置 | 工作（kernel） |
 | --- | --- | --- |
-| 密化 | CPU | 在密化期間每 `refineEvery` 次迭代，由 `MRNFStrategy.refine` 直接修改共用緩衝區中的列（修剪、替換、生長、補洞種子、範圍）。此時 GPU 閒置 |
-| 1. 投影 | GPU | 把上一次反向傳播併入統計並加上位置雜訊（`mrnf_fold`、`mrnf_noise`）。建立照片的邊緣圖（`edge_blur`、`edge_sobel_nms`）。投影每個高斯：EWA 共變異、SH 顏色、Mip 濾波、可選的拍攝運動（`project_forward`）。依深度排序（`iota_uint`、32 位元 radix）。計算 tile 數的前綴和（`gather_uint`、`scan_block`、`scan_add`）。記錄畫面佔比（`screen_share`） |
+| 密化 | CPU | 在密化期間每 `refineEvery` 次迭代，由 `MRNFStrategy.refine` 直接修改共用緩衝區中的列（修剪、替換、在成長漸進的上限內生長、補洞種子、範圍，以及可選的重新分配）。此時 GPU 閒置 |
+| 1. 投影 | GPU | 把上一次反向傳播併入統計並加上位置雜訊（`mrnf_fold`、`mrnf_noise`）。建立照片的邊緣圖（`edge_blur`、`edge_sobel_nms`）。投影每個高斯：EWA 共變異、SH 顏色、Mip 濾波、可選的拍攝運動，並逐列計算橢圓實際碰到的 tile 數（`project_forward`）。依深度排序（`iota_uint`、32 位元 radix）。計算 tile 數的前綴和（`gather_uint`、`scan_block`、`scan_add`）。記錄畫面佔比（`screen_share`） |
 | 讀回 | CPU | 交點數。超過容量時跳過這個視角並停止生長 |
-| 2. 光柵化 | GPU | 正規化邊緣圖（`scale_float`）。產生（tile, 高斯）配對（`emit_intersections`）。穩定的 16 位元 tile 排序（保留深度順序）。找出各 tile 的範圍（`tile_ranges`）。以 16 × 16 tile 由前往後混合，並輸出深度（`rasterize_forward`） |
-| 3. 損失 | GPU | 可選的 PPISP（`ppisp_forward`）。0.8 · L1 + 0.2 · D-SSIM（`ssim_forward`、`ssim_backward`）。梯度反向通過 PPISP（`ppisp_backward`）。MRNF 誤差圖 |
-| 4. 反向傳播 | GPU | 清除梯度。以每段最多 2,048 個 tile、每段一個 command buffer，逐 tile 反向重播；1,920 × 1,440 分成 6 段（`rasterize_backward`，含 LiDAR 深度損失）。從畫面空間算到 3D 參數與相機姿態的梯度（`project_backward`） |
-| 5. Adam | GPU | 六組參數的 `adam_step`，含 MRNF 不透明度正則、密化期間的尺度模式與畫面佔比懲罰 |
+| 2. 前向 | GPU | 正規化邊緣圖（`scale_float`）。只為每個橢圓實際碰到的 tile 產生（tile, 高斯）配對（`emit_intersections`、`tileRowSpan`）。穩定的 16 位元 tile 排序（保留深度順序）。找出各 tile 的範圍（`tile_ranges`）。以 16 × 16 tile 由前往後混合，並輸出深度（`rasterize_forward`）。接著在同一個 command buffer 算損失：可選的 PPISP（`ppisp_forward`）、0.8 · L1 + 0.2 · D-SSIM（`ssim_forward`、`ssim_backward`）、梯度反向通過 PPISP（`ppisp_backward`），以及 MRNF 誤差圖。CPU 同時準備這個視角的 LiDAR 深度 |
+| 3. 反向傳播 | GPU | 以每段最多 2,048 個 tile、每段一個 command buffer，逐 tile 反向重播；第一段同時清除梯度。960 × 720 分 2 段，1,920 × 1,440 分 6 段（`rasterize_backward`，含 LiDAR 深度損失）。每個 SIMD 群組以 16 次 shuffle 加總 32 個像素對每個高斯的 13 個值（`simdSum16`），再以 device atomic 累加。接著從畫面空間算到 3D 參數與相機姿態的梯度（`project_backward`）；密化期間也在這裡累加這個視角的重新分配統計（`relocation_fold`），免得之後的預覽渲染先覆寫它的 tile 數 |
+| 4. Adam | GPU | 六組參數的 `adam_step`，含 MRNF 不透明度正則、密化期間的尺度模式與畫面佔比懲罰 |
 | 更新 | CPU | PPISP 梯度與 Adam（每張影像 9 個參數、每台相機 27 個）。姿態微調開始後，對這個視角的姿態修正做一次 Adam 更新 |
 
 生長、SH 階數、學習率、姿態微調與 PPISP 的暖身都依 `MRNFSchedule`；它把 LichtFeld Studio 以 30,000 次迭代為準的時間點，按訓練長度等比例縮放。
@@ -152,7 +151,7 @@ stateDiagram-v2
   | shN | 3 · ((d + 1)² − 1) | 高階係數，3 階時為 45 |
 
   SH 3 階時每個高斯共 59 個 float。
-- `stats` 每列有六個平面：可見度、誤差最大值、邊緣總和、畫面佔比最大值、目前佔比、是否使用中。
+- `stats` 每列有九個平面：可見度、誤差最大值、邊緣總和、畫面佔比最大值、目前佔比、是否使用中，以及供重新分配使用的「畫面範圍涵蓋它的視角數」、誤差總和與「連續低貢獻視窗數」。除了最後一個，其餘在每次密化後歸零。
 - **容量：** 由記憶體配置固定。被修剪的列會設成零四元數，光柵化器會略過它們，並在模型成長前優先重新填入，所以密化永遠不會配置新記憶體。
 
 **光柵化器：**
@@ -206,7 +205,7 @@ stateDiagram-v2
 
 **`checkpoint.gsck` 的內容：**
 - **標頭：** 設定、資料集簽章、迭代、epoch 位置、列數、Adam 步數、`MRNFStrategy`、`PPISPModel`、姿態修正與已用時間。
-- **資料本體：** 每個使用中列的參數，連同兩組 Adam 動量與四個統計平面。
+- **資料本體：** 每個使用中列的參數，連同兩組 Adam 動量與七個統計平面（格式第 2 版）。只有四個平面的第 1 版檔案仍可續訓，三個重新分配用的平面從零開始。
 - **完整性：** 64 位元 FNV-1a 校驗碼與結尾標記，檔案被截斷或損毀時會拒絕讀取。
 - **簽章：** 由解析度，以及每個影格的 id、影像、是否保留、內參與姿態算出的雜湊值。檢查點只能在相同的輸入上續訓。
 
@@ -229,7 +228,7 @@ stateDiagram-v2
 | --- | --- |
 | `tools/test_gaussian_raster.swift` | 前向渲染對照雙精度 CPU 參考實作；以有限差分驗證參數與姿態梯度（Mip 濾波、拍攝運動、LiDAR 深度損失）；分段反向傳播與一次算完相同（20 項） |
 | `tools/test_gaussian_loss.swift` | 損失、影像與 PPISP 梯度（7 項） |
-| `tools/test_gaussian_training.swift` | 51 項端對端檢查：記憶體配置、解析度分級、MRNF、匯出座標、收斂、加強模型、PPISP、姿態、拍攝運動、深度種子、補洞、檢查點、工作階段狀態機、檢視器、壓縮檔，以及 1,200 張影像的訓練。`GS_ONLY=session,enhancement` 可只跑部分測試 |
+| `tools/test_gaussian_training.swift` | 59 項端對端檢查：記憶體配置、解析度分級、MRNF（含成長漸進與重新分配）、匯出座標、收斂、加強模型、PPISP、姿態、拍攝運動、深度種子、補洞、檢查點（含第 1 版）、工作階段狀態機、檢視器、壓縮檔，以及 1,200 張影像的訓練。`GS_ONLY=session,enhancement` 可只跑部分測試 |
 | `tools/train_gaussians.swift` | 在 Mac GPU 上重跑真實掃描，每個實驗都有開關，例如 `--long-edge`、`--align-eval`、`--eval-full-res`、`--holdout-segment`、`--save-model`、`--enhance-from`、`--depth-loss`、`--per-frame` |
 
 Mac 上的結果無法代表 iPhone 的速度、記憶體或發熱，這些都需要實機測試。

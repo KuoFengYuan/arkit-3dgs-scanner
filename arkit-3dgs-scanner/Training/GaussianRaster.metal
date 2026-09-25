@@ -198,6 +198,37 @@ inline bool projectGaussian(constant CameraParams& cam, float3 mean, float3 logS
     return true;
 }
 
+/// Tile columns [x, y) of tile row `ty` that a splat reaches: the ellipse of pixels where its
+/// alpha is at least 1/255, d^T Sigma^-1 d <= 2 ln(255 opacity) (`conic` = Sigma^-1 and the
+/// opacity), cut by the row's band of pixel centres and clipped to its bounding box [x0, x1).
+/// The box alone also lists the tiles its corners cross, which a rotated or elongated splat
+/// never touches; they would be sorted and blended for nothing. Within the band the ellipse's
+/// right edge is concave in dy (its maximum is the ellipse's rightmost point, clamped to the
+/// band) and its left edge convex, so each row costs O(1).
+inline int2 tileRowSpan(float2 centre, float4 conic, int ty, int x0, int x1) {
+    const float A = conic.x, B = conic.y, C = conic.z;
+    const float det = A * C - B * B;
+    if (!(det > 0) || !(conic.w > 0)) return int2(x0, x1);
+    // Covariance and the threshold, with a small margin so rounding never drops a pixel.
+    const float sxx = C / det, sxy = -B / det, syy = A / det;
+    const float r = 2.0f * log(255.0f * conic.w) * 1.001f + 1e-3f;
+    if (!(r > 0)) return int2(x0, x0);
+    const float ymax = sqrt(r * syy);
+    const float lo = max(float(ty) * float(kTile) + 0.5f - centre.y, -ymax);
+    const float hi = min(float(ty) * float(kTile) + float(kTile) - 0.5f - centre.y, ymax);
+    if (lo > hi) return int2(x0, x0);
+    // x(dy) = k dy +- sqrt(Sigma_x|y (r - dy^2 / Sigma_yy)); the rightmost point is at dy_R.
+    const float k = sxy / syy, conditional = max(sxx - sxy * k, 0.0f);
+    const float dyR = sxy * sqrt(r / sxx);
+    const float dR = clamp(dyR, lo, hi), dL = clamp(-dyR, lo, hi);
+    const float right = centre.x + k * dR + sqrt(max(0.0f, conditional * (r - dR * dR / syy)));
+    const float left = centre.x + k * dL - sqrt(max(0.0f, conditional * (r - dL * dL / syy)));
+    // Tile tx holds pixel centres 16 tx + 0.5 ... 16 tx + 15.5.
+    const int first = max(x0, int(ceil((left - float(kTile) + 0.5f) / float(kTile))));
+    const int last = min(x1, int(floor((right - 0.5f) / float(kTile))) + 1);
+    return int2(first, max(first, last));
+}
+
 /// Projection, 2D filter, SH colour and tile extent per Gaussian.
 kernel void project_forward(constant CameraParams& cam [[buffer(0)]],
                             constant ModelLayout& layout [[buffer(1)]],
@@ -230,7 +261,14 @@ kernel void project_forward(constant CameraParams& cam [[buffer(0)]],
     const int x1 = min(int(floor(hi.x)) + 1, int(cam.dims.z)), y1 = min(int(floor(hi.y)) + 1, int(cam.dims.w));
     if (x1 <= x0 || y1 <= y0) return;
     const float inv = 1.0f / p.detFiltered;
-    outConic[i] = float4(c.z * inv, -c.y * inv, c.x * inv, opacity);
+    const float4 conic = float4(c.z * inv, -c.y * inv, c.x * inv, opacity);
+    uint touched = 0;
+    for (int ty = y0; ty < y1; ++ty) {
+        const int2 span = tileRowSpan(p.pixel, conic, ty, x0, x1);
+        touched += uint(span.y - span.x);
+    }
+    if (touched == 0) return;
+    outConic[i] = conic;
     outPixel[i] = p.pixel;
     // View-dependent colour.
     const float3 dir = normalize(mean - cam.center.xyz);
@@ -242,13 +280,18 @@ kernel void project_forward(constant CameraParams& cam [[buffer(0)]],
     for (uint k = 1; k < count; ++k) rgb += basis[k] * load3(model + layout.shN + i * rest * 3, k - 1);
     rgb += 0.5f;
     outColor[i] = float4(max(rgb, 0.0f), p.camera.z);
-    outTiles[i] = uint((x1 - x0) * (y1 - y0));
+    outTiles[i] = touched;
     outRect[i] = uint4(x0, y0, x1, y1);
     outDepthKey[i] = as_type<uint>(p.camera.z);
 }
 
+/// Tile key that sorts after every real tile and is never blended (see `emit_intersections`).
+constant uint kUnusedTile = 0xFFFFu;
+
 /// Writes (tile id, Gaussian id) pairs in depth order; `order` lists Gaussians by depth and
-/// `offsets` is the exclusive scan of their tile counts in that order.
+/// `offsets` is the exclusive scan of their tile counts in that order. Each Gaussian writes
+/// exactly the `tiles` entries `project_forward` counted: the row spans are recomputed here,
+/// and should rounding ever give fewer, the rest are `kUnusedTile` entries no tile reads.
 kernel void emit_intersections(device const uint* order [[buffer(0)]],
                                device const uint* offsets [[buffer(1)]],
                                device const uint4* rects [[buffer(2)]],
@@ -256,20 +299,27 @@ kernel void emit_intersections(device const uint* order [[buffer(0)]],
                                device uint* keys [[buffer(4)]],
                                device uint* values [[buffer(5)]],
                                constant uint4& info [[buffer(6)]],      // count, tilesX, capacity
+                               device const float2* pixels [[buffer(7)]],
+                               device const float4* conics [[buffer(8)]],
                                uint k [[thread_position_in_grid]]) {
     if (k >= info.x) return;
     const uint g = order[k];
-    if (tiles[g] == 0) return;
+    const uint n = tiles[g];
+    if (n == 0) return;
     const uint4 r = rects[g];
+    const float2 centre = pixels[g];
+    const float4 conic = conics[g];
     uint offset = offsets[k];
-    for (uint y = r.y; y < r.w; ++y) {
-        for (uint x = r.x; x < r.z; ++x) {
-            if (offset >= info.z) return;
-            keys[offset] = y * info.y + x;
+    const uint end = min(offset + n, info.z);
+    for (uint y = r.y; y < r.w && offset < end; ++y) {
+        const int2 span = tileRowSpan(centre, conic, int(y), int(r.x), int(r.z));
+        for (int x = span.x; x < span.y && offset < end; ++x) {
+            keys[offset] = y * info.y + uint(x);
             values[offset] = g;
             ++offset;
         }
     }
+    for (; offset < end; ++offset) { keys[offset] = kUnusedTile; values[offset] = g; }
 }
 
 kernel void clear_uint2(device uint2* values [[buffer(0)]], constant uint& count [[buffer(1)]],
@@ -291,6 +341,7 @@ kernel void tile_ranges(device const uint* keys [[buffer(0)]],
                         uint i [[thread_position_in_grid]]) {
     if (i >= count) return;
     const uint tile = keys[i];
+    if (tile == kUnusedTile) return;
     if (i == 0 || keys[i - 1] != tile) ranges[2 * tile] = i;
     if (i == count - 1 || keys[i + 1] != tile) ranges[2 * tile + 1] = i + 1;
 }
@@ -370,6 +421,28 @@ kernel void rasterize_forward(constant CameraParams& cam [[buffer(0)]],
 /// blending weight T*alpha. The last three drive MRNF's error- and edge-guided densification.
 constant uint kGrad2DStride = 13;   // mirrors GaussianRasterizer.grad2DStride
 
+/// One step of `simdSum16`: a lane keeps `W` of its 2W values, adding its partner's copies.
+template <uint W>
+inline void simdHalve(thread float* v, uint lane) {
+    const bool upper = (lane & (2 * W)) != 0;
+    for (uint i = 0; i < W; ++i) {
+        const float send = upper ? v[i] : v[i + W];
+        const float keep = upper ? v[i + W] : v[i];
+        v[i] = keep + simd_shuffle_xor(send, ushort(2 * W));
+    }
+}
+
+/// Sums 16 values over a 32-lane SIMD group with 16 shuffles instead of 16 `simd_sum` calls
+/// (80): each step halves the values a lane keeps and swaps the other half with its partner.
+/// Returns, in lanes 2k and 2k + 1, the total of value k. `v` is overwritten.
+inline float simdSum16(thread float* v, uint lane) {
+    simdHalve<8>(v, lane);
+    simdHalve<4>(v, lane);
+    simdHalve<2>(v, lane);
+    simdHalve<1>(v, lane);
+    return v[0] + simd_shuffle_xor(v[0], ushort(1));
+}
+
 /// Reverse replay of the blend. `imageGrad` holds dL/d(rgb) of the raw render; `pixelError`
 /// is the normalised per-pixel error map and `edges` the edge map of the target image.
 kernel void rasterize_backward(constant CameraParams& cam [[buffer(0)]],
@@ -394,9 +467,10 @@ kernel void rasterize_backward(constant CameraParams& cam [[buffer(0)]],
                                uint tid [[thread_index_in_threadgroup]],
                                uint lane [[thread_index_in_simdgroup]],
                                uint simd [[simdgroup_index_in_threadgroup]]) {
-    // Batches of 64 Gaussians. Each SIMD group writes its per-Gaussian sums to its own slot
-    // (no atomics); after the batch one thread per Gaussian adds the 8 partial sums and writes
-    // them to device memory once per tile.
+    // Batches of 64 Gaussians. Each SIMD group sums its 32 pixels' values for a Gaussian with
+    // `simdSum16` and adds them to device memory with one atomic per value. Summing the 8 SIMD
+    // groups in threadgroup memory first (26 KB) was slower: it left room for one threadgroup
+    // per GPU core. Batches of 128 or 256 were no faster.
     constexpr uint kBatch = 64;
     // Large images are replayed in bands of tile rows, one command buffer each, so no single
     // command buffer runs long enough for the GPU watchdog to abort it.
@@ -406,7 +480,6 @@ kernel void rasterize_backward(constant CameraParams& cam [[buffer(0)]],
     threadgroup float4 sConic[kBatch];
     threadgroup float4 sColor[kBatch];
     threadgroup uint sId[kBatch];
-    threadgroup float sPart[kGrad2DStride][kTileThreads / 32][kBatch];
     threadgroup uint sLast[kTileThreads / 32];
     const uint W = cam.dims.x, H = cam.dims.y;
     const uint2 pixel = tile * kTile + local;
@@ -469,12 +542,9 @@ kernel void rasterize_backward(constant CameraParams& cam [[buffer(0)]],
                 alpha = min(kAlphaMax, co.w * G);
                 active = power <= 0 && alpha >= kAlphaMin;
             }
-            if (!simd_any(active)) {
-                if (lane < kGrad2DStride) sPart[lane][simd][j] = 0;
-                continue;
-            }
-            float v[kGrad2DStride];
-            for (uint k = 0; k < kGrad2DStride; ++k) v[k] = 0;
+            if (!simd_any(active)) continue;
+            float v[16];
+            for (uint k = 0; k < 16; ++k) v[k] = 0;
             if (active) {
                 const float Tbefore = T / (1 - alpha);
                 const float3 c = sColor[j].xyz;
@@ -500,19 +570,11 @@ kernel void rasterize_backward(constant CameraParams& cam [[buffer(0)]],
                 }
                 v[9] = w; v[10] = w * error; v[11] = w * edge;
             }
-            for (uint k = 0; k < kGrad2DStride; ++k) {
-                const float sum = simd_sum(v[k]);
-                if (lane == k) sPart[k][simd][j] = sum;
-            }
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        // Thread (k, j) = (tid / 64 ..., tid % 64) adds the 8 SIMD-group sums of one slot.
-        for (uint slot = tid; slot < kGrad2DStride * kBatch; slot += kTileThreads) {
-            const uint k = slot / kBatch, j = slot % kBatch;
-            if (int(j) >= n) continue;
-            float total = 0;
-            for (uint s = 0; s < kTileThreads / 32; ++s) total += sPart[k][s][j];
-            if (total != 0) atomic_fetch_add_explicit(grad2d + sId[j] * kGrad2DStride + k, total, memory_order_relaxed);
+            // Lanes 2k and 2k + 1 now hold the SIMD group's total of value k.
+            const float sum = simdSum16(v, lane);
+            const uint k = lane >> 1;
+            if ((lane & 1) == 0 && k < kGrad2DStride && sum != 0)
+                atomic_fetch_add_explicit(grad2d + sId[j] * kGrad2DStride + k, sum, memory_order_relaxed);
         }
     }
 }

@@ -226,13 +226,15 @@ nonisolated final class GaussianRasterizer: @unchecked Sendable {
             throw RenderError.intersectionOverflow(needed: intersections, capacity: intersectionCapacity)
         }
         let tileCount = camera.tilesX * camera.tilesY
-        precondition(tileCount <= 65_536 && tileRanges.length >= tileCount * 8, "tile grid exceeds the rasterizer limits")
+        // Tile keys are 16 bits and 0xFFFF marks unused entries (`kUnusedTile`).
+        precondition(tileCount < 65_535 && tileRanges.length >= tileCount * 8, "tile grid exceeds the rasterizer limits")
         encoder.dispatch(clearU2, threads: tileCount, [.buffer(tileRanges), .u32(UInt32(tileCount))])
         if intersections > 0 {
             encoder.dispatch(emit, threads: count, [.buffer(order), .buffer(offsets), .buffer(rects), .buffer(tiles),
                                                     .buffer(keys), .buffer(values),
                                                     .value(SIMD4<UInt32>(UInt32(count), UInt32(camera.tilesX),
-                                                                         UInt32(intersectionCapacity), 0))])
+                                                                         UInt32(intersectionCapacity), 0)),
+                                                    .buffer(pixels), .buffer(conics)])
             try sorter.sortPairs(encoder, keys: keys, values: values, scratchKeys: keysScratch,
                                  scratchValues: valuesScratch, count: intersections, bits: 16)
             encoder.dispatch(ranges, threads: intersections, [.buffer(keys), .buffer(tileRanges), .u32(UInt32(intersections))])

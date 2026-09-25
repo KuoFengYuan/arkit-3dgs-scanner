@@ -80,11 +80,14 @@ nonisolated struct GaussianTrainingConfiguration: Codable, Equatable, Sendable {
         return c
     }
 
+    /// About 1.4× the iterations of the first trainer (3,000 / 7,000 / 15,000), paid for by its
+    /// faster backward pass: a Standard run of FBDA13 took 319 s instead of 354 s on the Mac and
+    /// scored 0.8 dB higher on held-out photos (docs/ON_DEVICE_3DGS.md).
     static func preset(_ preset: Preset) -> Self {
         switch preset {
-        case .quick: return Self(preset: preset, iterations: 3_000, longEdge: Resolution.low.longEdge, maxGaussians: 300_000, shDegree: 2)
-        case .standard: return Self(preset: preset, iterations: 7_000, longEdge: Resolution.low.longEdge, maxGaussians: 600_000, shDegree: 3)
-        case .high: return Self(preset: preset, iterations: 15_000, longEdge: Resolution.low.longEdge, maxGaussians: 1_000_000, shDegree: 3)
+        case .quick: return Self(preset: preset, iterations: 4_000, longEdge: Resolution.low.longEdge, maxGaussians: 300_000, shDegree: 2)
+        case .standard: return Self(preset: preset, iterations: 10_000, longEdge: Resolution.low.longEdge, maxGaussians: 600_000, shDegree: 3)
+        case .high: return Self(preset: preset, iterations: 20_000, longEdge: Resolution.low.longEdge, maxGaussians: 1_000_000, shDegree: 3)
         }
     }
 }
@@ -199,7 +202,7 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
     let target: GaussianRenderTarget
     let images: TrainingImageLoader
     private let targetImage, edgeMap, edgeScratch: MTLBuffer
-    private let adam, fold, noise, share, edgeBlur, edgeSobel, scale: MTLComputePipelineState
+    private let adam, fold, relocationFold, noise, share, edgeBlur, edgeSobel, scale: MTLComputePipelineState
     let renderer: GaussianRenderer
 
     var strategy: MRNFStrategy
@@ -221,6 +224,15 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
     var poseLearningRate: Double
     /// Spread the seed cloud before initialising (experiments can turn it off).
     var seedJitter = true
+    /// Experiment: Adam updates only the Gaussians the current view reached.
+    var sparseAdam = false
+    /// Experiment: refill pruned slots by splitting high-error Gaussians instead of opaque ones.
+    var replaceByError = false
+    /// Growth ramp: a new model reaches the Gaussian cap at the end of the growth phase instead
+    /// of within its first refines (`MRNFStrategy.growthCeiling`); experiments can turn it off.
+    var growthRamp = true
+    /// Experiment: evidence-based relocation at the cap (`MRNFStrategy.relocationCandidates`).
+    var relocation = false
     /// The view rendered by the last completed step (its render and photo are still in the
     /// buffers at the next refine).
     private var lastRendered: Int?
@@ -256,6 +268,7 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
                                      url: { [dataset] in dataset.imageURL($0) })
         adam = try metal.pipeline("adam_step")
         fold = try metal.pipeline("mrnf_fold")
+        relocationFold = try metal.pipeline("relocation_fold")
         noise = try metal.pipeline("mrnf_noise")
         share = try metal.pipeline("screen_share")
         edgeBlur = try metal.pipeline("edge_blur")
@@ -284,6 +297,7 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
         model.initialize(positions: positions,
                          colors: chosen.map { SIMD3(Float($0.r), Float($0.g), Float($0.b)) / 255 })
         strategy.updateBounds(model)
+        if growthRamp { strategy.growthStart = model.activeCount }
         iteration = 0
     }
 
@@ -395,6 +409,11 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
     var profile: [String: Double] = [:]
 
     private func run(_ label: String = "gpu", _ body: (MTLComputeCommandEncoder) throws -> Void) throws {
+        try wait(submit(body), label)
+    }
+
+    /// Encodes and commits one command buffer without waiting, so CPU work can overlap it.
+    private func submit(_ body: (MTLComputeCommandEncoder) throws -> Void) throws -> (buffer: MTLCommandBuffer, started: Date) {
         guard let buffer = metal.queue.makeCommandBuffer(), let encoder = buffer.makeComputeCommandEncoder() else {
             throw TrainingError.gpuFailure("command buffer")
         }
@@ -402,8 +421,13 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
         try body(encoder)
         encoder.endEncoding()
         buffer.commit()
+        return (buffer, started)
+    }
+
+    private func wait(_ submitted: (buffer: MTLCommandBuffer, started: Date), _ label: String) throws {
+        let buffer = submitted.buffer
         buffer.waitUntilCompleted()
-        profile[label, default: 0] += Date().timeIntervalSince(started)
+        profile[label, default: 0] += Date().timeIntervalSince(submitted.started)
         profile[label + ".gpu", default: 0] += buffer.gpuEndTime - buffer.gpuStartTime
         if let error = buffer.error { throw TrainingError.gpuFailure(error.localizedDescription) }
     }
@@ -443,8 +467,14 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
         }
     }
 
-    /// One optimisation iteration on the next training view.
+    /// One optimisation iteration on the next training view. Its command buffers, encoders and
+    /// file reads are autoreleased objects: the training thread has no run loop to drain them,
+    /// so without this pool they would pile up for the whole run.
     func step() throws -> TrainingStepReport {
+        try autoreleasepool { try trainStep() }
+    }
+
+    private func trainStep() throws -> TrainingStepReport {
         let started = Date()
         let t = iteration + 1
         let schedule = strategy.schedule
@@ -462,7 +492,7 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
             if growthFrozen { strategy.maxGaussians = min(strategy.maxGaussians, model.activeCount) }
             let seeds = configuration.usesHoleFilling && !growthFrozen && t < schedule.growUntil && t >= 3 * schedule.refineEvery
                 ? lastRendered.map { holeSeeds(frame: $0) } ?? [] : []
-            refineReport = strategy.refine(model, iteration: t, seeds: seeds)
+            refineReport = strategy.refine(model, iteration: t, seeds: seeds, replaceByError: replaceByError, relocate: relocation)
             holeSeedsAdded += refineReport?.holes ?? 0
         }
         iteration = t
@@ -505,18 +535,19 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
         let pixels = dataset.width * dataset.height
         profile["intersections", default: 0] += Double(intersections)
         do {
-            try run("raster") { e in
+            // Render and loss in one command buffer; the LiDAR target is prepared on the CPU
+            // meanwhile (the previous backward pass, its only reader, has finished).
+            let forward = try submit { e in
                 e.dispatch(scale, threads: pixels, [.buffer(edgeMap), .value(SIMD2<Float>(median > 0 ? 1 / median : 0, Float(pixels)))])
                 try raster.encodeRaster(e, camera: cam, count: count, intersections: intersections, target: target,
                                         background: .zero)
-            }
-            try run("loss") { e in
                 loss.encode(e, raw: target.image, target: targetImage, ppisp: uniforms)
             }
             let depthTarget = try lidarTarget(frame: frame, iteration: t)
-            try run("backward") { e in raster.encodeBackwardClear(e, count: count) }
-            for rows in GaussianRasterizer.backwardBands(tilesX: cam.tilesX, tilesY: cam.tilesY) {
+            try wait(forward, "forward")
+            for (band, rows) in GaussianRasterizer.backwardBands(tilesX: cam.tilesX, tilesY: cam.tilesY).enumerated() {
                 try run("backward") { e in
+                    if band == 0 { raster.encodeBackwardClear(e, count: count) }
                     raster.encodeBackwardBlend(e, camera: cam, layout: model.layout, count: count, target: target, background: .zero,
                                                imageGrad: loss.rawGrad, errorMap: loss.errorMap, edgeMap: edgeMap, lossSums: loss.sums,
                                                depth: depthTarget, rows: rows)
@@ -524,6 +555,10 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
             }
             try run("backward") { e in
                 raster.encodeProjectBackward(e, camera: cam, layout: model.layout, model: model.params, grads: model.grads, count: count)
+                if refining {
+                    e.dispatch(relocationFold, threads: count, [.buffer(raster.grad2d), .buffer(model.stats),
+                                                                .value(SIMD2<UInt32>(UInt32(count), UInt32(model.capacity))), .buffer(raster.tiles)])
+                }
             }
         } catch TrainingError.gpuFailure(let reason) {
             // Nothing has touched the parameters yet (the backward pass overwrites the gradients),
@@ -547,10 +582,11 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
                                         offset: UInt32(group.offset), width: UInt32(group.width), rows: UInt32(count),
                                         capacity: UInt32(model.capacity), mode: mode, skip: 0,
                                         opacityReg: MRNFConstants.opacityRegularizer / Float(live),
-                                        sharePenalty: MRNFConstants.screenSharePenalty, shareLimit: MRNFConstants.maxScreenShare)
+                                        sharePenalty: MRNFConstants.screenSharePenalty, shareLimit: MRNFConstants.maxScreenShare,
+                                        visibleOnly: sparseAdam ? 1 : 0)
                 e.dispatch(adam, threads: count * group.width,
                            [.buffer(model.params), .buffer(model.grads), .buffer(model.adamM), .buffer(model.adamV),
-                            .buffer(model.stats), .value(params)])
+                            .buffer(model.stats), .value(params), .buffer(raster.tiles)])
             }
         }
         let values = loss.values
@@ -798,5 +834,5 @@ nonisolated struct AdamParams {
     var biasCorrection1: Float, biasCorrection2: Float
     var offset: UInt32, width: UInt32
     var rows: UInt32, capacity: UInt32, mode: UInt32, skip: UInt32
-    var opacityReg: Float, sharePenalty: Float, shareLimit: Float, unused: Float = 0
+    var opacityReg: Float, sharePenalty: Float, shareLimit: Float, visibleOnly: UInt32 = 0
 }

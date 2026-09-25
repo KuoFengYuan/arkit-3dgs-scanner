@@ -349,8 +349,10 @@ enum Reference {
             }
             submit { raster.encodeProjectBackward($0, camera: camera, layout: layout, model: model, grads: grads, count: gs.count) }
             let banded = Array(UnsafeBufferPointer(start: g, count: layout.totalFloats)) + raster.poseGradient
+            // Atomic adds from different tiles land in a different order, so small gradients that
+            // are sums of larger, cancelling terms differ in their last digits (up to ~1.5e-7 here).
             var bandWorst: Float = 0
-            for (a, b) in zip(single + singlePose, banded) { bandWorst = max(bandWorst, abs(a - b) / max(abs(a), abs(b), 1e-3)) }
+            for (a, b) in zip(single + singlePose, banded) { bandWorst = max(bandWorst, abs(a - b) / max(abs(a), abs(b), 1e-2)) }
             check(bands.count == camera.tilesY && bandWorst < 1e-4,
                   "banded backward pass matches the single pass (\(label), \(bands.count) bands, worst \(bandWorst))")
         }

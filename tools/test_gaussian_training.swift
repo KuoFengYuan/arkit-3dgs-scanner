@@ -364,6 +364,72 @@ import simd
         let r2 = s2.refine(many, iteration: 50)
         check(r2.pruned == 10 && r2.replaced == 10 && many.count == countBefore && many.activeCount == countBefore,
               "soft-pruned slots are refilled by replacement splits without growing the buffers")
+        // Growth ramp: the ceiling rises linearly from the starting count to the cap at growUntil.
+        var ramp = MRNFStrategy(schedule: MRNFSchedule(iterations: 1000), maxGaussians: 1000)
+        ramp.growthStart = 200
+        let until = ramp.schedule.growUntil
+        check(ramp.growthCeiling(at: 0, capacity: 4096) == 200 && ramp.growthCeiling(at: until / 2, capacity: 4096) == 600
+              && ramp.growthCeiling(at: until, capacity: 4096) == 1000 && ramp.growthCeiling(at: until / 2, capacity: 400) == 300,
+              "growth ramp reaches the cap at the end of the growth phase and never exceeds the capacity")
+        // 600 erroring splats want 42 splits (7%); the ramp allows only 620 - 600 at t = 25.
+        let rampModel = try GaussianModel(metal: metal, capacity: 1024, shDegree: 0)
+        rampModel.initialize(positions: (0..<600).map { SIMD3(Float($0 % 30) * 0.1, Float($0 / 30) * 0.1, 0) },
+                             colors: Array(repeating: SIMD3(0.5, 0.5, 0.5), count: 600))
+        let rp = rampModel.floats(rampModel.params)
+        for i in 0..<600 {
+            rp[Int(rampModel.layout.opacities) + i] = 2
+            rampModel.stat(GaussianStats.errorMax)[i] = 1; rampModel.stat(GaussianStats.visibility)[i] = 1
+        }
+        var ramped = MRNFStrategy(schedule: MRNFSchedule(iterations: 1000), maxGaussians: 1000)
+        ramped.bounds = MRNFBounds(center: SIMD3(1.5, 1, 0), maxExtent: 5, medianSize: 5, valid: true)
+        ramped.growthStart = 600
+        let t0 = ramped.schedule.refineEvery
+        let early = ramped.refine(rampModel, iteration: t0)
+        check(ramped.growthCeiling(at: t0, capacity: 1024) == 620 && early.grown == 20 && rampModel.activeCount == 620,
+              "with the ramp an early refine grows only to its ceiling (\(early.grown) of 42 wanted)")
+        // Relocation at the cap: 1,000 Gaussians fill a 1,000 cap. 40 contribute almost nothing
+        // in the views that saw them, 100 cover pixels with above-average error; 20 of the low
+        // ones were seen by only 2 views (too little evidence to judge).
+        let full = try GaussianModel(metal: metal, capacity: 1024, shDegree: 0)
+        full.initialize(positions: (0..<1000).map { SIMD3(Float($0 % 40) * 0.1, Float($0 / 40) * 0.1, 0) },
+                        colors: Array(repeating: SIMD3(0.5, 0.5, 0.5), count: 1000))
+        let fp = full.floats(full.params)
+        func setWindow() {
+            for i in 0..<1000 {
+                fp[Int(full.layout.opacities) + i] = 2
+                let few = i >= 960 && i < 980
+                full.stat(GaussianStats.views)[i] = few ? 2 : 6
+                full.stat(GaussianStats.visibility)[i] = i >= 940 && i < 980 ? 0.01 : 6
+                full.stat(GaussianStats.errorSum)[i] = i < 100 ? 12 : 3
+            }
+        }
+        var relocating = MRNFStrategy(schedule: MRNFSchedule(iterations: 20_000), maxGaussians: 1000)
+        relocating.bounds = MRNFBounds(center: SIMD3(2, 1.25, 0), maxExtent: 5, medianSize: 5, valid: true)
+        let step = relocating.schedule.refineEvery
+        setWindow()
+        let first = relocating.refine(full, iteration: step, relocate: true)
+        setWindow()
+        let second = relocating.refine(full, iteration: 2 * step, relocate: true)
+        let lowest = full.stat(GaussianStats.lowWindows)
+        check(first.relocated == 0 && first.judged == 980 && first.receivers == 100 && lowest[965] == 0,
+              "relocation waits for a second low window and ignores Gaussians seen by too few views")
+        check(second.relocated == 4 && second.donors == 20 && full.activeCount == 1000 && second.grown == 0,
+              "relocation moves at most 0.5% of the cap per refine, from the lowest contributors, without growing (\(second.relocated) moved)")
+        var quiet = relocating
+        let quietModel = full
+        setWindow()
+        for i in 0..<100 { quietModel.stat(GaussianStats.errorSum)[i] = 3 }
+        let none = quiet.refine(quietModel, iteration: 3 * step, relocate: true)
+        check(none.relocated == 0 && none.receivers == 0, "nothing moves when no Gaussian is under-fit")
+        check(relocating.relocationCandidates(full, guidance: Array(repeating: 1, count: full.count),
+                                              iteration: relocating.schedule.stopRefine).donors.isEmpty,
+              "relocation tapers to zero at the end of refinement")
+        // Checkpoints written before the ramp decode without it.
+        var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(ramp)) as! [String: Any]
+        legacy.removeValue(forKey: "growthStart")
+        let decoded = try JSONDecoder().decode(MRNFStrategy.self, from: JSONSerialization.data(withJSONObject: legacy))
+        check(decoded.growthStart == nil && decoded.growthCeiling(at: 1, capacity: 4096) == 1000,
+              "a strategy saved without the growth ramp decodes and grows as before")
     }
 
     static func exportFrame() throws {
@@ -663,6 +729,14 @@ import simd
         let la = ra.suffix(50).map(\.loss).reduce(0, +) / 50, lb = rb.suffix(50).map(\.loss).reduce(0, +) / 50
         print("  loss after resume: uninterrupted \(la), resumed \(lb)")
         check(abs(la - lb) / la < 0.03 && ra.map(\.frame) == rb.map(\.frame), "a resumed run follows the uninterrupted run (same views, loss within 3%)")
+        // A version 1 checkpoint (before the relocation statistics) still resumes.
+        let v1 = temp.appendingPathComponent("ck-v1")
+        try GaussianCheckpoint.save(b, elapsedSeconds: 12, to: v1, formatVersion: 1)
+        let old = try trainer(scan.directory, c)
+        let oldHeader = try GaussianCheckpoint.load(v1.appendingPathComponent(GaussianCheckpoint.fileName), into: old)
+        let views = old.model.stat(GaussianStats.views)
+        check(oldHeader.version == 1 && old.model.activeCount == b.model.activeCount && (0..<old.model.count).allSatisfy { views[$0] == 0 },
+              "a version 1 checkpoint resumes, with the relocation statistics starting at zero")
         // Corruption and truncation are detected.
         var bytes = try Data(contentsOf: url)
         bytes[bytes.count / 2] ^= 0x5A
