@@ -2,7 +2,7 @@
 
 [English](ON_DEVICE_3DGS.md) | **繁體中文**
 
-「訓練 3DGS」直接在 iPhone 的 GPU（Metal）上，為已保存的掃描最佳化出 Gaussian Splatting 模型，不經過伺服器，也沒有電腦端步驟。渲染、損失、梯度，以及高斯、色彩模型與相機的每一次更新，都在 App 裡完成。供外部訓練器使用的 COLMAP 資料匯出（[外部訓練](TRAINING.zh-TW.md)）維持不變。
+「訓練 3DGS」直接在 iPhone 的 GPU（Metal）上，為已保存的掃描最佳化出 Gaussian Splatting 模型，不經過伺服器，也沒有電腦端步驟。渲染、損失、梯度，以及高斯、色彩模型與相機的每一次更新，都在 App 裡完成。供外部訓練器使用的 COLMAP 資料匯出（[外部訓練](TRAINING.zh-TW.md)）維持不變。程式結構、執行緒、GPU 流程與檔案格式，見[訓練架構](ON_DEVICE_3DGS_ARCHITECTURE.zh-TW.md)。
 
 ## 使用方式
 

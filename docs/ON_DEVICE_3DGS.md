@@ -2,7 +2,7 @@
 
 **English** | [繁體中文](ON_DEVICE_3DGS.zh-TW.md)
 
-**Train 3DGS** optimises a Gaussian Splatting model of a saved scan on the iPhone GPU (Metal). There is no server and no desktop step. Rendering, the loss, the gradients, and every update of the Gaussians, the colour model, and the cameras happen in the app. The COLMAP dataset export for external trainers ([external training](TRAINING.md)) is unchanged.
+**Train 3DGS** optimises a Gaussian Splatting model of a saved scan on the iPhone GPU (Metal). There is no server and no desktop step. Rendering, the loss, the gradients, and every update of the Gaussians, the colour model, and the cameras happen in the app. The COLMAP dataset export for external trainers ([external training](TRAINING.md)) is unchanged. For the code structure, threads, GPU pipeline and file formats, see the [training architecture](ON_DEVICE_3DGS_ARCHITECTURE.md).
 
 ## Using it
 
