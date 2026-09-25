@@ -59,6 +59,16 @@ struct GaussianTrainingView: View {
     private var showsModel: Bool { !isActive && hasModel && !hasResumableRun }
     private var supported: Bool { GaussianMetal.isSupported }
     /// The ISP choice only matters when the run learned PPISP.
+    /// What the shared archive holds: SOG, or the PLY of a model saved before SOG.
+    private var shareSubtitle: String {
+        if savedModel?.format == "3dgs-ply" {
+            return usesPPISP ? L10n.text("PLY 格式，可用一般 3DGS 檢視器開啟；色彩校正另存 ppisp.json")
+                             : L10n.text("PLY 格式，可用一般 3DGS 檢視器開啟")
+        }
+        return usesPPISP ? L10n.text("SOG 格式，約為 PLY 的 1/12，可用 SuperSplat 等 3DGS 檢視器開啟；色彩校正另存 ppisp.json")
+                         : L10n.text("SOG 格式，約為 PLY 的 1/12，可用 SuperSplat 等 3DGS 檢視器開啟")
+    }
+
     private var usesPPISP: Bool {
         isActive ? (center.configuration?.ppisp == true) : (viewer?.metadata.ppisp != nil)
     }
@@ -402,8 +412,7 @@ struct GaussianTrainingView: View {
             .accessibilityIdentifier("enhanceGaussianModel")
             Button { Task { await share() } } label: {
                 DSActionCardLabel(title: preparingArchive ? L10n.text("處理中…") : L10n.text("分享 3DGS 模型"),
-                                  subtitle: usesPPISP ? L10n.text("PLY 格式，可用一般 3DGS 檢視器開啟；色彩校正另存 ppisp.json")
-                                                      : L10n.text("PLY 格式，可用一般 3DGS 檢視器開啟"),
+                                  subtitle: shareSubtitle,
                                   tint: DS.Palette.info) {
                     if preparingArchive { ProgressView().tint(DS.Palette.info) }
                     else { DSActionIcon(symbol: "square.and.arrow.up", tint: DS.Palette.info) }

@@ -61,8 +61,10 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
     var onFrame: @Sendable (RenderedFrame, ViewerRequest) -> Void = { _, _ in }
     var onPreparedViews: @Sendable (_ views: [TrainingFrame], _ initialDepth: Double) -> Void = { _, _ in }
 
-    static let checkpointInterval = 1_000
-    static let checkpointSeconds = 180.0
+    // Checkpoints are written only when the run pauses, when the app leaves the foreground
+    // (even if training continues in the background), and when stopping with the progress
+    // kept. Each replaces the previous one (`GaussianCheckpoint.save`); a 600,000-Gaussian
+    // checkpoint is about 425 MB, so periodic ones cost storage writes for little benefit.
     static let previewInterval = 1.5          // seconds between automatic live-view refreshes
     static let interactiveInterval = 0.08     // while the user moves the camera
 
@@ -119,7 +121,10 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
     func setBackgrounded(_ value: Bool) { lock.lock(); backgrounded = value; lock.broadcast(); lock.unlock() }
     /// The app left the foreground while training continues (background GPU granted): skip the
     /// live preview, and treat a GPU failure as losing background access (pause, not an error).
-    func setAppInBackground(_ value: Bool) { lock.lock(); appInBackground = value; lock.broadcast(); lock.unlock() }
+    /// Leaving the app also saves a checkpoint, in case iOS ends the app in the background.
+    func setAppInBackground(_ value: Bool) {
+        lock.lock(); if value && !appInBackground { checkpointRequested = true }; appInBackground = value; lock.broadcast(); lock.unlock()
+    }
     /// Pause while the user captures a new scan; continue when the capture closes.
     func setCapturing(_ value: Bool) { lock.lock(); capturing = value; lock.broadcast(); lock.unlock() }
     func updateViewer(_ request: ViewerRequest?, interactive: Bool) {
@@ -245,7 +250,7 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
             try Self.checkResumeFits(rows: header.rows, plan: plan)
         } else if configuration.isEnhancement {
             // Enhance model: every saved Gaussian needs a row at this resolution's plan.
-            let saved = try GaussianExport.readHeader(workspace.modelURL)
+            let saved = try GaussianExport.modelInfo(workspace.modelURL)
             if saved.count > plan.gaussianCapacity {
                 throw SessionError.enhanceNeedsMemory(requiredMB: Self.requiredMB(rows: saved.count, plan: plan))
             }
@@ -296,6 +301,7 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
     private var cancelValue: Bool? { lock.lock(); defer { lock.unlock() }; return cancelRequested }
 
     private func checkpoint(_ trainer: GaussianTrainer) throws {
+        if trainer.iteration > (snapshot.checkpointIteration ?? -1) { foregroundGPUFailures = 0 }
         try GaussianCheckpoint.save(trainer, elapsedSeconds: snapshot.elapsedSeconds, to: workspace.root)
         snapshot.checkpointIteration = trainer.iteration
         writeSnapshotImage(trainer)
@@ -309,8 +315,6 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
     private func loop(_ trainer: GaussianTrainer, elapsedBase: Double) throws {
         var runStart = Date()
         var elapsedAtRunStart = elapsedBase
-        var lastCheckpoint = Date()
-        var lastCheckpointIteration = trainer.iteration
         var lossEMA: Double?, psnrEMA: Double?, spiEMA: Double?
         while trainer.iteration < configuration.iterations {
             // Controls.
@@ -367,7 +371,7 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
                 publish(force: true)
                 continue
             }
-            if wantsCheckpoint { try checkpoint(trainer); lastCheckpoint = Date(); lastCheckpointIteration = trainer.iteration }
+            if wantsCheckpoint && trainer.iteration > (snapshot.checkpointIteration ?? -1) { try checkpoint(trainer) }
 
             // One iteration.
             let report: TrainingStepReport
@@ -377,15 +381,15 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
                 throw GaussianTrainer.TrainingError.repeatedOverflow
             } catch GaussianTrainer.TrainingError.gpuFailure(let reason) {
                 // A GPU command failed (typically: the app lost the foreground mid-iteration). The
-                // model may be partly updated, so continue from the last checkpoint. Replays are
-                // deterministic, so a failure that repeats in the foreground stops the run.
+                // model may be partly updated, so continue from the last checkpoint, or from
+                // memory when there is none: the trainer skips failed views before touching the
+                // parameters, and only a failure in the Adam step leaves a partial update. Replays
+                // are deterministic, so a failure that repeats in the foreground stops the run.
                 lock.lock()
                 // In the background the system can withdraw GPU access: wait for the foreground.
                 if appInBackground { backgrounded = true }
                 let wasBackgrounded = backgrounded
                 lock.unlock()
-                // Without a checkpoint yet, a background loss of the GPU continues from memory.
-                guard workspace.hasCheckpoint || wasBackgrounded else { throw GaussianTrainer.TrainingError.gpuFailure(reason) }
                 if !wasBackgrounded {
                     foregroundGPUFailures += 1
                     if foregroundGPUFailures > 2 { throw SessionError.repeatedGPUFailure(reason) }
@@ -427,13 +431,6 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
             snapshot.throttled = thermal >= 2 || lowPowerMode()
             if snapshot.throttled { Thread.sleep(forTimeInterval: min(0.5, report.seconds * (thermal >= 2 ? 1.0 : 0.4))) }
 
-            if trainer.iteration - lastCheckpointIteration >= Self.checkpointInterval
-                || Date().timeIntervalSince(lastCheckpoint) > Self.checkpointSeconds {
-                if trainer.iteration > lastCheckpointIteration { foregroundGPUFailures = 0 }
-                try checkpoint(trainer)
-                lastCheckpoint = Date()
-                lastCheckpointIteration = trainer.iteration
-            }
             renderIfNeeded(trainer, paused: false)
             publish()
         }
@@ -582,12 +579,15 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
         published = true
     }
 
-    /// Writes the model files (PLY, metadata, PPISP, refined poses, report, cover) into `staging`.
+    /// Writes the model files (SOG, metadata, PPISP, refined poses, report, cover) into `staging`.
+    /// Training is over, so the SOG writer reuses the gradient and intersection buffers for its
+    /// k-means instead of allocating beyond the memory plan.
     static func writeModelFiles(_ trainer: GaussianTrainer, into staging: URL, validation: Double?,
                                 elapsedSeconds: Double, peakFootprintMB: Int) throws {
         let config = trainer.configuration
-        try GaussianExport.writePLY(trainer.model, to: staging.appendingPathComponent(GaussianExport.plyName),
-                                    comment: "arkit-3dgs-scanner on-device 3DGS, \(trainer.iteration) iterations, SH \(config.shDegree)")
+        try GaussianSOG.write(trainer.model, to: staging.appendingPathComponent(GaussianSOG.fileName), metal: trainer.metal,
+                              scratch: .init(points: trainer.model.grads, palette: trainer.raster.keys, labels: trainer.raster.values),
+                              iterations: GaussianSOG.kMeansIterations)
         let metadata = GaussianExport.Metadata(gaussians: trainer.model.activeCount, shDegree: config.shDegree,
                                                mipFilter2D: config.mipFilter,
                                                filterVariancePx2: config.mipFilter ? GaussianCamera.mipFilterVariance : GaussianCamera.plainDilation,

@@ -127,8 +127,8 @@ The project already declares the task identifiers in `Config/Info.plist`. Withou
 
 - The model stays with the scan, also after the app restarts. In **Scan history**, cards mark scans that have a model, a run in progress, or a run that can resume. Tap **View 3DGS model** to orbit the model.
 - **Enhance model** loads the saved model and keeps training it: pick 4,000, 10,000, or 20,000 more iterations and a training resolution, for example a Low run first and then an enhancement at High (original). The camera refinements and colour model carry over. The current model stays until the enhancement completes; stopping it with *delete* leaves the saved model as it was.
-- **Share 3DGS model** sends `scan_…-3dgs.zip`. It contains `gaussians.ply` (the standard 3DGS PLY), metadata, the refined camera poses, and `ppisp.json` when PPISP was used.
-- In other 3DGS viewers, the PLY uses the COLMAP frame, so Y-up viewers show it upside down: rotate it 180° about X. Those viewers ignore `ppisp.json`.
+- **Share 3DGS model** sends `scan_…-3dgs.zip`. It contains `gaussians.sog`, metadata, the refined camera poses, and `ppisp.json` when PPISP was used. SOG is a compressed 3DGS format, about 1/12 the size of a PLY (12 MB instead of 149 MB for 600,000 Gaussians) at about 0.2 dB lower PSNR. SuperSplat, PlayCanvas, and LichtFeld Studio open it directly; PlayCanvas `splat-transform` converts it to PLY. Models saved as PLY before SOG keep their PLY.
+- In other 3DGS viewers, the model uses the COLMAP frame, so Y-up viewers show it upside down: rotate it 180° about X. Those viewers ignore `ppisp.json`.
 - From the options menu at the top right:
   - **Retrain** keeps the current model until the new one completes.
   - **Delete 3DGS model** removes only the training results; the scan's photos, depth, and poses stay.
@@ -212,7 +212,7 @@ scan_…/
 
 New captures use `capture-meta.json`. Legacy `meta.json` files remain readable and are renamed when exporting; if both names exist, the current file wins and the legacy content is retained under a separate capture-specific filename. This avoids exposing `meta.json` to trainer format detection.
 
-Additional floor-plan, world-map, reconstruction, and performance files depend on the enabled features. On-device training writes to `gaussian-training/` inside the scan (checkpoint, state, and `model/gaussians.ply` with its sidecars). The dataset ZIP leaves that folder out; the model has its own ZIP. Existing models in older scans remain part of those scans for sharing and deletion.
+Additional floor-plan, world-map, reconstruction, and performance files depend on the enabled features. On-device training writes to `gaussian-training/` inside the scan (checkpoint, state, and `model/gaussians.sog` with its sidecars; older models keep `gaussians.ply`). The dataset ZIP leaves that folder out; the model has its own ZIP. Existing models in older scans remain part of those scans for sharing and deletion.
 
 **Coordinates:** COLMAP cameras and `points3D.bin` are rotated together by 180° around world X by default. PLY previews and JSONL poses retain ARKit world coordinates. Do not mix these coordinate frames without conversion. See [coordinate conventions](docs/COORDINATES.md).
 

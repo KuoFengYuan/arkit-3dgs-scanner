@@ -12,6 +12,8 @@
 //   [--sh D] [--holdout N] [--no-ppisp] [--no-pose] [--no-mip] [--budget-mb MB] [--out DIR]
 // Densification and optimiser experiments (defaults unchanged unless given): --no-growth-ramp,
 //   --relocate, --replace-by-error, --sparse-adam. GS_REFINE=1 prints every refine.
+// --sog-roundtrip [--sog-palette K] [--sog-iterations N]: write the model as SOG, read it back
+//   and score the held-out views again (with --enhance-from DIR --iterations 0 for a saved model).
 import Foundation
 import Metal
 import simd
@@ -34,7 +36,7 @@ import simd
         var poseFile: String?
         var initNoise: Float = 0, initKeep = 1.0, initRandom = 0, latticeJitter: Float = 0
         var perFrame = false
-        var seedJitter = true, sparseAdam = false, replaceByError = false, growthRamp = true, relocation = false
+        var seedJitter = true, sparseAdam = false, replaceByError = false, growthRamp = true, relocation = false, sogRoundTrip = false, sogPalette: Int?, sogIterations = GaussianSOG.kMeansIterations
         var excludeIDs: Set<Int> = []
         var holdOutSegment = 0.0, fullResolution = false
         var saveModel: URL?, enhanceFrom: URL?
@@ -68,6 +70,9 @@ import simd
             case "--replace-by-error": replaceByError = true
             case "--no-growth-ramp": growthRamp = false
             case "--relocate": relocation = true
+            case "--sog-roundtrip": sogRoundTrip = true
+            case "--sog-palette": sogPalette = Int(args.removeFirst())!
+            case "--sog-iterations": sogIterations = Int(args.removeFirst())!
             case "--no-depth-seeds": config.depthSeeds = false
             case "--no-hole-fill": config.holeFilling = false
             case "--depth-loss": config.depthLoss = Double(args.removeFirst())!
@@ -185,6 +190,9 @@ import simd
             print(String(format: "pose corrections: median %.3f° / %.2f mm, max %.3f° / %.2f mm", rot[rot.count / 2], trans[trans.count / 2], rot.last!, trans.last!))
         }
         if perFrame { try reportPerFrame(trainer) }
+        if sogRoundTrip {
+            try reportSOGRoundTrip(trainer, metal: metal, alignSteps: max(alignSteps, 30), palette: sogPalette, iterations: sogIterations)
+        }
         try reportCoverage(trainer)
         if let out { try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true); _ = out }
         if let saveModel {
@@ -305,6 +313,37 @@ import simd
             print(String(format: "held-out frame %d aligned PSNR %.2f, nearest training camera %.2f m / %.1f°",
                          frames[i].id, psnr, simd_distance(position(nearest), position(i)), angle))
         }
+    }
+
+    /// Writes the model as SOG (reusing the gradient and intersection buffers, as the app
+    /// does), reads it back into the trainer, and scores the held-out views again.
+    static func reportSOGRoundTrip(_ trainer: GaussianTrainer, metal: GaussianMetal, alignSteps: Int, palette: Int?, iterations: Int) throws {
+        let before = try trainer.evaluate(alignSteps: alignSteps)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("roundtrip-\(UUID().uuidString).sog")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let plyBytes = trainer.model.activeCount * GaussianExport.propertyNames(shDegree: trainer.model.shDegree).count * 4
+        func footprintPeak() -> Int {
+            var info = task_vm_info_data_t()
+            var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+            let ok = withUnsafeMutablePointer(to: &info) {
+                $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count) }
+            }
+            return ok == KERN_SUCCESS ? Int(info.ledger_phys_footprint_peak) : 0
+        }
+        let footprintBefore = TrainingMemoryPlan.footprintBytes, peakBefore = footprintPeak()
+        let report = try GaussianSOG.write(trainer.model, to: url, metal: metal,
+                                           scratch: .init(points: trainer.model.grads, palette: trainer.raster.keys, labels: trainer.raster.values),
+                                           iterations: iterations, paletteEntries: palette)
+        print(String(format: "SOG: %d Gaussians, %d palette entries, %.1f MB (PLY %.1f MB, %.1f×), %.1f s (k-means %.1f s)",
+                     report.gaussians, report.paletteEntries, Double(report.bytes) / 1e6, Double(plyBytes) / 1e6,
+                     Double(plyBytes) / Double(report.bytes), report.seconds, report.kMeansSeconds))
+        print("SOG write memory: footprint \(footprintBefore >> 20) MB before, lifetime peak \(peakBefore >> 20) -> \(footprintPeak() >> 20) MB")
+        let readStart = Date()
+        try GaussianSOG.read(url, into: trainer.model)
+        let readSeconds = Date().timeIntervalSince(readStart)
+        let after = try trainer.evaluate(alignSteps: alignSteps)
+        print(String(format: "SOG read in %.2f s; held-out aligned PSNR %.3f -> %.3f (SSIM %.4f -> %.4f)",
+                     readSeconds, before.psnr, after.psnr, before.ssim, after.ssim))
     }
 
     static func reportPerFrame(_ trainer: GaussianTrainer) throws {

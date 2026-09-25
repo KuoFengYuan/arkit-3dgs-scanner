@@ -643,6 +643,8 @@
 "進度已儲存，可隨時繼續" = "Progress is saved; resume anytime";
 "PLY 格式，可用一般 3DGS 檢視器開啟；色彩校正另存 ppisp.json" = "PLY format for standard 3DGS viewers; color correction is saved in ppisp.json";
 "PLY 格式，可用一般 3DGS 檢視器開啟" = "PLY format for standard 3DGS viewers";
+"SOG 格式，約為 PLY 的 1/12，可用 SuperSplat 等 3DGS 檢視器開啟；色彩校正另存 ppisp.json" = "SOG format, about 1/12 the size of PLY, for SuperSplat and other 3DGS viewers; color correction is saved in ppisp.json";
+"SOG 格式，約為 PLY 的 1/12，可用 SuperSplat 等 3DGS 檢視器開啟" = "SOG format, about 1/12 the size of PLY, for SuperSplat and other 3DGS viewers";
 "GPU 運算反覆失敗，已停止訓練並保留最後的進度：%@" = "The GPU failed repeatedly. Training stopped and the last progress was kept: %@";
 "上次重新訓練沒有完成：%@" = "The last retraining did not finish: %@";
 "刪除訓練進度？" = "Delete training progress?";

@@ -114,7 +114,7 @@ The trainer is an independent Swift and Metal implementation. It follows the pub
 
 **Enhance model** loads `model/` and continues it instead of seeding from the point cloud:
 
-- **What is loaded:** every Gaussian from `gaussians.ply`, each training view's refined pose from `training-poses.jsonl` (turned back into its correction of the ARKit pose, matched by frame id), and the PPISP colour model from `ppisp.json` when PPISP is on. The Adam moments start fresh.
+- **What is loaded:** every Gaussian from `gaussians.sog` (or the `gaussians.ply` of a model saved before SOG, exactly), each training view's refined pose from `training-poses.jsonl` (turned back into its correction of the ARKit pose, matched by frame id), and the PPISP colour model from `ppisp.json` when PPISP is on. The Adam moments start fresh.
 - **Schedule:** a model saved at iteration *n* that gets *k* more runs as iteration *n* + 1 … *n* + *k* of an (*n* + *k*)-iteration schedule. Learning rates, densification, and pose refinement pick up at that point: growth continues only while the schedule is in its first half and the Gaussian cap has room, and refinement then prunes and replaces within the cap.
 - **Choices:** 4,000, 10,000, or 20,000 more iterations (the quality cards), a training resolution, and the advanced settings. The Gaussian cap and SH degree are at least the saved model's. A higher SH degree starts its extra coefficients at zero, so the model first renders exactly as saved. No depth seeds are added.
 - **Memory:** every saved Gaussian needs a row in the plan. If the chosen resolution leaves too few on this phone, the setup says how much memory is needed, and nothing starts.
@@ -138,7 +138,9 @@ Every allocation comes from a plan computed before training, with overflow-check
   The setup screen's memory check shows the plan for the chosen resolution before training starts.
 - **Streaming:** training photos are decoded on demand at the training resolution, into a small bounded cache. Only the next view is prefetched.
 - **Under pressure:** a memory warning purges the cache and freezes growth. Critical pressure saves a checkpoint and pauses. Repeated tile-buffer overflow saves and stops with a clear message.
-- **Checkpoints:** written every 1,000 iterations or 180 s, and at every pause. Each is a temporary file renamed into place, with a checksum and an end marker. A damaged, truncated, or mismatched checkpoint is refused.
+- **Checkpoints:** written only when the run pauses (by the user, for heat, battery, memory, or a new capture), when the app leaves the foreground (also when training continues in the background), and when a run stops with its progress kept. A 600,000-Gaussian checkpoint is about 425 MB, so the periodic ones (every 1,000 iterations or 180 s, about every 30 s with the faster trainer) wrote gigabytes per run. Each checkpoint is a temporary file renamed over the previous one, with a checksum and an end marker, so there is only ever one; temporary files left by a write the app never finished are removed at the next save. A damaged, truncated, or mismatched checkpoint is refused.
+  - If the app crashes or is force-quit in the foreground, the progress since the last pause is lost.
+  - A GPU failure in the foreground with no checkpoint continues from memory; the trainer skips failed views before it touches the parameters.
 - **Model viewer:** it checks the memory needed before loading a model.
 
 ## Files
@@ -151,7 +153,7 @@ gaussian-training/
 ├── checkpoint.gsck     # Resumable state: parameters, optimiser moments, PPISP, poses, schedule
 ├── snapshot.jpg        # Last checkpoint's view, shown on the resume screen
 └── model/
-    ├── gaussians.ply        # Standard 3DGS PLY (INRIA layout)
+    ├── gaussians.sog        # The model, SOG (models saved before SOG: gaussians.ply)
     ├── gaussians.json       # Metadata, frames, and viewer notes
     ├── ppisp.json           # Colour model, only when PPISP was used
     ├── training-poses.jsonl # Refined training cameras
@@ -161,9 +163,34 @@ gaussian-training/
 
 The dataset ZIP excludes this folder. `scan_…-3dgs.zip` contains `model/`. Deleting a scan deletes both.
 
+**SOG model file.** A completed run saves `gaussians.sog`, the SOG format (version 2) that PlayCanvas / SuperSplat and LichtFeld Studio read. It is a ZIP of `meta.json` and lossless WebP textures with one texel per Gaussian in Morton order:
+
+| Texture | Holds |
+| --- | --- |
+| `means_l`, `means_u` | sign(v) · ln(\|v\| + 1) of each coordinate, 16 bits split over two images |
+| `quats` | the three smallest components of the unit quaternion; alpha 252 + the dropped one's index |
+| `scales` | indices into a 256-entry codebook of log scales |
+| `sh0` | indices into a 256-entry codebook of DC coefficients; alpha = opacity |
+| `shN_centroids`, `shN_labels` | a k-means palette of the higher-band SH vectors (up to 65,536 entries, values through a 256-entry codebook), and each Gaussian's 16-bit label |
+
+- **Writing on the phone:** ImageIO reads WebP but cannot write it, so the app has its own lossless WebP (VP8L) encoder: literals only, with the left-pixel predictor when it helps. The SH palette is clustered on the GPU in half precision (3 Lloyd steps), reusing the gradient and tile-pair buffers that training no longer needs, so saving allocates little beyond the memory plan.
+- **Measured on FBDA13 (Standard, 600,000 Gaussians, Mac):**
+
+  | | PLY | SOG |
+  | --- | --- | --- |
+  | Size | 148.8 MB | 12.1 MB (12.3× smaller) |
+  | Held-out, aligned | 29.13 dB | 28.92 dB |
+  | Writing | — | 10 s (k-means 8.9 s) |
+  | Reading | — | 0.2 s |
+  | Peak process footprint while saving | — | 959 MB, within the 1,036 MB plan |
+
+  The palette size and the number of Lloyd steps were compared on the same model: 10 steps gave 28.93 dB in 47 s, 1 step 28.91 dB in 5.5 s, and a 16,384-entry palette 28.85 dB.
+- **Lossy:** SOG keeps 16 bits per position axis and 8-bit codebooks for the rest, which cost about 0.2 dB here. The viewer and **Enhance model** read what was saved; an enhancement trains on from the compressed values. Models saved as PLY before SOG still open and enhance exactly.
+- **Other tools:** SuperSplat, PlayCanvas and LichtFeld Studio open `gaussians.sog` directly; PlayCanvas `splat-transform` converts it to PLY for tools that need one.
+
 **Viewer compatibility:**
 
-- `gaussians.ply` is in the COLMAP export frame, so Y-up viewers show it upside down. Rotate it 180° about X.
+- The model is in the COLMAP export frame, so Y-up viewers show it upside down. Rotate it 180° about X.
 - Viewers without an anti-aliased mode dilate by 0.3 px² without compensation, so small splats look slightly thicker and brighter.
 - Colours are pre-ISP. Viewers ignore `ppisp.json` and show the uncorrected look, the in-app **ISP off** view.
 - Capture-motion settings affect training only.
@@ -361,13 +388,14 @@ Measured on the Mac GPU with the same Metal source:
 
 - **`tools/test_gaussian_raster.swift`:** forward against a double-precision reference, with parameter and pose gradients checked by finite differences. It covers the Mip filter on and off, with and without capture motion and the LiDAR depth loss, and shows that the banded backward pass matches the single pass (20 checks).
 - **`tools/test_gaussian_loss.swift`:** loss, image and PPISP gradients.
-- **`tools/test_gaussian_training.swift`:** 59 end-to-end checks.
+- **`tools/test_gaussian_training.swift`:** 65 end-to-end checks.
   - Memory-plan fitting and overflow checks; resolution tiers, the full-resolution plan, tile bands, and the held-out segment.
   - MRNF units, the growth ramp and its ceiling, relocation (evidence, rate, taper, no receivers), PLY export frame, and convergence.
+  - SOG: lossless WebP texels through ImageIO, stored ZIP archives against `unzip` and `zip`, palette and texture sizes, and a trained SH 3 model written and read back (positions within 0.04 mm, rotations 0.6°, rendering within 0.1 dB).
   - PPISP exposure recovery, pose refinement, and capture motion.
-  - Cap under a small budget; checkpoint exactness, corruption, atomic replacement, and resuming a version 1 checkpoint.
+  - Cap under a small budget; checkpoint exactness, corruption, atomic replacement, and resuming a version 1 checkpoint. Leaving the app saves a checkpoint while training continues, and stale partial files are removed.
   - The session state machine: pause, stop, interrupt, and resume.
-  - Enhance model: a saved model reloads with its poses and renders as saved (also with a raised SH degree), continues its schedule, and replaces the model only on completion. Finish and save model from a pause.
+  - Enhance model: a saved SOG model reloads with its poses and renders within 0.5 dB of the trained one, and a PLY model exactly (also with a raised SH degree); it continues its schedule and replaces the model only on completion. Finish and save model from a pause.
   - The saved-model viewer, both archives, and a 1,200-frame run within the plan.
 - **Real scans:** alone on the Mac, the Standard preset (10,000 iterations) took 5.3 minutes on FBDA13, with a peak process footprint of 0.99 GB against a 1.04 GB plan. For the High preset see [memory](#speed-and-longer-presets).
 - **Simulator (iPhone 16 Pro; iPhone 17 Pro on iOS 26.3):** covered the user flow only.
@@ -390,6 +418,7 @@ The trainer is part of this personal research project, which is not a product of
 - **Methods:**
   - Mip-Splatting (Yu et al., 2024) and 3D Gaussian Splatting (Kerbl et al., 2023);
   - capture motion after Seiskari et al. (2024);
+  - the SOG file format as described in the PlayCanvas documentation; the WebP encoder, ZIP handling and k-means are this project's own;
   - exact tile spans after the precise tile intersection of Speedy-Splat (Hanson et al., 2025), derived and implemented here as a per-row ellipse span;
   - the visible-only Adam experiment after the sparse Adam of Taming 3DGS (Mallick et al., 2024). The growth ramp is similar in spirit to Taming 3DGS's budgeted densification, and the relocation experiment to the relocation of 3DGS-MCMC (Kheradmand et al., 2024).
 - **This project's own additions to the MRNF base:** pose refinement with a per-view rate, seed spread, LiDAR depth seeds, hole filling, the LiDAR depth loss, the growth ramp, evidence-based relocation, the transposed SIMD reduction in the backward pass, and the longer presets.

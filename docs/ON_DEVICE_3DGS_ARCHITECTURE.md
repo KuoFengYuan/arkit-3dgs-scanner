@@ -53,11 +53,12 @@ flowchart TB
 | `TrainingDataset.swift` | Frame selection, hold-out, seed cloud and LiDAR depth seeds, cameras, LiDAR depth targets, streamed image decoding |
 | `TrainingMemoryPlan.swift` | The overflow-checked memory plan and automatic budget |
 | `GaussianCheckpoint.swift` | The resumable `checkpoint.gsck` format |
-| `GaussianExport.swift` | PLY write and read, metadata, `ppisp.json`, the COLMAP frame conversion |
+| `GaussianExport.swift` | The saved model file (SOG, or PLY from before SOG), PLY write and read, metadata, `ppisp.json`, the COLMAP frame conversion |
+| `GaussianSOG.swift`, `WebPLossless.swift`, `StoredZip.swift` | The SOG model file: Morton order, quantisation and codebooks, the GPU k-means of the SH palette; a lossless WebP (VP8L) encoder; stored ZIP archives |
 | `TrainingWorkspace.swift` | `state.json` (`TrainingRecord`), the folder layout, discard and delete rules, the share archive |
 | `GaussianRenderer.swift`, `GaussianModelViewer.swift` | Preview and saved-model rendering with an orbit camera |
 | `GaussianMetal.swift` | Device, pipelines, buffers, and a compact dispatch helper |
-| `*.metal` | Kernels: `GaussianRaster`, `GaussianSort`, `GaussianLoss`, `GaussianOptim` |
+| `*.metal` | Kernels: `GaussianRaster`, `GaussianSort`, `GaussianLoss`, `GaussianOptim`, `GaussianSOG` (palette assignment) |
 | `UI/TrainingCenter.swift` | App-wide owner of the run: lifecycle and memory observers, battery, idle timer, background continuation |
 | `UI/GaussianTrainingView.swift`, `UI/GaussianViewport.swift`, `UI/TrainingPresentation.swift` | The training screen, the gesture viewport, and shared wording, cards and speed history |
 
@@ -105,11 +106,11 @@ stateDiagram-v2
 2. **Initialise:** one of three ways.
    - A new run seeds from the point cloud.
    - A resume loads `checkpoint.gsck`.
-   - **Enhance model** loads `model/` with `initializeModel(fromSaved:)`: the PLY back in the ARKit frame, the refined poses turned back into corrections by frame id, and `ppisp.json`. It then continues the schedule from the saved iteration.
+   - **Enhance model** loads `model/` with `initializeModel(fromSaved:)`: the SOG (or older PLY) model back in the ARKit frame, the refined poses turned back into corrections by frame id, and `ppisp.json`. It then continues the schedule from the saved iteration.
 3. **Loop:**
    - Before each iteration: controls, memory, heat and battery.
    - `trainer.step()`.
-   - A checkpoint every 1,000 iterations or 180 s, and at every pause.
+   - A checkpoint at every pause, when the app leaves the foreground, and when stopping with the progress kept; nothing periodic.
 4. **Finish:**
    - Evaluate the hold-out views.
    - Write the model folder into a staging directory and swap it in atomically.
@@ -180,7 +181,8 @@ This is about 1.3 KB in total, or about 730 MiB for 600,064 Gaussians. The image
 - **Automatic budget:** 55% of what the process can still allocate, minus 450 MB of headroom, capped per device tier.
 - **During a run:**
   - The capacity never grows.
-  - Checkpoints stream rows in 8 MB chunks, and the PLY export in 4 MB chunks.
+  - Checkpoints stream rows in 8 MB chunks.
+  - Saving the SOG model reuses the gradient buffer (half-precision SH vectors) and the tile-pair buffers (palette, labels), which training no longer needs.
   - A memory warning freezes growth and drops the image cache; critical pressure saves a checkpoint and pauses.
 - **Viewer:** the saved-model viewer checks its own estimate before loading.
 
@@ -188,20 +190,20 @@ This is about 1.3 KB in total, or about 730 MiB for 600,064 Gaussians. The image
 
 - **Training:** runs in the ARKit world (metres, Y up). Each camera's world-to-camera matrix comes from the recorded camera-to-world transform with the camera's Y and Z axes flipped: ARKit's OpenGL camera (y up, looking down −z) becomes the rasterizer's OpenCV camera (y down, looking down +z). World axes are unchanged.
 - **Pose refinement:** corrects each view in its own camera frame: w2c′ = [R(ω) | τ] · w2c, with a prior that keeps it near the ARKit pose. `training-poses.jsonl` stores the corrected camera-to-world transforms in the ARKit convention.
-- **Exported PLY:** uses the COLMAP export frame, the ARKit world rotated 180° about X:
+- **Saved model (SOG or PLY):** uses the COLMAP export frame, the ARKit world rotated 180° about X:
   - positions become (x, −y, −z);
   - quaternions are rotated;
   - higher SH coefficients change sign by the parity of each basis function.
-- **Reading a PLY back:** the viewer and Enhance model reverse these steps.
+- **Reading it back:** the viewer and Enhance model reverse these steps.
 
 ## Files
 
 | File | Written | Format |
 | --- | --- | --- |
 | `state.json` | Every state change and checkpoint | `TrainingRecord`: status, reason, configuration, iteration, Gaussians, metrics, times, memory. A record left *running* reads as *interrupted* |
-| `checkpoint.gsck` | Every 1,000 iterations or 180 s, at pauses, on request | Magic `GSCK`, then a JSON header and the payload (below). Written to a temporary file and renamed atomically |
+| `checkpoint.gsck` | At pauses, when the app leaves the foreground, when stopping with progress kept, on request | Magic `GSCK`, then a JSON header and the payload (below). Written to a temporary file and renamed over the previous one; stale temporary files are removed |
 | `snapshot.jpg` | With each checkpoint | The resume screen's picture |
-| `model/` | On completion | `gaussians.ply` (INRIA layout, COLMAP frame), `gaussians.json`, `ppisp.json`, `training-poses.jsonl`, `training-report.json`, `preview.jpg`. Staged, then swapped in |
+| `model/` | On completion | `gaussians.sog` (SOG version 2, COLMAP frame; `gaussians.ply` in models saved before SOG), `gaussians.json`, `ppisp.json`, `training-poses.jsonl`, `training-report.json`, `preview.jpg`. Staged, then swapped in |
 
 **`checkpoint.gsck` contents:**
 - **Header:** configuration, dataset signature, iteration, epoch position, rows, Adam step, `MRNFStrategy`, `PPISPModel`, pose corrections and elapsed time.
@@ -228,7 +230,7 @@ Run `bash tools/test_gaussian_training.sh`; it builds and runs all of the tests 
 | --- | --- |
 | `tools/test_gaussian_raster.swift` | Forward against a double-precision CPU reference; parameter and pose gradients by finite differences (Mip filter, capture motion, LiDAR depth loss); banded backward equals one pass (20 checks) |
 | `tools/test_gaussian_loss.swift` | Loss, image and PPISP gradients (7 checks) |
-| `tools/test_gaussian_training.swift` | 59 end-to-end checks: memory plan, resolution tiers, MRNF with the growth ramp and relocation, export frame, convergence, enhancement, PPISP, poses, capture motion, depth seeds, hole filling, checkpoints (including version 1), the session state machine, the viewer, archives, and a 1,200-frame run. `GS_ONLY=session,enhancement` runs a subset |
+| `tools/test_gaussian_training.swift` | 65 end-to-end checks: memory plan, resolution tiers, MRNF with the growth ramp and relocation, the SOG file (WebP, ZIP, round trip), export frame, convergence, enhancement, PPISP, poses, capture motion, depth seeds, hole filling, checkpoints (including version 1 and saving on leaving the app), the session state machine, the viewer, archives, and a 1,200-frame run. `GS_ONLY=session,enhancement` runs a subset |
 | `tools/train_gaussians.swift` | Replays a real scan on the Mac GPU with every experiment switch, for example `--long-edge`, `--align-eval`, `--eval-full-res`, `--holdout-segment`, `--save-model`, `--enhance-from`, `--depth-loss`, `--per-frame` |
 
 Mac results say nothing about iPhone speed, memory or heat. Those need device runs.
@@ -237,7 +239,7 @@ Mac results say nothing about iPhone speed, memory or heat. Those need device ru
 
 - **New buffers:** count every one in `TrainingMemoryPlan.components`, or the plan no longer bounds the run.
 - **New configuration fields:** make them optional, so older `state.json` files and checkpoints still decode.
-- **New per-Gaussian parameters:** change `GaussianLayout`, the checkpoint (bump its version), and the PLY write and read together.
+- **New per-Gaussian parameters:** change `GaussianLayout`, the checkpoint (bump its version), and the SOG and PLY write and read together.
 - **Kernel changes:** extend the finite-difference checks in `test_gaussian_raster.swift` and keep the CPU reference in step.
 - **Long passes:** split any pass whose command buffer grows with resolution or model size, as the backward pass is banded.
 - **User text:** use `L10n`, with entries in both `en.lproj` and `zh-Hant.lproj`.
