@@ -133,7 +133,7 @@ The project already declares the task identifiers in `Config/Info.plist`. Withou
   - **Retrain** keeps the current model until the new one completes.
   - **Delete 3DGS model** removes only the training results; the scan's photos, depth, and poses stay.
 
-The trainer refines the camera poses, seeds empty surfaces from LiDAR depth, fills remaining holes while training, and uses the LiDAR depth as a geometry loss, so models hold their shape when orbiting away from the capture path. See [on-device 3DGS training](docs/ON_DEVICE_3DGS.md) for the method, measured results, memory safety, and file formats. Training speed, memory use, and heat on an iPhone have not been measured yet. Mac and Simulator results are not a substitute.
+The trainer refines the camera poses, seeds empty surfaces from LiDAR depth, fills remaining holes while training, and uses the LiDAR depth as a geometry loss, so models hold their shape when orbiting away from the capture path. See [on-device 3DGS training](docs/ON_DEVICE_3DGS.md) for the method, measured results, memory safety, and file formats, and the [training architecture](docs/ON_DEVICE_3DGS_ARCHITECTURE.md) for how the code is organised. Training speed, memory use, and heat on an iPhone have not been measured yet. Mac and Simulator results are not a substitute.
 
 ## Interface and controls
 
@@ -278,6 +278,7 @@ Copyright 2026 Kuo Feng-Yuan ([KuoFengYuan](https://github.com/KuoFengYuan)). Li
 - [Pose refinement and photo-alignment validation](docs/POSE_REFINEMENT.md)
 - [Loop closure and metric scale](docs/LOOP_CLOSURE_AND_SCALE.md)
 - [On-device 3DGS training](docs/ON_DEVICE_3DGS.md)
+- [On-device 3DGS training architecture](docs/ON_DEVICE_3DGS_ARCHITECTURE.md)
 - [On-device dataset refinement](docs/ON_DEVICE_TRAINING_QUALITY.md)
 - [LiDAR surface consistency](docs/LIDAR_SURFACE_CONSENSUS.md)
 - [Camera-only reconstruction](docs/CAMERA_ONLY_ACCURACY.md)

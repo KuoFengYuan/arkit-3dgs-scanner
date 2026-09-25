@@ -114,7 +114,7 @@ iOS 26 以上，切到其他 App 後仍可繼續訓練。iOS 會以系統通知�
   - 「重新訓練」：在新模型完成前保留目前的模型。
   - 「刪除 3DGS 模型」：只刪除訓練結果，掃描的照片、深度與姿態都保留。
 
-訓練器會微調相機姿態、用 LiDAR 深度補上沒有點的表面、在訓練中補洞，並以 LiDAR 深度作為幾何損失，讓模型在偏離拍攝路徑環繞檢視時依然維持正確形狀。方法、實測結果、記憶體保護與檔案格式，詳見[手機端 3DGS 訓練](docs/ON_DEVICE_3DGS.zh-TW.md)。iPhone 上的訓練速度、記憶體用量與發熱都還沒實測，Mac 與 Simulator 的結果不能代替。
+訓練器會微調相機姿態、用 LiDAR 深度補上沒有點的表面、在訓練中補洞，並以 LiDAR 深度作為幾何損失，讓模型在偏離拍攝路徑環繞檢視時依然維持正確形狀。方法、實測結果、記憶體保護與檔案格式，詳見[手機端 3DGS 訓練](docs/ON_DEVICE_3DGS.zh-TW.md)；程式如何組織，見[訓練架構](docs/ON_DEVICE_3DGS_ARCHITECTURE.zh-TW.md)。iPhone 上的訓練速度、記憶體用量與發熱都還沒實測，Mac 與 Simulator 的結果不能代替。
 
 ## 介面與操作
 
@@ -288,6 +288,7 @@ Copyright 2026 Kuo Feng-Yuan（[KuoFengYuan](https://github.com/KuoFengYuan)）�
 - [姿態精修與照片對齊驗證](docs/POSE_REFINEMENT.zh-TW.md)
 - [閉環修正與公尺尺度](docs/LOOP_CLOSURE_AND_SCALE.zh-TW.md)
 - [手機端 3DGS 訓練](docs/ON_DEVICE_3DGS.zh-TW.md)
+- [手機端 3DGS 訓練架構](docs/ON_DEVICE_3DGS_ARCHITECTURE.zh-TW.md)
 - [手機端資料優化](docs/ON_DEVICE_TRAINING_QUALITY.zh-TW.md)
 - [LiDAR 多視角共識](docs/LIDAR_SURFACE_CONSENSUS.zh-TW.md)
 - [無 LiDAR 重建](docs/CAMERA_ONLY_ACCURACY.zh-TW.md)
