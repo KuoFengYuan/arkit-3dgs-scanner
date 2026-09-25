@@ -70,6 +70,7 @@ struct HUDOverlay: View {
         .animation(.easeInOut(duration: 0.25), value: controller.assessment.worst)
         .animation(.easeInOut(duration: 0.25), value: controller.phase)
         .animation(.easeInOut(duration: 0.25), value: controller.loopHint)
+        .animation(.easeInOut(duration: 0.25), value: controller.revisitConfirmed)
         .animation(.easeInOut(duration: 0.25), value: controller.floorPlanHint)
         .animation(.easeInOut(duration: 0.25), value: controller.recentRejectCount >= 4)
         .animation(.easeInOut(duration: 0.25), value: controller.relocalizing)
@@ -257,8 +258,11 @@ struct HUDOverlay: View {
         if let hint = controller.floorPlanHint {
             return Guidance(text: hint, symbol: "square.split.bottomrightquarter", tone: .warning)
         }
+        if controller.revisitConfirmed {
+            return Guidance(text: L10n.text("已回到拍過的區域，漂移可以得到修正"), symbol: "checkmark.circle.fill", tone: .success)
+        }
         if let hint = controller.loopHint {
-            return Guidance(text: hint, symbol: "arrow.triangle.capsulepath", tone: .warning)
+            return Guidance(text: hint, symbol: "arrow.uturn.backward.circle", tone: .warning)
         }
         if let w = a.worst {
             return Guidance(text: w.message, symbol: w.symbol, tone: .warning)
@@ -806,7 +810,7 @@ struct HUDOverlay: View {
         var rows: [(String, String, Color)] = []
         // 迴環：未閉合代表 ARKit 沒機會做全域修正，遠端誤差留在資料裡
         if s.traveledM >= 8 && !s.loopClosed {
-            rows.append((String(format: L10n.text("走了 %.0fm 未回起點 —— 遠端可能有累積漂移"), s.traveledM),
+            rows.append((String(format: L10n.text("走了 %.0fm 都沒回到拍過的區域 —— 遠端可能有累積漂移"), s.traveledM),
                          "arrow.triangle.capsulepath", DS.Palette.warning))
         }
         // 漂移修正幅度：大代表這次追蹤本來就飄，全域幾何可信度低
