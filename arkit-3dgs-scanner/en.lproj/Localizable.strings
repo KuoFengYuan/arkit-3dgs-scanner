@@ -91,7 +91,8 @@
 "已另存優化版本，原始掃描仍保留" = "Saved as an optimized copy. The original scan is preserved.";
 "已完成：%@ 張影像・%@ 個點" = "Complete: %@ images · %@ points";
 "已有分享檔案" = "Share archive available";
-"已走 %.0f m —— 走回起點閉環，讓 ARKit 修正累積漂移" = "Walked %.0f m — return to the start to give ARKit an opportunity to correct drift";
+"請回到已拍過的區域：已在新區域走了 %.0f m，回頭重疊一段，讓漂移得到修正" = "Please return to an area you captured: %.0f m of new ground so far. Overlap a stretch so drift can be corrected";
+"已回到拍過的區域，漂移可以得到修正" = "Back in a captured area; drift can be corrected";
 "已選取" = "Selected";
 "已選取 %@ 筆" = "%@ selected";
 "已開啟" = "On";
@@ -267,7 +268,7 @@
 "讀取掃描紀錄…" = "Loading scan history…";
 "讀取關鍵幀…" = "Reading keyframes…";
 "走一圈、檢查點雲與拍攝路線，再匯出空間掃描資料。" = "Walk through your space, review the point cloud and camera path, then export your scan.";
-"走了 %.0fm 未回起點 —— 遠端可能有累積漂移" = "Walked %.0fm without returning to the start — distant areas may have accumulated drift";
+"走了 %.0fm 都沒回到拍過的區域 —— 遠端可能有累積漂移" = "Walked %.0fm without returning to a captured area — distant areas may have accumulated drift";
 "走廊" = "Hallway";
 "距離太近，請後退一點" = "Too close. Step back a little.";
 "距離太遠，請靠近目標" = "Too far away. Move closer to the subject.";

@@ -104,8 +104,11 @@ final class CaptureController: NSObject, ObservableObject {
     @Published private(set) var continueFromLastMap = false
     /// ARKit 正在以舊地圖重定位（尚未接上）。此時姿態不可信，必須擋住開拍。
     var relocalizing: Bool { sessionState == .relocalizing }
-    /// 迴環閉合提示：走遠之後提醒回起點，讓 ARKit 修正整條軌跡的累積漂移
+    /// 重訪提示：在新區域走了一段時間與距離後，請使用者回到已拍過的區域（見 RevisitGuide），
+    /// 讓 ARKit 與掃描後的姿態精修能修正累積漂移。
     @Published private(set) var loopHint: String?
+    /// 剛回到已拍過的區域（提示後約 3 秒）。
+    @Published private(set) var revisitConfirmed = false
     /// RoomPlan 的即時引導 ＋ 牆高不足提示（見 FloorPlanCapture.coachingHint）。
     /// **這是平面圖品質最重要的一條回饋**：每一份實機 log 都是
     /// 「2 牆、樓高 0.80m ⚠️ 掃描不完整」，而那行警告先前只在 review 才印 ——
@@ -165,6 +168,7 @@ final class CaptureController: NSObject, ObservableObject {
     private var traveledM: Float = 0
     private var lastTravelPosition: SIMD3<Float>?
     private var loopClosed = false
+    private var revisitGuide = RevisitGuide()
     private var lastWorldMapMB: Double?
     /// BA 的結果。**注意位姿不一定被套用**（config.baApplyPoses），
     /// 所以摘要要一併記下「有沒有套用」與保留集判定，否則 baAfterPx 會被誤讀成
@@ -406,6 +410,8 @@ final class CaptureController: NSObject, ObservableObject {
         lastTravelPosition = nil
         traveledM = 0
         loopClosed = false
+        revisitGuide = RevisitGuide()
+        revisitConfirmed = false
         loopHint = nil
         floorPlanHint = nil
         lastWorldMapMB = nil
@@ -1219,16 +1225,25 @@ final class CaptureController: NSObject, ObservableObject {
             if step > 0.05 { traveledM += step; lastTravelPosition = p }   // 0.05m 門檻濾掉抖動
         }
         let fromStart = simd_distance(p, start)
-        if traveledM >= config.loopHintTravelM, fromStart <= config.loopClosedRadiusM {
-            if !loopClosed {
-                loopClosed = true
+        if traveledM >= config.loopHintTravelM, fromStart <= config.loopClosedRadiusM { loopClosed = true }
+        // 任何已拍過的區域都算重訪，不只起點：在新區域掃了 40 秒、走了 4m 後提示回去，
+        // 回到時確認。文字只在整數公尺改變時才寫入，避免每幀觸發 SwiftUI 更新。
+        switch revisitGuide.update(cameraToWorld: frame.camera.transform, timestamp: frame.timestamp) {
+        case .goBack(let travel, _):
+            let text = String(format: L10n.text("請回到已拍過的區域：已在新區域走了 %.0f m，回頭重疊一段，讓漂移得到修正"), travel)
+            if loopHint != text { loopHint = text }
+            if revisitConfirmed { revisitConfirmed = false }
+        case .returned:
+            if !revisitConfirmed {
+                revisitConfirmed = true
                 captureHaptic.impactOccurred()
             }
-            loopHint = nil
-        } else if !loopClosed, traveledM >= config.loopHintTravelM {
-            loopHint = String(format: L10n.text("已走 %.0f m —— 走回起點閉環，讓 ARKit 修正累積漂移"),
-                              traveledM)
+            if loopHint != nil { loopHint = nil }
+        case .none:
+            if loopHint != nil { loopHint = nil }
+            if revisitConfirmed { revisitConfirmed = false }
         }
+        if revisitGuide.revisits > 0 { loopClosed = true }
         // RoomPlan 的引導與牆高檢查。
         //
         // **為什麼在這裡同步而不是讓 HUD 直接讀 floorPlan**：SwiftUI 的
@@ -1248,6 +1263,7 @@ final class CaptureController: NSObject, ObservableObject {
         s.keyframes = refined.count
         s.traveledM = Double(traveledM)
         s.loopClosed = loopClosed
+        s.revisits = revisitGuide.revisits
         s.blurDropped = refined.filter { $0.blurVerdict == .drop }.count
         s.blurDemoted = refined.filter { $0.blurVerdict == .demote }.count
         s.worldMapMB = lastWorldMapMB
@@ -1687,6 +1703,7 @@ extension CaptureController: @preconcurrency ARSessionDelegate {
                 renderPacing.setPhotos(keyframeCount)
                 arFramePacing.setPhotos(keyframeCount)
                 visualizer?.addKeyframe(pose: keyframe.c2w)
+                revisitGuide.addPhoto(cameraToWorld: keyframe.c2w)
                 if phase == .scanning { captureHaptic.impactOccurred(intensity: 0.6) }
             } catch {
                 guard generation == scanGeneration, isAttached else { return }

@@ -56,7 +56,7 @@ open arkit-3dgs-scanner.xcodeproj
 
 1. Select the `arkit-3dgs-scanner` scheme, your signing team, and a physical device in Xcode. Run uses optimized Release; choose `arkit-3dgs-scanner-Debug` only for source-level debugging. See [fusion speed and overlapping surfaces](docs/SCAN_FUSION_DIAGNOSTICS.md).
 2. Build and run. Allow camera access and wait for tracking to become ready.
-3. Choose LiDAR and refinement options before starting. Move around the scene so surfaces are visible from multiple positions.
+3. Choose LiDAR and refinement options before starting. Move around the scene so surfaces are visible from multiple positions. In a large space, go back over an area you already captured when the app asks (after about 40 s and 4 m of new ground); it confirms when you are back, so drift can be corrected ([revisit guidance](docs/LOOP_CLOSURE_AND_SCALE.md#live-revisit-guidance)).
 4. Stop the scan, wait for processing, and inspect the point cloud. Continue the active scan if more coverage is needed.
 5. Select **Train 3DGS** to build a model on the phone, or **Export 3DGS dataset** to share the dataset ZIP. Unzip the dataset on your computer and load it into a trainer that accepts COLMAP datasets.
 

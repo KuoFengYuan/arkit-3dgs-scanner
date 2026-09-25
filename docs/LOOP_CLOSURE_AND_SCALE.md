@@ -10,6 +10,15 @@ With LiDAR and refinement enabled, stopping a scan matches revisited views, runs
 
 This is a custom implementation, not a port of COLMAP or Ceres. It requires saved LiDAR depth; camera-only scans retain their existing processing.
 
+### Live revisit guidance
+
+A revisit can only be matched if the capture has one, and on an open walk the drift keeps growing. On the replayed scans, surfaces seen more than about 40 s apart disagree by 3–14 cm. While scanning, the app therefore asks for revisits and confirms them (`RevisitGuide`):
+
+- **Asking:** after 40 s of scanning and 4 m walked through new ground since the last revisit (or the start), once the scan has at least 10 photos, the banner says **Please return to an area you captured**, with the metres of new ground. It stays until the user is back. Paused time does not count.
+- **Confirming:** the camera is back when it is within 0.8 m of a saved photo, facing the same way (cosine above 0.9), taken at least 8 s of scanning earlier with at least 2 m walked since. These are the rules the refinement uses to pick revisit candidates, so a confirmed revisit is one it can use. The banner then shows **Back in a captured area** in green for 3 s, with a tap of haptic feedback, and the clock restarts.
+- **Summary:** a scan counts as looped when it returned to its start or revisited any captured area; the scan summary warns after 8 m without either. The earlier hint asked once for a return to the start, after 8 m, and never again.
+- **Cost:** each check compares the pose with every saved photo, five times per second of scanning.
+
 ### Revisit tracks in the joint bundle adjustment
 
 Revisits enter the joint bundle adjustment ([pose refinement](POSE_REFINEMENT.md)) as additional feature tracks. Reprojection, LiDAR depth and ARKit motion priors then reconcile both passes in one solve.
@@ -90,6 +99,16 @@ python3 tools/check_project.py
 ```
 
 Synthetic tests cover rigid recovery, outliers, contradictory holdouts, cancellation, gauge anchoring, smooth graph corrections, bounded 1,000-frame candidate search, calibration/independent checks, projection-preserving export, readable COLMAP ZIPs, raw-file preservation, stale geometry, and deletion. Unsigned device and Simulator builds check integration; Simulator UI checks do not test LiDAR accuracy.
+
+7 revisit-guidance checks (`tools/test_revisit_guide.swift`) cover:
+- no prompt in the first 40 s;
+- the prompt after 40 s and 4 m;
+- paused time not counting;
+- walking back facing away keeping the prompt;
+- facing a captured area confirming the return for about 3 s;
+- the clock restarting after a revisit.
+
+The live banner itself needs a device with ARKit; the Simulator has no camera.
 
 16 revisit-track checks render a textured wall on two passes. The return pass is 30 cm closer, yawed 15°, and its poses drift by up to 3 cm and 0.3°.
 - Guided matching finds 111 matches, and their rigid inliers recover the injected drift within 1 cm.

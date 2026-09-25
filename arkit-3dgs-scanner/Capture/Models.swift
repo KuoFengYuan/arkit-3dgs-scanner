@@ -119,8 +119,10 @@ nonisolated struct ScanSummary: Sendable {
     var driftMedianCm = 0.0
     var driftMaxCm = 0.0
     var traveledM = 0.0
-    /// 有沒有走回起點讓 ARKit 做全域修正。未閉合＝遠端的累積誤差留在資料裡了
+    /// 有沒有回到起點或其他已拍過的區域，讓 ARKit 與姿態精修修正漂移。未閉合＝遠端的累積誤差留在資料裡了
     var loopClosed = false
+    /// 掃描中回到已拍過區域的次數（RevisitGuide）
+    var revisits = 0
     /// 掃描後複核排除的幀（幾何不可信 + 顏色糊）
     var blurDropped = 0
     var blurDemoted = 0
