@@ -205,13 +205,13 @@ import simd
         return c
     }
 
-    static func trainer(_ scan: URL, _ c: GaussianTrainingConfiguration, budgetMB: Int = 512) throws -> GaussianTrainer {
+    static func trainer(_ scan: URL, _ c: GaussianTrainingConfiguration, budgetMB: Int = 512, initialize: Bool = true) throws -> GaussianTrainer {
         let dataset = try TrainingDataset.prepare(scan: scan, longEdge: c.longEdge, holdOutEvery: c.holdOutEvery, maxPoints: 250_000)
         let plan = try TrainingMemoryPlan.fit(width: dataset.width, height: dataset.height, shDegree: c.shDegree,
                                               requestedGaussians: c.maxGaussians, budgetBytes: budgetMB << 20,
                                               imageSlots: 3, previewPixels: 320 * 240)
         let t = try GaussianTrainer(configuration: c, dataset: dataset, plan: plan, metal: metal)
-        try t.initializeModel()
+        if initialize { try t.initializeModel() }
         return t
     }
 
@@ -238,20 +238,50 @@ import simd
         metal = try GaussianMetal(libraryURL: library)
         try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: temp) }
-        try memoryPlan()
-        try strategyUnits()
-        try exportFrame()
-        try depthSeeding()
-        try holeFilling()
-        try convergence()
-        try ppispRecovery()
-        try poseRefinement()
-        try captureMotion()
-        try capUnderSmallBudget()
-        try checkpoints()
-        try session()
-        try largeScanStress()
+        // GS_ONLY=session,enhancement runs a subset while iterating.
+        let only = ProcessInfo.processInfo.environment["GS_ONLY"].map { Set($0.split(separator: ",").map(String.init)) }
+        let tests: [(String, () throws -> Void)] = [
+            ("memoryPlan", memoryPlan),
+            ("resolutionAndHoldOut", resolutionAndHoldOut),
+            ("strategyUnits", strategyUnits),
+            ("exportFrame", exportFrame),
+            ("depthSeeding", depthSeeding),
+            ("holeFilling", holeFilling),
+            ("convergence", convergence),
+            ("enhancement", enhancement),
+            ("ppispRecovery", ppispRecovery),
+            ("poseRefinement", poseRefinement),
+            ("captureMotion", captureMotion),
+            ("capUnderSmallBudget", capUnderSmallBudget),
+            ("checkpoints", checkpoints),
+            ("session", session),
+            ("largeScanStress", largeScanStress),
+        ]
+        for (name, test) in tests where only?.contains(name) ?? true { try test() }
         print("\(checks) training checks passed")
+    }
+
+    static func resolutionAndHoldOut() throws {
+        typealias Resolution = GaussianTrainingConfiguration.Resolution
+        let edges = Resolution.allCases.map(\.longEdge)
+        check(edges == [960, 1_440, 1_920] && Resolution.allCases.allSatisfy { Resolution(longEdge: $0.longEdge) == $0 }
+              && GaussianTrainingConfiguration.Preset.allCases.allSatisfy { GaussianTrainingConfiguration.preset($0).resolution == .low },
+              "resolution tiers map to 960 / 1440 / 1920 px, and every preset starts at low")
+        let full = try TrainingMemoryPlan.fit(width: 1_920, height: 1_440, shDegree: 3, requestedGaussians: 600_000,
+                                              budgetBytes: 2_600 << 20, imageSlots: 3, previewPixels: 320 * 240)
+        let low = try TrainingMemoryPlan.fit(width: 960, height: 720, shDegree: 3, requestedGaussians: 600_000,
+                                             budgetBytes: 2_600 << 20, imageSlots: 3, previewPixels: 320 * 240)
+        check(full.gaussianCapacity == low.gaussianCapacity && full.totalBytes > low.totalBytes + (200 << 20),
+              "full resolution keeps the Gaussian cap in a large budget and plans the larger image buffers (\(full.totalBytes >> 20) vs \(low.totalBytes >> 20) MB)")
+        let bands = GaussianRasterizer.backwardBands(tilesX: 120, tilesY: 90)
+        check(bands.first?.lowerBound == 0 && bands.last?.upperBound == 90 && zip(bands, bands.dropFirst()).allSatisfy { $0.upperBound == $1.lowerBound }
+              && bands.allSatisfy { $0.count * 120 <= 2_048 } && GaussianRasterizer.backwardBands(tilesX: 60, tilesY: 45).count == 2,
+              "the backward pass covers every tile row in bands of at most 2,048 tiles (\(bands.count) at 1920 x 1440)")
+        let scan = try writeScan(name: "segment", frames: 40)
+        let segment = try TrainingDataset.prepare(scan: scan.directory, longEdge: 1_920, holdOutEvery: 8, maxPoints: 250_000, holdOutSegment: 0.1)
+        let held = segment.validationFrames
+        check(segment.width == 160 && held == Array(18..<22),
+              "a held-out segment is one contiguous middle stretch (frames \(held)) and photos are never upscaled")
     }
 
     static func memoryPlan() throws {
@@ -477,6 +507,36 @@ import simd
         let end = try meanPSNR(t, frames: t.dataset.validationFrames)
         print("  held-out PSNR \(String(format: "%.2f", start)) -> \(String(format: "%.2f", end)) dB, Gaussians \(t.model.activeCount)")
         check(end > start + 6 && end > 25, "training converges on held-out views (\(String(format: "%.1f", end)) dB)")
+    }
+
+    static func enhancement() throws {
+        let scan = try writeScan(name: "enhance", frames: 30)
+        let c = config(iterations: 600, pose: true, holdOut: 6, sh: 1)
+        let t = try trainer(scan.directory, c)
+        _ = try train(t, until: 600)
+        let directory = temp.appendingPathComponent("enhance-model", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try GaussianTrainingSession.writeModelFiles(t, into: directory, validation: nil, elapsedSeconds: 1, peakFootprintMB: 1)
+        let views = t.dataset.trainFrames
+        let before = try meanPSNR(t, frames: views), heldBefore = try meanPSNR(t, frames: t.dataset.validationFrames)
+        // Enhance with a higher SH degree: the extra band starts at zero, so it renders as saved.
+        let saved = GaussianExport.metadata(in: directory)!
+        let e = try trainer(scan.directory, config(iterations: 600, pose: true, holdOut: 6, sh: 2)
+            .enhancing(savedIterations: saved.iterations, savedGaussians: saved.gaussians, savedSHDegree: saved.shDegree),
+                            initialize: false)
+        try e.initializeModel(fromSaved: directory)
+        let loaded = try meanPSNR(e, frames: views)
+        let poseError = views.map { max(simd_length(t.poses[$0].rotation - e.poses[$0].rotation),
+                                        simd_length(t.poses[$0].translation - e.poses[$0].translation)) }.max() ?? 1
+        let moved = views.filter { !t.poses[$0].isIdentity }.count
+        print(String(format: "  saved %.3f dB, reloaded %.3f dB, pose difference %.2e over %d refined views", before, loaded, poseError, moved))
+        check(e.iteration == 600 && e.configuration.iterations == 1_200 && e.model.shDegree == 2
+              && e.model.activeCount == t.model.activeCount && abs(loaded - before) < 0.02 && moved > 0 && poseError < 1e-6,
+              "a saved model reloads with its refined poses and renders as saved (SH 1 raised to 2)")
+        _ = try train(e, until: e.configuration.iterations)
+        let heldAfter = try meanPSNR(e, frames: e.dataset.validationFrames)
+        print(String(format: "  held-out %.2f -> %.2f dB after enhancing", heldBefore, heldAfter))
+        check(heldAfter > heldBefore + 0.2, "enhancing continues the saved model's schedule and improves held-out views")
     }
 
     static func ppispRecovery() throws {
@@ -735,6 +795,36 @@ import simd
         check(workspace.hasModel && !workspace.hasCheckpoint && workspace.record()?.status == .completed
               && (try? Data(contentsOf: workspace.modelURL)) == savedModel,
               "deleting a retrain's progress restores the saved model's completed status")
+        // Enhance model: continue the saved model for 300 more iterations.
+        let saved = GaussianExport.metadata(in: workspace.modelDirectory)!
+        var extra = c
+        extra.iterations = 300
+        let enhanced = extra.enhancing(savedIterations: saved.iterations, savedGaussians: saved.gaussians, savedSHDegree: saved.shDegree)
+        let finished = run(resume: false, configuration: enhanced)
+        box.lock.lock()
+        let started = box.snapshots.first { $0.phase == .running }
+        let neverRestarted = box.snapshots.allSatisfy { $0.iteration >= saved.iterations && $0.startIteration == saved.iterations }
+        box.lock.unlock()
+        let after = GaussianExport.metadata(in: workspace.modelDirectory)
+        print("  enhancement: started \(started?.iteration ?? -1), restarted \(!neverRestarted), finished \(finished.phase) \(finished.iteration)/\(finished.total), saved \(after?.iterations ?? -1), progress \(workspace.record()?.progress ?? -1)")
+        check(finished.phase == .completed && started?.iteration == saved.iterations && neverRestarted
+              && workspace.record()?.progress == 1
+              && after?.iterations == saved.iterations + 300 && workspace.record()?.status == .completed
+              && (try? Data(contentsOf: workspace.modelURL)) != savedModel && !workspace.hasCheckpoint,
+              "Enhance model continues from iteration \(saved.iterations) to \(saved.iterations + 300) and replaces the model")
+        // Finish now, also from a pause: the current model becomes the result.
+        let early = run(resume: false) { s in
+            waitIteration(s, 150)
+            s.pause()
+            Thread.sleep(forTimeInterval: 0.3)
+            s.finishNow()
+        }
+        let earlyRecord = workspace.record()
+        let earlyMetadata = GaussianExport.metadata(in: workspace.modelDirectory)
+        check(early.phase == .completed && earlyRecord?.status == .completed && earlyRecord?.finishedEarly == true
+              && (earlyRecord?.iteration ?? 0) >= 150 && (earlyRecord?.iteration ?? 0) < c.iterations
+              && earlyMetadata?.iterations == earlyRecord?.iteration && !workspace.hasCheckpoint,
+              "Finish and save model ends a paused run at iteration \(earlyRecord?.iteration ?? 0) and saves it as the model")
     }
 
 

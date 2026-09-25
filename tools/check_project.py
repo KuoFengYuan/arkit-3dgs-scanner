@@ -100,6 +100,16 @@ for path in markdown:
         target = target.split('#', 1)[0]
         check((path.parent / target).exists(), f'Broken link in {path.name}: {target}')
 
+# Background 3DGS training submits continued-processing tasks; iOS refuses identifiers that
+# the Info.plist does not permit, so both app configurations must use Config/Info.plist.
+project = (ROOT / 'arkit-3dgs-scanner.xcodeproj' / 'project.pbxproj').read_text()
+check(project.count('INFOPLIST_FILE = Config/Info.plist;') == 2,
+      'The app target must use Config/Info.plist in Debug and Release')
+info = json.loads(subprocess.run(['plutil', '-convert', 'json', '-o', '-', str(ROOT / 'Config' / 'Info.plist')],
+                                 check=True, capture_output=True, text=True).stdout)
+check('$(PRODUCT_BUNDLE_IDENTIFIER).training.*' in info.get('BGTaskSchedulerPermittedIdentifiers', []),
+      'Config/Info.plist must permit the 3DGS training task identifiers')
+
 if errors:
     raise SystemExit('\n'.join(errors))
 print(f'PASS: {len(used)} localized keys, {len(english)} translations per language, '

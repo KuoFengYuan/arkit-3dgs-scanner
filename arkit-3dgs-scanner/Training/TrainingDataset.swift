@@ -65,8 +65,11 @@ nonisolated struct TrainingDataset: Sendable {
     /// saved point cloud. `holdOutEvery` > 0 keeps every n-th selected frame for validation.
     /// `depthSeedLimit` > 0 adds up to that many seeds from the photos' LiDAR depth where the
     /// saved cloud has none (see `depthSeeds`).
+    /// `holdOutSegment` > 0 instead holds out one contiguous stretch of that fraction of the
+    /// selected frames, from the middle of the capture (novel views away from the training path).
     static func prepare(scan directory: URL, longEdge: Int, holdOutEvery: Int, maxPoints: Int,
-                        depthSeedLimit: Int = 0, isCancelled: () -> Bool = { false }) throws -> TrainingDataset {
+                        depthSeedLimit: Int = 0, holdOutSegment: Double = 0,
+                        isCancelled: () -> Bool = { false }) throws -> TrainingDataset {
         let (records, _) = ScanLibrary.savedRecords(in: directory)
         let usable = records.filter {
             $0.blurVerdict == .keep && $0.transform.count == 16 && $0.transform.allSatisfy(\.isFinite)
@@ -103,7 +106,9 @@ nonisolated struct TrainingDataset: Sendable {
             let ev: Double? = record.exposureDuration > 0 && record.iso > 0 ? log2(record.exposureDuration * record.iso) : nil
             frames.append(TrainingFrame(id: record.id, imageFile: record.imageFile, intrinsics: record.intrinsics,
                                         transform: record.transform, captureEV: ev,
-                                        isValidation: holdOutEvery > 1 && index % holdOutEvery == holdOutEvery / 2,
+                                        isValidation: holdOutSegment > 0
+                                            ? abs(Double(index) + 0.5 - Double(chosen.count) / 2) < holdOutSegment * Double(chosen.count) / 2
+                                            : holdOutEvery > 1 && index % holdOutEvery == holdOutEvery / 2,
                                         exposure: record.exposureDuration > 0 ? record.exposureDuration : nil,
                                         motion: velocities[record.id], depthFile: record.depthFile,
                                         confidenceFile: record.confidenceFile, depthWidth: record.depthWidth,

@@ -13,7 +13,7 @@ Capture photos, camera poses, and point clouds with ARKit. Refine the data on yo
 - **On-device 3DGS training:** a Metal trainer with densification, pose refinement, anti-aliasing, and optional colour and capture-motion compensation, inside a fixed memory plan. It includes a live interactive preview and a saved-model viewer.
 - **COLMAP export:** calibrated images, camera poses, and initialization points in `images/ + sparse/0`.
 
-**Train 3DGS** runs the whole optimisation on the iPhone GPU, with no server. The loop renders, computes the loss, and updates the model and cameras. Runs pause with a checkpoint when the app leaves the foreground, when the device is too hot or low on battery, or when memory runs short, and resume later from History. The COLMAP export for external trainers is unchanged. See [on-device 3DGS training](docs/ON_DEVICE_3DGS.md) for the method, memory safety, file formats, and what was verified where.
+**Train 3DGS** runs the whole optimisation on the iPhone GPU, with no server. The loop renders, computes the loss, and updates the model and cameras. Training images can be 960, 1,440, or the photos' full 1,920 px. A run keeps going while you use the rest of the app, and on iOS 26 it can continue in the background. It pauses with a checkpoint when you switch apps without background time, when the device is too hot or low on battery, or when memory runs short, and resumes later from History. The COLMAP export for external trainers is unchanged. See [on-device 3DGS training](docs/ON_DEVICE_3DGS.md) for the method, memory safety, file formats, and what was verified where.
 
 - **Experimental surface reconstruction:** bounded local RGB-D pose refinement and sparse TSDF surface points, with complete voxel-fusion fallback. TSDF pages full-precision blocks through one bounded scratch file with batched writes. Capped voxel export uses stable spatial-order sampling. Fusion also overlaps a single JPEG prefetch and reuses exact depth-validity checks without changing sampling or thresholds. See [behavior, benchmarks and limits](docs/SURFACE_RECONSTRUCTION.md).
 
@@ -40,7 +40,7 @@ See [fusion progress, first-person review, and export safeguards](docs/FUSION_RE
 | Metric scale | Pick point-cloud distances, calibrate against a known length, independently verify, and export scaled cameras/points |
 | Image selection | Prefers sharper, nonredundant views while retaining all original photos and reliable depth |
 | Synchronized playback | Photos follow their corresponding 3D camera position and direction; adjustable playback FPS |
-| On-device 3DGS | Trains, previews, pauses and resumes a Gaussian model per scan; the saved model opens from History after restarts |
+| On-device 3DGS | Trains, previews, pauses and resumes a Gaussian model per scan at 960–1,920 px; finish early at any time, and enhance a saved model later; the saved model opens from History after restarts |
 | Scan history | Preview, refine into a separate version, export, and delete individual, selected, or all scans |
 | Floor plans | Captures or estimates scene structure when supported and sufficient data is available |
 
@@ -69,40 +69,64 @@ The app trains a 3D Gaussian Splatting model of a saved scan on the phone's GPU.
 **Requirements:**
 - An iPhone or iPad with an A14 chip or newer (Metal Apple GPU family 7).
 - LiDAR scans train best, because their depth fills surfaces the fused point cloud missed. Camera-only scans train from their sparse points.
-- Keep the app open while training, preferably on power.
+- Training keeps running while you use the rest of the app. Switching to another app pauses it, unless iOS grants background time (see [keep training in the background](#keep-training-in-the-background)). Train on power when you can.
 
-**Start a run**
+### Start a run
 
 1. Finish a scan, or open **Scan history** and pick a scan.
 2. Tap the **Train 3DGS** card. It is on the review screen right after a capture and in the scan's detail.
 3. Pick a quality:
 
-   | Quality | Iterations | Training images | Gaussian cap | For |
-   | --- | --- | --- | --- | --- |
-   | Quick preview | 3,000 | 720 px | 300,000 | A fast first look |
-   | Standard (recommended) | 7,000 | 960 px | 600,000 | Most scans |
-   | High quality | 15,000 | 1,280 px | 1,000,000 | The most detail; takes the longest and uses more battery |
+   | Quality | Iterations | Gaussian cap | For |
+   | --- | --- | --- | --- |
+   | Quick preview | 3,000 | 300,000 | A fast first look |
+   | Standard (recommended) | 7,000 | 600,000 | Most scans |
+   | High quality | 15,000 | 1,000,000 | The most detail; takes the longest and uses more battery |
 
-   After a run finishes on this phone, each choice shows how long it took there. The memory check below the choices lowers the Gaussian cap if the phone has less memory free.
-4. Optional: open **Advanced settings** for camera pose refinement, PPISP colour correction, and anti-aliasing. The defaults suit most scans. PPISP turns on by itself only when the capture's exposure changed.
-5. Tap **Start training**.
+4. Pick a **training resolution**, the long edge of the training images:
 
-**While it trains**
+   | Resolution | Long edge | Cost |
+   | --- | --- | --- |
+   | Low (default) | 960 px | Fastest, least memory |
+   | Medium | 1,440 px | About 1.7× the time |
+   | High (original) | 1,920 px, the photos' own size | About 2.6× the time and the most memory |
+
+   After a run finishes on this phone, each quality shows how long it took there at the chosen resolution. The memory check below the choices lowers the Gaussian cap if the phone has less memory free.
+5. Optional: open **Advanced settings** for camera pose refinement, PPISP colour correction, and anti-aliasing. The defaults suit most scans. PPISP turns on by itself only when the capture's exposure changed.
+6. Tap **Start training**.
+
+### While it trains
 
 - The model appears live and sharpens as it trains. Drag to orbit, use two fingers to pan, pinch to zoom, and double-tap to reset the view.
 - The card shows the progress, the current stage, and the time left once the speed settles. The line below it shows the iteration, Gaussian count, loss, PSNR, and elapsed time.
 - **Pause**, **Save progress**, or **Stop**. When stopping, keep the progress to resume later or delete this run.
+- **Finish and save model** ends the run whenever the model looks good enough. The current state becomes the saved model, as if the run had completed, and you can keep training it later with **Enhance model**.
+- You can leave the training screen. Training continues while you browse History or other scans, and the home screen's **Scan history** card shows its progress. Open the scan's **Train 3DGS** card to watch it again.
 - The run pauses by itself, with its progress saved, when:
-  - the app leaves the foreground;
+  - you switch to another app, unless it [continues in the background](#keep-training-in-the-background);
+  - you start a new capture (it continues when the capture closes);
   - the phone is too hot;
   - the battery drops below 15% off power;
   - memory runs short.
 
   It continues when the app returns or the phone cools down. Otherwise, resume it later from the card.
 
-**After it finishes**
+### Keep training in the background
+
+On iOS 26 or later, a run can keep training after you switch to another app. iOS shows its progress in a system notice, where it can also be stopped. This needs:
+
+- a device where iOS offers background GPU time; and
+- the **Background GPU Access** capability, which only paid Apple Developer teams can add:
+  1. In Xcode, select the `arkit-3dgs-scanner` target, then **Signing & Capabilities**.
+  2. Click **+ Capability** and add **Background GPU Access**.
+  3. Build and install again.
+
+The project already declares the task identifiers in `Config/Info.plist`. Without either requirement, or when iOS ends the background time, the run pauses with its progress saved and continues when you return. The training screen says which of the two applies.
+
+### After it finishes
 
 - The model stays with the scan, also after the app restarts. In **Scan history**, cards mark scans that have a model, a run in progress, or a run that can resume. Tap **View 3DGS model** to orbit the model.
+- **Enhance model** loads the saved model and keeps training it: pick 3,000, 7,000, or 15,000 more iterations and a training resolution, for example a Low run first and then an enhancement at High (original). The camera refinements and colour model carry over. The current model stays until the enhancement completes; stopping it with *delete* leaves the saved model as it was.
 - **Share 3DGS model** sends `scan_…-3dgs.zip`. It contains `gaussians.ply` (the standard 3DGS PLY), metadata, the refined camera poses, and `ppisp.json` when PPISP was used.
 - In other 3DGS viewers, the PLY uses the COLMAP frame, so Y-up viewers show it upside down: rotate it 180° about X. Those viewers ignore `ppisp.json`.
 - From the options menu at the top right:

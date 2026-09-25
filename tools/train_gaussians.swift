@@ -19,7 +19,7 @@ import simd
         setvbuf(stdout, nil, _IOLBF, 0)
         var args = Array(CommandLine.arguments.dropFirst())
         guard args.count >= 2 else {
-            print("Usage: train_gaussians METALLIB SCAN [--iterations N] [--long-edge PX] [--max-gaussians N] [--sh D] [--holdout N] [--no-ppisp] [--no-pose] [--no-mip] [--budget-mb MB] [--out DIR]")
+            print("Usage: train_gaussians METALLIB SCAN [--iterations N] [--long-edge PX] [--max-gaussians N] [--sh D] [--holdout N] [--no-ppisp] [--no-pose] [--no-mip] [--budget-mb MB] [--out DIR] [--save-model DIR] [--enhance-from MODEL_DIR]")
             exit(2)
         }
         let library = URL(fileURLWithPath: args.removeFirst())
@@ -34,6 +34,8 @@ import simd
         var perFrame = false
         var seedJitter = true
         var excludeIDs: Set<Int> = []
+        var holdOutSegment = 0.0, fullResolution = false
+        var saveModel: URL?, enhanceFrom: URL?
         while !args.isEmpty {
             let a = args.removeFirst()
             switch a {
@@ -59,6 +61,10 @@ import simd
             case "--no-depth-seeds": config.depthSeeds = false
             case "--no-hole-fill": config.holeFilling = false
             case "--depth-loss": config.depthLoss = Double(args.removeFirst())!
+            case "--holdout-segment": holdOutSegment = Double(args.removeFirst())!
+            case "--eval-full-res": fullResolution = true
+            case "--save-model": saveModel = URL(fileURLWithPath: args.removeFirst())
+            case "--enhance-from": enhanceFrom = URL(fileURLWithPath: args.removeFirst())
             case "--exclude-ids": excludeIDs = Set(args.removeFirst().split(separator: ",").compactMap { Int($0) })
             case "--per-frame": perFrame = true
             case "--motion-blur": config.motionBlur = true
@@ -66,10 +72,16 @@ import simd
             default: print("Unknown option \(a)"); exit(2)
             }
         }
+        if let enhanceFrom {
+            // Enhance model: --iterations more on top of the saved model's.
+            guard let saved = GaussianExport.metadata(in: enhanceFrom) else { print("No model metadata in \(enhanceFrom.path)"); exit(2) }
+            config = config.enhancing(savedIterations: saved.iterations, savedGaussians: saved.gaussians, savedSHDegree: saved.shDegree)
+            print("enhancing a model of \(saved.iterations) iterations, \(saved.gaussians) Gaussians, SH \(saved.shDegree): \(config.runIterations) more to \(config.iterations)")
+        }
         let t0 = Date()
         let seedStart = Date()
         var dataset = try TrainingDataset.prepare(scan: scan, longEdge: config.longEdge, holdOutEvery: config.holdOutEvery,
-                                                  maxPoints: 250_000, depthSeedLimit: config.depthSeedLimit)
+                                                  maxPoints: 250_000, depthSeedLimit: config.depthSeedLimit, holdOutSegment: holdOutSegment)
         print(String(format: "seeds: %d points (depth seeds %@, limit %d) in %.1f s", dataset.points.count,
                      config.usesDepthSeeds ? "on" : "off", config.depthSeedLimit, Date().timeIntervalSince(seedStart)))
         dataset = try perturbed(dataset, scan: scan, poseFile: poseFile, noise: initNoise, keep: initKeep, random: initRandom,
@@ -91,7 +103,10 @@ import simd
         trainer.seedJitter = seedJitter
         print(String(format: "pose learning rate %.1e, seed jitter %@, depth loss %.2f", trainer.poseLearningRate,
                      seedJitter ? "on" : "off", config.depthLossWeight))
-        try trainer.initializeModel()
+        if let enhanceFrom { try trainer.initializeModel(fromSaved: enhanceFrom) } else { try trainer.initializeModel() }
+        if enhanceFrom != nil {
+            print(String(format: "enhancement start: validation PSNR %.3f (unaligned)", try trainer.evaluate().psnr))
+        }
         print("initial Gaussians \(trainer.model.activeCount), median size \(trainer.strategy.bounds.medianSize) m, footprint \(TrainingMemoryPlan.footprintBytes >> 20) MB")
         let start = Date()
         var window: [Double] = [], psnrWindow: [Double] = [], peak = 0, skipped = 0
@@ -108,13 +123,14 @@ import simd
                 let elapsed = Date().timeIntervalSince(start)
                 print(String(format: "it %5d  loss %.4f  train PSNR %.2f  Gaussians %7d  %.1f ms/it  footprint %d MB",
                              r.iteration, window.reduce(0, +) / Double(window.count), psnrWindow.reduce(0, +) / Double(psnrWindow.count),
-                             r.gaussians, elapsed / Double(r.iteration) * 1000, TrainingMemoryPlan.footprintBytes >> 20))
+                             r.gaussians, elapsed / Double(max(1, r.iteration - config.startIteration)) * 1000, TrainingMemoryPlan.footprintBytes >> 20))
                 window.removeAll(); psnrWindow.removeAll()
             }
         }
         let seconds = Date().timeIntervalSince(start)
         for (k, v) in trainer.profile.sorted(by: { $0.key < $1.key }) {
-            print(String(format: "  profile %@: %.2f per iteration", k, k == "intersections" ? v / Double(config.iterations) : v / Double(config.iterations) * 1000))
+            let n = Double(max(1, config.runIterations))
+            print(String(format: "  profile %@: %.2f per iteration", k, k == "intersections" ? v / n : v / n * 1000))
         }
         let eval = try trainer.evaluate()
         for scale in [0.5, 0.25] {
@@ -124,13 +140,21 @@ import simd
         if alignSteps > 0 {
             let aligned = try trainer.evaluate(alignSteps: alignSteps)
             print(String(format: "validation with test-time pose alignment (%d steps): PSNR %.3f SSIM %.4f", alignSteps, aligned.psnr, aligned.ssim))
+            if fullResolution, let f = trainer.dataset.frames.first {
+                // The photos' own resolution, with the held-out views' test-time alignment.
+                let scale = Double(f.intrinsics.width) / Double(trainer.dataset.width)
+                let full = try trainer.evaluate(scale: scale, aligned: true)
+                print(String(format: "validation aligned at full resolution (%dx%d): PSNR %.3f SSIM %.4f over %d views",
+                             f.intrinsics.width, f.intrinsics.height, full.psnr, full.ssim, full.count))
+            }
+            if holdOutSegment > 0 { try reportHeldOutViews(trainer) }
             if config.captureMotion != nil {
                 let still = try trainer.evaluate(alignSteps: alignSteps, captureMotion: false)
                 print(String(format: "validation aligned, rendered without capture motion: PSNR %.3f SSIM %.4f", still.psnr, still.ssim))
             }
         }
         print(String(format: "done: %d iterations in %.1f s (%.1f ms/it), skipped %d, validation PSNR %.3f SSIM %.4f over %d views, peak footprint %d MB",
-                     config.iterations, seconds, seconds / Double(config.iterations) * 1000, skipped, eval.psnr, eval.ssim, eval.count, peak >> 20))
+                     config.runIterations, seconds, seconds / Double(max(1, config.runIterations)) * 1000, skipped, eval.psnr, eval.ssim, eval.count, peak >> 20))
         if config.ppisp {
             let s = trainer.ppisp.summary
             print(String(format: "PPISP: exposure %.2f..%.2f EV, corner vignetting %.3f", s.minEV, s.maxEV, s.cornerVignetting))
@@ -142,6 +166,12 @@ import simd
         if perFrame { try reportPerFrame(trainer) }
         try reportCoverage(trainer)
         if let out { try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true); _ = out }
+        if let saveModel {
+            try FileManager.default.createDirectory(at: saveModel, withIntermediateDirectories: true)
+            try GaussianTrainingSession.writeModelFiles(trainer, into: saveModel, validation: eval.count > 0 ? eval.psnr : nil,
+                                                        elapsedSeconds: seconds, peakFootprintMB: peak >> 20)
+            print("saved model: \(saveModel.path)")
+        }
     }
 
     /// Experiment inputs: poses from another pose file of the scan (same frame selection), and a
@@ -241,6 +271,21 @@ import simd
 
     /// Training-view PSNR per frame with the frame's angular speed (from neighbouring poses),
     /// to separate motion (blur / rolling shutter) from other error sources.
+    /// Aligned PSNR of each held-out view against its distance from the nearest training camera,
+    /// to tell interpolation between training views from extrapolation beyond them.
+    static func reportHeldOutViews(_ trainer: GaussianTrainer) throws {
+        let frames = trainer.dataset.frames
+        func position(_ i: Int) -> SIMD3<Double> { let t = frames[i].transform; return SIMD3(t[3], t[7], t[11]) }
+        func forward(_ i: Int) -> SIMD3<Double> { let t = frames[i].transform; return -SIMD3(t[2], t[6], t[10]) }
+        for i in trainer.dataset.validationFrames {
+            let nearest = trainer.dataset.trainFrames.min { simd_distance(position($0), position(i)) < simd_distance(position($1), position(i)) }!
+            let angle = acos(max(-1, min(1, simd_dot(forward(nearest), forward(i))))) * 180 / .pi
+            let psnr = try trainer.evaluate(scale: 1, frames: [i], aligned: true).psnr
+            print(String(format: "held-out frame %d aligned PSNR %.2f, nearest training camera %.2f m / %.1f°",
+                         frames[i].id, psnr, simd_distance(position(nearest), position(i)), angle))
+        }
+    }
+
     static func reportPerFrame(_ trainer: GaussianTrainer) throws {
         let frames = trainer.dataset.frames
         var rows: [(Int, Double, Double)] = []

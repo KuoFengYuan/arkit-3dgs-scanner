@@ -10,22 +10,24 @@ enum TrainingPresentation {
     /// refinement until 95 %, then the final settling iterations).
     static func stage(_ s: TrainingSnapshot) -> String {
         switch s.phase {
-        case .preparing: return L10n.text("讀取照片與點雲")
+        case .preparing: return s.startIteration > 0 ? L10n.text("讀取照片與模型") : L10n.text("讀取照片與點雲")
         case .finishing: return L10n.text("儲存 3DGS 模型")
         case .paused: return L10n.text("已暫停")
         case .completed: return L10n.text("3DGS 模型完成")
         case .failed: return L10n.text("訓練失敗")
         case .cancelled: return L10n.text("已停止")
         case .running:
-            let p = fraction(s)
+            // The schedule's position (an enhancement starts part-way through it).
+            let p = Double(s.iteration) / Double(max(1, s.total))
             if p < 0.5 { return L10n.text("建立形狀並增加細節") }
             if p < 0.95 { return L10n.text("讓細節更清晰") }
             return L10n.text("最後修飾")
         }
     }
 
+    /// Progress of this run: an enhancement counts from the saved model's iteration.
     static func fraction(_ s: TrainingSnapshot) -> Double {
-        Double(s.iteration) / Double(max(1, s.total))
+        Double(max(0, s.iteration - s.startIteration)) / Double(max(1, s.total - s.startIteration))
     }
 
     static func percent(_ s: TrainingSnapshot) -> Int { Int(fraction(s) * 100) }
@@ -34,7 +36,7 @@ enum TrainingPresentation {
     /// faster than the rest because the model is still small).
     static func remaining(_ s: TrainingSnapshot) -> String? {
         guard s.phase == .running else { return nil }
-        guard s.iteration >= max(100, s.total / 50), let seconds = s.remainingSeconds else {
+        guard s.iteration - s.startIteration >= max(100, (s.total - s.startIteration) / 50), let seconds = s.remainingSeconds else {
             return L10n.text("正在估算剩餘時間…")
         }
         if seconds < 60 { return L10n.text("剩餘不到 1 分鐘") }
@@ -66,6 +68,36 @@ enum TrainingPresentation {
         }
     }
 
+    /// Enhance model: the quality choices add iterations to the saved model.
+    static func enhanceTitle(_ preset: GaussianTrainingConfiguration.Preset) -> String {
+        switch preset {
+        case .quick: return L10n.text("稍微加強")
+        case .standard: return L10n.text("標準加強")
+        case .high: return L10n.text("大幅加強")
+        }
+    }
+
+    static func enhanceDetail(_ iterations: Int) -> String {
+        L10n.text("再訓練 \(iterations.formatted()) 次")
+    }
+
+    static func title(_ resolution: GaussianTrainingConfiguration.Resolution) -> String {
+        switch resolution {
+        case .low: return L10n.text("低")
+        case .medium: return L10n.text("中")
+        case .high: return L10n.text("高（原始）")
+        }
+    }
+
+    /// Relative cost from the pixel count (per-iteration work scales with it).
+    static func detail(_ resolution: GaussianTrainingConfiguration.Resolution) -> String {
+        switch resolution {
+        case .low: return L10n.text("960 px，最快、最省記憶體")
+        case .medium: return L10n.text("1440 px，細節較多；時間約 1.7 倍")
+        case .high: return L10n.text("原始 1920 px，細節最多；時間約 2.6 倍，記憶體用量最高")
+        }
+    }
+
     static func symbol(_ preset: GaussianTrainingConfiguration.Preset) -> String {
         switch preset {
         case .quick: return "hare"
@@ -80,17 +112,22 @@ enum TrainingPresentation {
 nonisolated enum TrainingSpeedHistory {
     static let key = "gaussianTraining.secondsPerIteration"
 
-    static func record(_ preset: GaussianTrainingConfiguration.Preset, secondsPerIteration: Double) {
+    /// One measurement per preset and training resolution.
+    static func slot(_ configuration: GaussianTrainingConfiguration) -> String {
+        "\(configuration.preset.rawValue)@\(configuration.longEdge)"
+    }
+
+    static func record(_ configuration: GaussianTrainingConfiguration, secondsPerIteration: Double) {
         guard secondsPerIteration.isFinite, secondsPerIteration > 0 else { return }
         var all = UserDefaults.standard.dictionary(forKey: key) as? [String: Double] ?? [:]
-        all[preset.rawValue] = secondsPerIteration
+        all[slot(configuration)] = secondsPerIteration
         UserDefaults.standard.set(all, forKey: key)
     }
 
     static func estimatedSeconds(_ configuration: GaussianTrainingConfiguration) -> Double? {
         guard let all = UserDefaults.standard.dictionary(forKey: key) as? [String: Double],
-              let spi = all[configuration.preset.rawValue] else { return nil }
-        return spi * Double(configuration.iterations)
+              let spi = all[slot(configuration)] else { return nil }
+        return spi * Double(configuration.runIterations)
     }
 }
 

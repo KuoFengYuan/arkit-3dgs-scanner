@@ -25,6 +25,8 @@ nonisolated struct TrainingSnapshot: Equatable, Sendable {
     var message: String?
     var validationPSNR: Double?
     var preparationProgress = 0.0
+    /// Where this run started: the saved model's iteration for Enhance model, else 0.
+    var startIteration = 0
 
     var remainingSeconds: Double? {
         guard let s = secondsPerIteration, phase == .running, total > iteration else { return nil }
@@ -68,18 +70,25 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
     private var pauseRequested = false
     private var cancelRequested: Bool?        // keep checkpoint?
     private var checkpointRequested = false
+    /// Finish now: save the current model as the result and end the run.
+    private var finishRequested = false
     private var memoryWarning = false
     private var memoryCritical = false
     private var backgrounded = false
+    /// The app is in the background but a continued-processing task keeps training (iOS 26+).
+    private var appInBackground = false
+    private var capturing = false
     private var viewer: ViewerRequest?
     private var viewerDirty = false
     private var lastInteraction = Date.distantPast
     private(set) var isFinished = false
 
     enum SessionError: LocalizedError {
-        case resumeNeedsMemory(requiredMB: Int), repeatedGPUFailure(String)
+        case resumeNeedsMemory(requiredMB: Int), repeatedGPUFailure(String), enhanceNeedsMemory(requiredMB: Int)
         var errorDescription: String? {
             switch self {
+            case .enhanceNeedsMemory(let mb):
+                return L10n.text("可用記憶體不足以載入已保存的模型（約需 \(mb) MB）。請選較低的訓練解析度，或關閉其他 App 後再試；模型仍保留。")
             case .resumeNeedsMemory(let mb):
                 return L10n.text("可用記憶體不足以載入上次的進度（約需 \(mb) MB）。請關閉其他 App 後再繼續，進度仍保留。")
             case .repeatedGPUFailure(let reason):
@@ -101,11 +110,18 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
     func resumeTraining() { lock.lock(); pauseRequested = false; lock.broadcast(); lock.unlock() }
     func cancel(keepCheckpoint: Bool) { lock.lock(); cancelRequested = keepCheckpoint; lock.broadcast(); lock.unlock() }
     func saveCheckpoint() { lock.lock(); checkpointRequested = true; lock.broadcast(); lock.unlock() }
+    /// Ends the run now and saves the current model as its result (like a completed run).
+    func finishNow() { lock.lock(); finishRequested = true; lock.broadcast(); lock.unlock() }
     func memoryPressure(critical: Bool) {
         lock.lock(); if critical { memoryCritical = true } else { memoryWarning = true }; lock.broadcast(); lock.unlock()
     }
     /// GPU work is not allowed in the background: pause (with a checkpoint) until foreground.
     func setBackgrounded(_ value: Bool) { lock.lock(); backgrounded = value; lock.broadcast(); lock.unlock() }
+    /// The app left the foreground while training continues (background GPU granted): skip the
+    /// live preview, and treat a GPU failure as losing background access (pause, not an error).
+    func setAppInBackground(_ value: Bool) { lock.lock(); appInBackground = value; lock.broadcast(); lock.unlock() }
+    /// Pause while the user captures a new scan; continue when the capture closes.
+    func setCapturing(_ value: Bool) { lock.lock(); capturing = value; lock.broadcast(); lock.unlock() }
     func updateViewer(_ request: ViewerRequest?, interactive: Bool) {
         lock.lock()
         if request != viewer { viewer = request; viewerDirty = true }
@@ -188,12 +204,15 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
 
     private func execute() throws {
         snapshot.total = configuration.iterations
+        snapshot.startIteration = configuration.startIteration
+        if !resume { snapshot.iteration = configuration.startIteration }
         snapshot.phase = .preparing
         publish(force: true)
         let now = Date()
         let previous = workspace.record()
         previousRecord = previous
-        record = TrainingRecord(status: .preparing, configuration: configuration, iteration: resume ? (previous?.iteration ?? 0) : 0,
+        record = TrainingRecord(status: .preparing, configuration: configuration,
+                                iteration: resume ? (previous?.iteration ?? 0) : configuration.startIteration,
                                 gaussians: 0, elapsedSeconds: resume ? (previous?.elapsedSeconds ?? 0) : 0,
                                 checkpointIteration: resume ? previous?.checkpointIteration : nil,
                                 startedAt: resume ? (previous?.startedAt ?? now) : now, updatedAt: now)
@@ -224,6 +243,12 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
         // progress stays) instead of reporting a mismatched checkpoint.
         if resume, let header = GaussianCheckpoint.header(at: workspace.checkpointURL) {
             try Self.checkResumeFits(rows: header.rows, plan: plan)
+        } else if configuration.isEnhancement {
+            // Enhance model: every saved Gaussian needs a row at this resolution's plan.
+            let saved = try GaussianExport.readHeader(workspace.modelURL)
+            if saved.count > plan.gaussianCapacity {
+                throw SessionError.enhanceNeedsMemory(requiredMB: Self.requiredMB(rows: saved.count, plan: plan))
+            }
         }
         let metal = try GaussianMetal(libraryURL: libraryURL)
         let trainer = try GaussianTrainer(configuration: configuration, dataset: dataset, plan: plan, metal: metal)
@@ -239,7 +264,8 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
             // A new run replaces an old checkpoint only once it is ready to start; the saved
             // model is replaced only when the new run completes.
             workspace.removeCheckpoint()
-            try trainer.initializeModel()
+            if configuration.isEnhancement { try trainer.initializeModel(fromSaved: workspace.modelDirectory) }
+            else { try trainer.initializeModel() }
         }
         let depth = Double(trainer.strategy.bounds.valid ? max(0.5, trainer.strategy.bounds.medianSize * 0.6) : 1.5)
         onPreparedViews(dataset.frames, depth)
@@ -256,9 +282,13 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
     /// not fit the plan that fits the memory available now.
     static func checkResumeFits(rows: Int, plan: TrainingMemoryPlan) throws {
         guard rows > plan.gaussianCapacity else { return }
+        throw SessionError.resumeNeedsMemory(requiredMB: requiredMB(rows: rows, plan: plan))
+    }
+
+    /// Estimated plan size (MB) with room for `rows` Gaussians.
+    static func requiredMB(rows: Int, plan: TrainingMemoryPlan) -> Int {
         let perGaussian = Double(plan.totalBytes) / Double(max(1, plan.gaussianCapacity))
-        let required = Double(plan.totalBytes) + perGaussian * Double(rows - plan.gaussianCapacity)
-        throw SessionError.resumeNeedsMemory(requiredMB: Int(required) >> 20)
+        return Int(Double(plan.totalBytes) + perGaussian * Double(max(0, rows - plan.gaussianCapacity))) >> 20
     }
 
     private var cancelRequestedNow: Bool { cancelValue != nil }
@@ -286,7 +316,10 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
             // Controls.
             lock.lock()
             let cancel = cancelRequested
+            // Finishing renders and exports, so it waits while the app has no GPU access.
+            let finishing = finishRequested && !backgrounded
             var pauseReason: TrainingRecord.Reason? = pauseRequested ? .user : nil
+            if capturing { pauseReason = .capture }
             if backgrounded { pauseReason = .background }
             let wantsCheckpoint = checkpointRequested
             checkpointRequested = false
@@ -297,6 +330,7 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
                 if keep && trainer.iteration > (snapshot.checkpointIteration ?? 0) { try? checkpoint(trainer) }
                 return finishCancelled(keepCheckpoint: keep)
             }
+            if finishing { break }
             if critical || TrainingMemoryPlan.availableBytesIfKnown.map({ $0 < 150 << 20 }) == true {
                 // Not safe to continue: keep a valid checkpoint and stop with a clear message.
                 trainer.reduceMemory()
@@ -345,8 +379,13 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
                 // A GPU command failed (typically: the app lost the foreground mid-iteration). The
                 // model may be partly updated, so continue from the last checkpoint. Replays are
                 // deterministic, so a failure that repeats in the foreground stops the run.
-                guard workspace.hasCheckpoint else { throw GaussianTrainer.TrainingError.gpuFailure(reason) }
-                lock.lock(); let wasBackgrounded = backgrounded; lock.unlock()
+                lock.lock()
+                // In the background the system can withdraw GPU access: wait for the foreground.
+                if appInBackground { backgrounded = true }
+                let wasBackgrounded = backgrounded
+                lock.unlock()
+                // Without a checkpoint yet, a background loss of the GPU continues from memory.
+                guard workspace.hasCheckpoint || wasBackgrounded else { throw GaussianTrainer.TrainingError.gpuFailure(reason) }
                 if !wasBackgrounded {
                     foregroundGPUFailures += 1
                     if foregroundGPUFailures > 2 { throw SessionError.repeatedGPUFailure(reason) }
@@ -358,9 +397,11 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
                 publish(force: true)
                 lock.lock(); let inBackground = backgrounded; lock.unlock()
                 if inBackground { waitWhilePaused(trainer, reason: .background) }
-                let header = try GaussianCheckpoint.load(workspace.checkpointURL, into: trainer)
-                elapsedAtRunStart = header.elapsedSeconds
-                snapshot.iteration = header.iteration
+                if workspace.hasCheckpoint {
+                    let header = try GaussianCheckpoint.load(workspace.checkpointURL, into: trainer)
+                    elapsedAtRunStart = header.elapsedSeconds
+                    snapshot.iteration = header.iteration
+                }
                 runStart = Date()
                 snapshot.phase = .running
                 snapshot.reason = nil
@@ -405,8 +446,8 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
     private func waitWhilePaused(_ trainer: GaussianTrainer, reason: TrainingRecord.Reason) {
         while true {
             lock.lock()
-            let leave = cancelRequested != nil
-            let userPaused = pauseRequested, inBackground = backgrounded
+            let userPaused = pauseRequested || capturing, inBackground = backgrounded
+            let leave = cancelRequested != nil || (finishRequested && !inBackground)
             let wantsCheckpoint = checkpointRequested
             checkpointRequested = false
             lock.unlock()
@@ -418,7 +459,7 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
             if !inBackground { renderIfNeeded(trainer, paused: true) }
             publish()
             lock.lock()
-            if cancelRequested == nil && !checkpointRequested && !viewerDirty && pauseRequested == userPaused
+            if cancelRequested == nil && !finishRequested && !checkpointRequested && !viewerDirty && (pauseRequested || capturing) == userPaused
                 && backgrounded == inBackground {
                 _ = lock.wait(until: Date().addingTimeInterval(userPaused || inBackground ? 1 : 5))
             }
@@ -428,7 +469,7 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
 
     private func renderIfNeeded(_ trainer: GaussianTrainer, paused: Bool) {
         lock.lock()
-        guard let request = viewer, !backgrounded else { lock.unlock(); return }
+        guard let request = viewer, !backgrounded, !appInBackground else { lock.unlock(); return }
         let dirty = viewerDirty
         let interactive = Date().timeIntervalSince(lastInteraction) < 0.5
         lock.unlock()
@@ -531,6 +572,19 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
         try fm.createDirectory(at: staging, withIntermediateDirectories: true)
         var published = false
         defer { if !published { try? fm.removeItem(at: staging) } }
+        try writeModelFiles(trainer, into: staging, validation: validation, elapsedSeconds: elapsedSeconds, peakFootprintMB: peakFootprintMB)
+        let destination = workspace.modelDirectory
+        if fm.fileExists(atPath: destination.path) {
+            _ = try fm.replaceItemAt(destination, withItemAt: staging)
+        } else {
+            try fm.moveItem(at: staging, to: destination)
+        }
+        published = true
+    }
+
+    /// Writes the model files (PLY, metadata, PPISP, refined poses, report, cover) into `staging`.
+    static func writeModelFiles(_ trainer: GaussianTrainer, into staging: URL, validation: Double?,
+                                elapsedSeconds: Double, peakFootprintMB: Int) throws {
         let config = trainer.configuration
         try GaussianExport.writePLY(trainer.model, to: staging.appendingPathComponent(GaussianExport.plyName),
                                     comment: "arkit-3dgs-scanner on-device 3DGS, \(trainer.iteration) iterations, SH \(config.shDegree)")
@@ -584,13 +638,6 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
                 try? writeJPEG(frame, to: staging.appendingPathComponent("preview.jpg"))
             }
         }
-        let destination = workspace.modelDirectory
-        if fm.fileExists(atPath: destination.path) {
-            _ = try fm.replaceItemAt(destination, withItemAt: staging)
-        } else {
-            try fm.moveItem(at: staging, to: destination)
-        }
-        published = true
     }
 
     static func writeJPEG(_ frame: RenderedFrame, to url: URL) throws {

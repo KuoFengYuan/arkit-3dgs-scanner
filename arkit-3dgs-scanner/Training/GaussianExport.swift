@@ -126,15 +126,15 @@ nonisolated enum GaussianExport {
         return (count, degree, end.upperBound, names)
     }
 
+    /// Reads the PLY into `model`. A model of a higher SH degree gets the file's coefficients
+    /// and zero for the extra bands (Enhance model can raise the degree).
     static func readPLY(_ url: URL, into model: GaussianModel) throws -> Int {
         let info = try readHeader(url)
-        guard info.shDegree == model.shDegree, info.count <= model.capacity else { throw ExportError.unsupported }
+        guard info.shDegree <= model.shDegree, info.count <= model.capacity else { throw ExportError.unsupported }
         let data = try Data(contentsOf: url, options: .alwaysMapped)
         let stride = info.names.count * 4
         guard data.count >= info.headerBytes + info.count * stride else { throw ExportError.damaged }
-        let rest = model.shRest
-        var positions = [SIMD3<Float>](), colors = [SIMD3<Float>]()
-        positions.reserveCapacity(info.count); colors.reserveCapacity(info.count)
+        let rest = model.shRest, fileRest = (info.shDegree + 1) * (info.shDegree + 1) - 1
         model.initialize(positions: [], colors: [])
         let L = model.layout, p = model.floats(model.params)
         data.withUnsafeBytes { raw in
@@ -144,9 +144,9 @@ nonisolated enum GaussianExport {
                 p[Int(L.means) + 3 * row] = f(0); p[Int(L.means) + 3 * row + 1] = -f(1); p[Int(L.means) + 3 * row + 2] = -f(2)
                 for c in 0..<3 { p[Int(L.sh0) + 3 * row + c] = f(6 + c) }
                 for c in 0..<3 { for k in 0..<rest {
-                    p[Int(L.shN) + row * rest * 3 + k * 3 + c] = f(9 + c * rest + k) * shFlipSigns[k + 1]
+                    p[Int(L.shN) + row * rest * 3 + k * 3 + c] = k < fileRest ? f(9 + c * fileRest + k) * shFlipSigns[k + 1] : 0
                 } }
-                let o = 9 + 3 * rest
+                let o = 9 + 3 * fileRest
                 p[Int(L.opacities) + row] = f(o)
                 for k in 0..<3 { p[Int(L.scales) + 3 * row + k] = f(o + 1 + k) }
                 let q = unflipQuaternion(SIMD4(f(o + 4), f(o + 5), f(o + 6), f(o + 7)))
@@ -193,6 +193,12 @@ nonisolated enum GaussianExport {
         var frames: [Frame]
     }
 
+    /// The saved model's metadata (`gaussians.json`), or nil.
+    static func metadata(in directory: URL) -> Metadata? {
+        (try? Data(contentsOf: directory.appendingPathComponent(metadataName)))
+            .flatMap { try? JSONDecoder.training.decode(Metadata.self, from: $0) }
+    }
+
     static func ppispFile(_ ppisp: PPISPModel, frames: [TrainingFrame]) -> PPISPFile {
         var cameras: [PPISPFile.Camera] = []
         for c in 0..<ppisp.cameras {
@@ -231,5 +237,28 @@ nonisolated enum GaussianExport {
         c2w.columns.1 = -c2w.columns.1
         c2w.columns.2 = -c2w.columns.2
         return (0..<4).flatMap { r in (0..<4).map { c2w[$0][r] } }
+    }
+}
+
+nonisolated extension PPISPModel {
+    /// Restores a saved model's colour model (`ppisp.json`), matching frames by id; frames it
+    /// does not list keep their initial values. The optimiser state starts fresh.
+    mutating func restore(_ file: GaussianExport.PPISPFile, frames list: [TrainingFrame]) {
+        let byID = Dictionary(file.frames.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        for (index, frame) in list.enumerated() where index < frames {
+            guard let saved = byID[frame.id], saved.colorLatents.count == 8, saved.exposureEV.isFinite else { continue }
+            parameters[exposureOffset + index] = saved.exposureEV
+            for k in 0..<8 { parameters[colorOffset + index * 8 + k] = saved.colorLatents[k] }
+        }
+        for (c, camera) in file.cameras.prefix(cameras).enumerated() {
+            for ch in 0..<3 {
+                if camera.vignetting.count == 3, camera.vignetting[ch].count == 5 {
+                    for k in 0..<5 { parameters[vignettingOffset + c * 15 + ch * 5 + k] = camera.vignetting[ch][k] }
+                }
+                if camera.responseRaw.count == 3, camera.responseRaw[ch].count == 4 {
+                    for k in 0..<4 { parameters[crfOffset + c * 12 + ch * 4 + k] = camera.responseRaw[ch][k] }
+                }
+            }
+        }
     }
 }

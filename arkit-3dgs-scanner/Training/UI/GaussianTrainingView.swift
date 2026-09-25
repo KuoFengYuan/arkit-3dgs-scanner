@@ -15,6 +15,7 @@ struct GaussianTrainingView: View {
     @State private var hasCheckpoint = false
     @State private var hasModel = false
     @State private var preset: GaussianTrainingConfiguration.Preset = .standard
+    @State private var resolution: GaussianTrainingConfiguration.Resolution = .low
     @State private var poseOptimization = true
     @State private var ppisp = true
     @State private var mipFilter = true
@@ -41,6 +42,10 @@ struct GaussianTrainingView: View {
     @State private var debugIterations: Int?
     @State private var frameCount: Int?
     @State private var showAdvanced = false
+    /// Enhance model: the setup continues the saved model instead of starting a new one.
+    @State private var enhancing = false
+    @State private var savedModel: GaussianExport.Metadata?
+    @State private var confirmFinish = false
     @State private var showGestureHint = true
 
     private var workspace: TrainingWorkspace { TrainingWorkspace(scan: scan) }
@@ -239,6 +244,7 @@ struct GaussianTrainingView: View {
         case .thermal: return Notice(text: L10n.text("裝置過熱，已自動暫停並儲存進度；降溫後會自動繼續"), symbol: "thermometer.high", tone: .warning)
         case .battery: return Notice(text: L10n.text("電量低於 15%，已暫停；接上電源後會自動繼續"), symbol: "battery.25", tone: .warning)
         case .memory: return Notice(text: L10n.text("可用記憶體不足，已儲存進度並暫停訓練。關閉其他 App 後可繼續。"), symbol: "memorychip", tone: .warning)
+        case .capture: return Notice(text: L10n.text("正在拍攝，3DGS 訓練先暫停；結束拍攝後會自動繼續"), symbol: "camera.viewfinder", tone: .info)
         default: return Notice(text: L10n.text("已暫停，進度已儲存"), symbol: "pause.circle", tone: .neutral)
         }
     }
@@ -248,7 +254,7 @@ struct GaussianTrainingView: View {
     private var bottomPanel: some View {
         VStack(spacing: DS.Space.s) {
             if isActive { activeControls }
-            else if showsModel { modelActions }
+            else if showsModel && !enhancing { modelActions }
             else { setupPanel }
         }
         .padding(DS.Space.m)
@@ -258,6 +264,7 @@ struct GaussianTrainingView: View {
         .padding(.bottom, DS.Space.xs)
         .frame(maxWidth: .infinity)
         .animation(DS.springy, value: isActive)
+        .animation(DS.springy, value: enhancing)
     }
 
     private var activeControls: some View {
@@ -310,6 +317,22 @@ struct GaussianTrainingView: View {
                         Text(L10n.text("保留進度時會先儲存目前的檢查點，之後可從掃描紀錄繼續。"))
                     }
             }
+            // Good enough already: keep the current model as the result and end the run.
+            Button { confirmFinish = true } label: { Label(L10n.text("完成並保存模型"), systemImage: "checkmark.seal") }
+                .buttonStyle(DSSecondaryButtonStyle(fill: true, tint: DS.Palette.success))
+                .disabled((snapshot.phase != .running && snapshot.phase != .paused) || snapshot.iteration <= snapshot.startIteration)
+                .accessibilityIdentifier("finishTraining")
+                .confirmationDialog(L10n.text("現在完成並保存模型？"), isPresented: $confirmFinish, titleVisibility: .visible) {
+                    Button(L10n.text("完成並保存")) { center.finishNow() }
+                    Button(L10n.text("繼續訓練"), role: .cancel) {}
+                } message: {
+                    Text(L10n.text("以目前的訓練結果建立模型並結束訓練。之後可以用「加強模型」繼續訓練它。"))
+                }
+            Label(center.continuesInBackground ? L10n.text("可以切到其他 App，訓練會在背景繼續")
+                                               : L10n.text("可以在 App 內切換頁面；切到其他 App 時會先暫停並儲存進度"),
+                  systemImage: center.continuesInBackground ? "arrow.triangle.2.circlepath" : "pause.circle")
+                .font(.caption2).foregroundStyle(DS.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
             HStack {
                 if let checkpoint = snapshot.checkpointIteration {
                     Label(L10n.text("已儲存至第 \(checkpoint.formatted()) 次迭代"), systemImage: "checkmark.icloud")
@@ -367,6 +390,16 @@ struct GaussianTrainingView: View {
                 Spacer(minLength: 0)
             }
             .padding(.bottom, DS.Space.xxs)
+            Button { withAnimation(DS.springy) { beginEnhancing() } } label: {
+                DSActionCardLabel(title: L10n.text("加強模型"),
+                                  subtitle: L10n.text("從這個模型繼續訓練，也可以改用更高的解析度"),
+                                  tint: DS.Palette.accent) {
+                    DSActionIcon(symbol: "wand.and.sparkles", tint: DS.Palette.accent)
+                }
+            }
+            .buttonStyle(DSCardButtonStyle())
+            .disabled(!supported || otherScanTraining || savedModel == nil)
+            .accessibilityIdentifier("enhanceGaussianModel")
             Button { Task { await share() } } label: {
                 DSActionCardLabel(title: preparingArchive ? L10n.text("處理中…") : L10n.text("分享 3DGS 模型"),
                                   subtitle: usesPPISP ? L10n.text("PLY 格式，可用一般 3DGS 檢視器開啟；色彩校正另存 ppisp.json")
@@ -383,14 +416,30 @@ struct GaussianTrainingView: View {
     }
 
     private func modelSummary(_ record: TrainingRecord) -> String {
-        var parts = [L10n.text("\(record.gaussians.formatted()) 個高斯"), L10n.text("用時 \(Self.duration(record.elapsedSeconds))")]
+        var parts = [record.finishedEarly ? L10n.text("\(record.iteration.formatted()) 次迭代（提前完成）") : L10n.text("\(record.iteration.formatted()) 次迭代"),
+                     L10n.text("\(record.gaussians.formatted()) 個高斯"),
+                     L10n.text("用時 \(Self.duration(record.elapsedSeconds))")]
         if let psnr = record.validationPSNR { parts.append(String(format: L10n.text("驗證 PSNR %.1f dB"), psnr)) }
         return parts.joined(separator: "・")
     }
 
     private var setupPanel: some View {
         VStack(alignment: .leading, spacing: DS.Space.s) {
-            if hasCheckpoint, let record {
+            if enhancing, let savedModel {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: DS.Space.xxs) {
+                        Text(L10n.text("加強 3DGS 模型")).font(.title3.weight(.bold)).foregroundStyle(DS.Palette.textPrimary)
+                        Text(L10n.text("從已保存的模型（\(savedModel.iterations.formatted()) 次迭代・\(savedModel.gaussians.formatted()) 個高斯）繼續訓練；新的結果完成前，會保留目前的模型。"))
+                            .font(.subheadline).foregroundStyle(DS.Palette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: DS.Space.xs)
+                    Button(L10n.text("取消")) { withAnimation(DS.springy) { enhancing = false } }
+                        .font(.subheadline.weight(.semibold))
+                        .accessibilityIdentifier("cancelEnhance")
+                }
+                setupChoices(startTitle: L10n.text("開始加強"), identifier: "startEnhance")
+            } else if hasCheckpoint, let record {
                 HStack(spacing: DS.Space.s) {
                     progressRing(record.progress, tint: DS.Palette.warning) {
                         Image(systemName: "pause.fill").font(.footnote.weight(.bold))
@@ -433,29 +482,50 @@ struct GaussianTrainingView: View {
                         .font(.subheadline).foregroundStyle(DS.Palette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                VStack(spacing: DS.Space.xs) {
-                    ForEach(GaussianTrainingConfiguration.Preset.allCases, id: \.self) { presetCard($0) }
-                }
-                readiness
-                HStack(spacing: DS.Space.xs) {
-                    Button { showAdvanced = true } label: { Label(L10n.text("進階設定"), systemImage: "slider.horizontal.3") }
-                        .buttonStyle(DSIconButtonStyle(size: DS.Size.primaryHeight))
-                        .accessibilityIdentifier("trainingAdvancedSettings")
-                    Button { start(resume: false) } label: { Label(L10n.text("開始訓練"), systemImage: "sparkles") }
-                        .buttonStyle(DSPrimaryButtonStyle())
-                        .disabled(!supported || otherScanTraining || estimateError != nil)
-                        .accessibilityIdentifier("startTraining")
-                }
+                setupChoices(startTitle: L10n.text("開始訓練"), identifier: "startTraining")
             }
         }
         .onChange(of: preset) { _, _ in Task { await updateEstimate() } }
+        .onChange(of: resolution) { _, _ in Task { await updateEstimate() } }
+    }
+
+    /// Quality cards, resolution, memory check, and the start button (new run or enhancement).
+    @ViewBuilder
+    private func setupChoices(startTitle: String, identifier: String) -> some View {
+        VStack(spacing: DS.Space.xs) {
+            ForEach(GaussianTrainingConfiguration.Preset.allCases, id: \.self) { presetCard($0) }
+        }
+        resolutionPicker
+        readiness
+        HStack(spacing: DS.Space.xs) {
+            Button { showAdvanced = true } label: { Label(L10n.text("進階設定"), systemImage: "slider.horizontal.3") }
+                .buttonStyle(DSIconButtonStyle(size: DS.Size.primaryHeight))
+                .accessibilityIdentifier("trainingAdvancedSettings")
+            Button { start(resume: false) } label: { Label(startTitle, systemImage: enhancing ? "wand.and.sparkles" : "sparkles") }
+                .buttonStyle(DSPrimaryButtonStyle())
+                .disabled(!supported || otherScanTraining || estimateError != nil)
+                .accessibilityIdentifier(identifier)
+        }
+    }
+
+    /// Training image resolution: low (960 px), medium (1440 px) or the photos' own (1920 px).
+    private var resolutionPicker: some View {
+        VStack(alignment: .leading, spacing: DS.Space.xxs) {
+            Text(L10n.text("訓練解析度")).font(.subheadline.weight(.semibold)).foregroundStyle(DS.Palette.textPrimary)
+            DSSegmentedPicker(segments: GaussianTrainingConfiguration.Resolution.allCases.map {
+                DSSegment(value: $0, title: TrainingPresentation.title($0), symbol: $0 == .high ? "sparkles.rectangle.stack" : $0 == .medium ? "rectangle.stack" : "rectangle")
+            }, selection: $resolution, fillsWidth: true)
+            .accessibilityLabel(L10n.text("訓練解析度"))
+            .accessibilityIdentifier("trainingResolution")
+            Text(TrainingPresentation.detail(resolution)).font(.caption).foregroundStyle(DS.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     /// One quality choice: what it is for, in words, and how long it took here before.
     private func presetCard(_ value: GaussianTrainingConfiguration.Preset) -> some View {
         let selected = preset == value
-        var config = GaussianTrainingConfiguration.preset(value)
-        if let debugIterations { config.iterations = debugIterations }
+        let config = configuration(for: value, enhance: enhancing)
         let estimate = TrainingSpeedHistory.estimatedSeconds(config)
         return Button { withAnimation(DS.springy) { preset = value } } label: {
             HStack(spacing: DS.Space.s) {
@@ -465,7 +535,7 @@ struct GaussianTrainingView: View {
                     .frame(width: 28)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
-                        Text(TrainingPresentation.title(value)).font(.subheadline.weight(.semibold))
+                        Text(enhancing ? TrainingPresentation.enhanceTitle(value) : TrainingPresentation.title(value)).font(.subheadline.weight(.semibold))
                             .foregroundStyle(DS.Palette.textPrimary)
                         if value == .standard {
                             Text(L10n.text("建議")).font(.caption2.weight(.bold))
@@ -474,7 +544,8 @@ struct GaussianTrainingView: View {
                                 .background(DS.Palette.accent, in: Capsule())
                         }
                     }
-                    Text(TrainingPresentation.detail(value)).font(.caption).foregroundStyle(DS.Palette.textSecondary)
+                    Text(enhancing ? TrainingPresentation.enhanceDetail(config.runIterations) : TrainingPresentation.detail(value))
+                        .font(.caption).foregroundStyle(DS.Palette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
@@ -513,7 +584,7 @@ struct GaussianTrainingView: View {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(DS.Palette.success)
                 }
             }
-            Label { Text(L10n.text("訓練期間請讓 App 保持開啟，建議接上電源；可隨時暫停，進度會自動儲存。"))
+            Label { Text(L10n.text("訓練時可以使用 App 的其他功能，建議接上電源；可隨時暫停，進度會自動儲存。"))
                 .foregroundStyle(DS.Palette.textSecondary).fixedSize(horizontal: false, vertical: true) } icon: {
                 Image(systemName: "bolt.fill").foregroundStyle(DS.Palette.warning)
             }
@@ -561,7 +632,7 @@ struct GaussianTrainingView: View {
 
     @ViewBuilder
     private var restartActions: some View {
-        Button(L10n.text("以目前設定重新訓練")) { start(resume: false) }
+        Button(L10n.text("以目前設定重新訓練")) { start(resume: false, configuration: configuration(for: preset, enhance: false)) }
         Button(L10n.text("取消"), role: .cancel) {}
     }
 
@@ -579,26 +650,50 @@ struct GaussianTrainingView: View {
         }
     }
 
-    private var configuration: GaussianTrainingConfiguration {
+    private var configuration: GaussianTrainingConfiguration { configuration(for: preset, enhance: enhancing) }
+
+    /// The run a quality choice starts: a new model, or `iterations` more on the saved model.
+    private func configuration(for preset: GaussianTrainingConfiguration.Preset, enhance: Bool) -> GaussianTrainingConfiguration {
         var c = GaussianTrainingConfiguration.preset(preset)
+        c.longEdge = resolution.longEdge
         c.poseOptimization = poseOptimization
         c.ppisp = ppisp
         c.mipFilter = mipFilter
         if let debugIterations { c.iterations = debugIterations }
+        if enhance, let savedModel {
+            c = c.enhancing(savedIterations: savedModel.iterations, savedGaussians: savedModel.gaussians,
+                            savedSHDegree: savedModel.shDegree)
+        }
         return c
     }
 
+    /// Opens the enhancement setup with the saved model's settings.
+    private func beginEnhancing() {
+        guard let saved = savedModel else { return }
+        let c = saved.configuration
+        resolution = c.resolution
+        poseOptimization = c.poseOptimization
+        ppisp = c.ppisp
+        mipFilter = c.mipFilter
+        preset = .standard
+        enhancing = true
+        Task { await updateEstimate() }
+    }
+
     private var presetDescription: String {
-        let c = GaussianTrainingConfiguration.preset(preset)
+        let c = configuration
+        if c.isEnhancement {
+            return L10n.text("再訓練 \(c.runIterations.formatted()) 次（共 \(c.iterations.formatted()) 次）・訓練影像長邊 \(c.longEdge) px・最多 \(c.maxGaussians.formatted()) 個高斯・SH \(c.shDegree) 階")
+        }
         return L10n.text("\(c.iterations.formatted()) 次迭代・訓練影像長邊 \(c.longEdge) px・最多 \(c.maxGaussians.formatted()) 個高斯・SH \(c.shDegree) 階")
     }
 
     // MARK: Actions
 
-    private func start(resume: Bool) {
+    private func start(resume: Bool, configuration override: GaussianTrainingConfiguration? = nil) {
         let config: GaussianTrainingConfiguration
         if resume, let saved = GaussianCheckpoint.header(at: workspace.checkpointURL)?.configuration { config = saved }
-        else { config = configuration }
+        else { config = override ?? configuration }
         orbit = nil
         guard center.start(scan: scan, configuration: config, resume: resume) else {
             errorText = L10n.text("另一筆掃描正在訓練，完成或停止後才能開始")
@@ -607,6 +702,7 @@ struct GaussianTrainingView: View {
         viewer = nil
         modelFrame = nil
         archive = nil
+        enhancing = false
         onLibraryChange()
     }
 
@@ -642,14 +738,15 @@ struct GaussianTrainingView: View {
     private func reload() async {
         let workspace = self.workspace
         let activeScan = center.activeScan
-        let loaded = await Task.detached(priority: .userInitiated) { () -> (TrainingRecord?, Bool, Bool, URL?, Double?, Int?) in
+        let loaded = await Task.detached(priority: .userInitiated) { () -> (TrainingRecord?, Bool, Bool, URL?, Double?, Int?, GaussianExport.Metadata?) in
             let images = workspace.scan.appendingPathComponent("images")
             let first = (try? FileManager.default.contentsOfDirectory(at: images, includingPropertiesForKeys: nil))?
                 .filter { $0.pathExtension.lowercased() == "jpg" }.sorted { $0.lastPathComponent < $1.lastPathComponent }.first
             let selection = (try? Data(contentsOf: workspace.scan.appendingPathComponent("training-selection.json")))
                 .flatMap { try? JSONDecoder().decode(TrainingFrameSelector.Report.self, from: $0) }
             return (workspace.record(activeScan: activeScan), workspace.hasCheckpoint, workspace.hasModel, first,
-                    TrainingDataset.exposureRange(scan: workspace.scan), selection?.selectedIDs.count)
+                    TrainingDataset.exposureRange(scan: workspace.scan), selection?.selectedIDs.count,
+                    workspace.hasModel ? GaussianExport.metadata(in: workspace.modelDirectory) : nil)
         }.value
         record = loaded.0
         hasCheckpoint = loaded.1
@@ -658,8 +755,11 @@ struct GaussianTrainingView: View {
         cover = loaded.3
         exposureRange = loaded.4
         frameCount = loaded.5
-        if let config = record?.configuration, !isActive {
+        savedModel = loaded.6
+        if savedModel == nil || isActive { enhancing = false }
+        if let config = record?.configuration, !isActive, !enhancing {
             preset = config.preset
+            resolution = config.resolution
             poseOptimization = config.poseOptimization
             ppisp = config.ppisp
             mipFilter = config.mipFilter
@@ -668,7 +768,7 @@ struct GaussianTrainingView: View {
         }
         if isActive && orbit == nil { resetView() }
         if showsModel && viewer == nil && !loadingViewer { await loadViewer() }
-        if !hasModel && !isActive { await updateEstimate() }
+        if (!hasModel || enhancing) && !isActive { await updateEstimate() }
     }
 
     private func loadViewer() async {
@@ -689,7 +789,7 @@ struct GaussianTrainingView: View {
         // Only the latest request may update the estimate (preset taps can overtake each other).
         estimateGeneration += 1
         let generation = estimateGeneration
-        let scan = self.scan, config = configuration
+        let scan = self.scan, config = configuration, savedCount = enhancing ? savedModel?.gaussians : nil
         let result = await Task.detached(priority: .utility) { () -> Result<TrainingMemoryPlan, Error> in
             let (records, _) = ScanLibrary.savedRecords(in: scan)
             guard let first = records.first(where: { $0.intrinsics.width > 0 }) else {
@@ -702,6 +802,9 @@ struct GaussianTrainingView: View {
         }.value
         guard generation == estimateGeneration else { return }
         switch result {
+        case .success(let plan) where (savedCount ?? 0) > plan.gaussianCapacity:
+            estimate = nil
+            estimateError = L10n.text("可用記憶體不足以載入已保存的模型（約需 \(GaussianTrainingSession.requiredMB(rows: savedCount ?? 0, plan: plan)) MB）。請選較低的訓練解析度，或關閉其他 App 後再試；模型仍保留。")
         case .success(let plan): estimate = plan; estimateError = nil
         case .failure(let error): estimate = nil; estimateError = error.localizedDescription
         }

@@ -5,6 +5,7 @@ import ARKit
 struct ContentView: View {
     @AppStorage(AppLanguage.preferenceKey) private var language = AppLanguage.traditionalChinese.rawValue
     @State private var showCapture = false
+    @ObservedObject private var trainingCenter = TrainingCenter.shared
     @State private var showGuide = false
     @State private var showHistory = false
     /// Bumped when capture closes so the history shows the scan that was just saved.
@@ -121,6 +122,17 @@ struct ContentView: View {
                         .font(.subheadline)
                         .foregroundStyle(DS.Palette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    // A run keeps going while the user is elsewhere in the app; show where it is.
+                    if trainingCenter.isBusy {
+                        Label(trainingCenter.snapshot.phase == .paused
+                              ? L10n.text("3DGS 訓練已暫停・\(TrainingPresentation.percent(trainingCenter.snapshot))%")
+                              : L10n.text("3DGS 訓練中・\(TrainingPresentation.percent(trainingCenter.snapshot))%"),
+                              systemImage: "sparkles")
+                            .font(.caption.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(trainingCenter.snapshot.phase == .paused ? DS.Palette.warning : DS.Palette.accent)
+                            .padding(.top, 2)
+                            .accessibilityIdentifier("homeTrainingStatus")
+                    }
                 }
                 Spacer(minLength: DS.Space.xs)
                 if let scanCount, scanCount > 0 {
