@@ -26,6 +26,20 @@
 
 原始照片、深度保存解析度、深度一致性門檻、voxel 尺寸與離線重融合取樣不因這個預覽預算而改變。低記憶體時若退回即時預覽，回退結果也會反映較稀的即時取樣。無 LiDAR 的稀疏點路徑不套用深度預算。
 
+## 長時間掃描（600 張以上）
+
+超過約 600 張照片的掃描會感覺卡頓。每張照片的背景工作有上限：FBDA13（405 張）的特徵工作平均每張 10 ms，歷史觀測也有上限（見上文）。會隨照片數增加的，是**每一幀**都要重做的工作：
+
+- **相機標記：** 每存一張照片就多一個 SceneKit 節點，各有自己的角錐幾何與材質。SceneKit 無法合併這些繪製，所以每一幀都要為每張照片多一次繪製呼叫。
+  - 在 Mac GPU 上（離屏 `SCNRenderer`，每幀 CPU 時間），各自一個節點時，100 張為 0.35 ms、600 張為 2.38 ms、1,000 張為 4.13 ms。
+  - 合併成一組線段後，任何張數都只要 0.017 ms。
+  - 現在全部標記是同一個幾何（`CameraMarkerLines`），只在存下照片時重建；軌跡線原本就只有一個節點。
+  - iPhone 的 CPU 較慢，還要和 ARKit 分用同一幀，佔 16.7 ms 幀時間的比例會比 Mac 高；這部分尚未在實機量測。
+- **錨點節點：** 每張照片與每塊預覽點雲磚都有一個 ARKit 錨點。沒有指定 delegate 時，`ARSCNView` 會替每個錨點加一個空節點，並在每一幀讓它跟著錨點移動。現在畫面不再建立這些節點（`LiveSceneDelegate`），點雲磚本來就有自己的節點。錨點本身沒有變，ARKit 照樣修正它們，停止時也照樣從錨點讀回照片姿態。
+- **點雲磚變換：** 先前每一幀都重設每個磚節點的變換。融合用的快照（`latestTileTransforms`）仍然每幀從錨點完整讀取，完全不變；只有錨點真的移動過的磚，才會更新畫面上的節點。
+
+這些修改都不影響保存或融合的內容：照片、深度、姿態、ARKit 修正與點雲資料都相同。
+
 ## 診斷檔案
 
 停止後、進入重融合前保存 `capture-performance.json`，掃描資料打包時一起匯出：
@@ -42,6 +56,10 @@
 | `configuredMinimumIntervalS`, `poseRefinementEnabled` | 本次最低快門間隔與姿態精修設定 |
 | `featureWork` | 提交、完成、被新幀取代數，最大保留工作數，以及匹配工作總／最大耗時 |
 | `retainedFeatureFrames`, `archivedFeatureObservations`, `discardedFeatureObservations` | 描述子幀數、歷史觀測數、超容量淘汰數 |
+| `renderPacing`、`arFramePacing`（第 2 版） | 掃描期間，渲染執行緒的即時畫面幀，以及送到主執行緒的 ARKit 幀。各有 `frames`、`stalls`（間隔超過 50 ms）、`maximumIntervalMS`，以及 `framesByHundredPhotos`／`stallsByHundredPhotos`（索引 0 = 第 0–99 張，1 = 第 100–199 張…），可看出卡頓是否隨照片數增加 |
+| `frameHandlingTotalMS`、`frameHandlingMaxMS`（第 2 版） | 掃描期間主執行緒處理每個 ARKit 幀的時間 |
+| `seriousThermalS`（第 2 版） | 掃描期間溫度狀態為 serious 或 critical（iOS 會降速）的時間 |
+| `anchorsAtStop`（第 2 版） | 停止時 session 內的 ARKit 錨點數（每張照片一個，加上預覽點雲磚） |
 
 `preview-performance.json` 第 2 版增加 `extractionTotalMS`、`consistencyTotalMS`、`gridInsertTotalMS`、`maximumSampleStride`、`overBudgetFrames`。它們量測 CPU 工作，不是螢幕顯示 FPS。舊掃描沒有新欄位，也不會自動補算。
 
@@ -66,6 +84,6 @@ swiftc arkit-3dgs-scanner/Capture/Localization.swift arkit-3dgs-scanner/Capture/
 
 排程測試刻意卡住第一個特徵工作，確認後續 99 次提交仍返回、只保留最新待處理工作、停止會排空、續掃與關閉互不污染；另驗證每次候選上限、起點輪替及時間回饋遲滯。特徵記憶體測試以十二張合成紋理影像驗證描述子淘汰後，舊 track、像素座標與深度仍可供 BA 使用，並檢查歷史上限與重設。寫入測試驗證有限分段計時及既有成功／失敗／重試行為。
 
-本輪通過 17 項排程／取樣、5 項特徵保留、5 項寫入／匯出及 39 項既有 LiDAR 一致性檢查；既有特徵索引回歸也通過，包含 28,000 次與暴力搜尋比對。iPhone 與 Simulator 未簽章 Debug 建置成功。既有 `RefusionEngine` 的 `UnsafeMutableBufferPointer` Sendable 警告仍存在。
+排程測試另外確認：卡頓會算進正確的照片區間、暫停不算卡頓，以及相機標記合併成一組線段、尖端指向各自的拍攝方向（共 23 項）。先前通過 17 項排程／取樣、5 項特徵保留、5 項寫入／匯出及 39 項既有 LiDAR 一致性檢查；既有特徵索引回歸也通過，包含 28,000 次與暴力搜尋比對。iPhone 與 Simulator 未簽章 Debug 建置成功。既有 `RefusionEngine` 的 `UnsafeMutableBufferPointer` Sendable 警告仍存在。
 
 真機需使用相同裝置、光線、路徑與建置模式，比較拍攝間隔中位數／P90、寫入背壓、特徵替換比例、融合平均／最大耗時與超預算比例。再比較同一實體平面的厚度和已知尺寸誤差；照片更密或候選點更多都不能單獨證明精度提高。此輪尚無更新後真機數據。
