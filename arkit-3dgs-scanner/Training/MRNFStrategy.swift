@@ -54,6 +54,21 @@ nonisolated enum MRNFConstants {
     static let holeSeedLogit: Float = -2.1972246      // logit(0.1)
 }
 
+/// Relocation at the Gaussian cap, this project's addition to MRNF: slots of Gaussians that
+/// the photos show contribute almost nothing move to Gaussians the photos show are under-fit.
+nonisolated enum RelocationConstants {
+    /// A Gaussian is judged only when the frusta of at least this many views of the refine
+    /// window reached it.
+    static let minViews: Float = 3
+    /// Low contribution: blending weight per view below this share of the median Gaussian's.
+    static let lowShare: Float = 0.02
+    /// Consecutive low windows before a Gaussian gives up its slot.
+    static let lowWindows: Float = 2
+    /// At most this share of the live Gaussians moves per refine, tapering to zero at the end
+    /// of refinement.
+    static let maxShare = 0.005
+}
+
 /// Scene bounds from the 10th/90th percentile of the live centres.
 nonisolated struct MRNFBounds: Codable, Equatable {
     var center = SIMD3<Float>(), maxExtent: Float = 0, medianSize: Float = 0, valid = false
@@ -72,8 +87,15 @@ nonisolated struct MRNFStrategy: Codable, Equatable {
     var refinesSinceBounds = 0
     var edgeViews = 0
     var seed: UInt64 = 0x5EED
+    /// Growth ramp: live Gaussians when training started. The cap is then reached gradually,
+    /// at `growUntil`, instead of within the first refines (nil = no ramp; older checkpoints).
+    var growthStart: Int?
 
-    struct Report: Equatable { var pruned = 0, replaced = 0, oversize = 0, grown = 0, holes = 0, live = 0 }
+    struct Report: Equatable {
+        var pruned = 0, replaced = 0, oversize = 0, grown = 0, holes = 0, live = 0
+        /// Relocation: slots moved, and the Gaussians judged, eligible as donors and as receivers.
+        var relocated = 0, judged = 0, donors = 0, receivers = 0
+    }
 
     /// A new Gaussian for a pixel no Gaussian covers: on its camera ray at the best depth
     /// guess, small, faint and coloured from the photo (a wrong guess fades and is pruned).
@@ -126,10 +148,20 @@ nonisolated struct MRNFStrategy: Codable, Equatable {
 
     // MARK: Refinement
 
+    /// Most live Gaussians allowed after the refine at `t`: the cap, or with the growth ramp a
+    /// share of it that grows linearly from the starting count to the cap at `growUntil`.
+    func growthCeiling(at t: Int, capacity: Int) -> Int {
+        let cap = min(maxGaussians, capacity)
+        guard let start = growthStart, start < cap, t < schedule.growUntil else { return cap }
+        let fraction = Double(t) / Double(max(1, schedule.growUntil))
+        return min(cap, start + Int(Double(cap - start) * fraction))
+    }
+
     /// One refine step at iteration `t` (1-based). `seeds` fill image regions no Gaussian
     /// covers; they take at most half of the free budget (and `maxHoleSeedsPerRefine`), the
     /// rest refills pruned slots by splitting as before.
-    mutating func refine(_ model: GaussianModel, iteration t: Int, seeds: [Seed] = []) -> Report {
+    mutating func refine(_ model: GaussianModel, iteration t: Int, seeds: [Seed] = [], replaceByError: Bool = false,
+                         relocate: Bool = false) -> Report {
         var report = Report()
         refinesSinceBounds += 1
         if !bounds.valid || refinesSinceBounds >= MRNFConstants.boundsEveryRefines { updateBounds(model) }
@@ -163,18 +195,6 @@ nonisolated struct MRNFStrategy: Codable, Equatable {
             }
             if remove { pruned.append(i) }
         }
-        model.free(rows: pruned)
-        report.pruned = pruned.count
-
-        let live = model.activeCount
-        var budget = max(0, min(maxGaussians, model.capacity) - live)
-        let holeCount = min(seeds.count, budget / 2, MRNFConstants.maxHoleSeedsPerRefine)
-        if holeCount > 0 {
-            let rows = model.allocateRows(holeCount)
-            for (row, seed) in zip(rows, seeds) { model.setSeed(row: row, seed) }
-            budget -= rows.count
-            report.holes = rows.count
-        }
         // Edge guidance: 1 + 0.25 * E / positive median(E).
         var guidance = [Float](repeating: 1, count: n)
         if edgeViews > 0 {
@@ -185,19 +205,54 @@ nonisolated struct MRNFStrategy: Codable, Equatable {
                 }
             }
         }
+        let ceiling = growthCeiling(at: t, capacity: model.capacity)
+        let atCeiling = model.activeCount >= ceiling
+        model.free(rows: pruned)
+        report.pruned = pruned.count
+
+        // Relocation at the cap: see `relocationCandidates`.
+        var relocationWeights: [Float] = []
+        if relocate && atCeiling && t < schedule.stopRefine {
+            let (donors, weights, counts) = relocationCandidates(model, guidance: guidance, iteration: t)
+            (report.judged, report.donors, report.receivers) = counts
+            if !donors.isEmpty {
+                model.free(rows: donors)
+                report.relocated = donors.count
+                relocationWeights = weights
+            }
+        }
+
+        let live = model.activeCount
+        var budget = max(0, ceiling - live)
+        let holeCount = min(seeds.count, budget / 2, MRNFConstants.maxHoleSeedsPerRefine)
+        if holeCount > 0 {
+            let rows = model.allocateRows(holeCount)
+            for (row, seed) in zip(rows, seeds) { model.setSeed(row: row, seed) }
+            budget -= rows.count
+            report.holes = rows.count
+        }
         var rng = SplitMix64(seed: seed ^ UInt64(t))
         var taken = [Bool](repeating: false, count: n)
         func sigmoid(_ x: Float) -> Float { 1 / (1 + exp(-x)) }
 
         // 1. Replacement splits refill the pruned slots, sampled by opacity.
         let replaceWeights = (0..<n).map { i -> Float in
-            active[i] > 0.5 && visibility[i] > 0 ? sigmoid(p[opacities + i]) * guidance[i] : 0
+            guard active[i] > 0.5 && visibility[i] > 0 else { return 0 }
+            return (replaceByError ? errorMax[i] : sigmoid(p[opacities + i])) * guidance[i]
         }
         let replacement = Self.gumbelTopK(replaceWeights, k: min(pruned.count, budget), rng: &rng, excluding: taken)
         for i in replacement { taken[i] = true }
         budget -= replacement.count
         var parents = replacement
         report.replaced = replacement.count
+
+        // 1b. Relocation splits refill the relocated slots, sampled by the evidence of under-fit.
+        if !relocationWeights.isEmpty {
+            let moved = Self.gumbelTopK(relocationWeights, k: min(report.relocated, budget), rng: &rng, excluding: taken)
+            for i in moved { taken[i] = true }
+            budget -= moved.count
+            parents += moved
+        }
 
         // 2. Growth while t < growUntil: ~7% of the visible, erroring splats per refine.
         if t < schedule.growUntil && budget > 0 {
@@ -258,12 +313,60 @@ nonisolated struct MRNFStrategy: Codable, Equatable {
         }
 
         // Reset the window statistics.
-        for plane in [GaussianStats.visibility, GaussianStats.errorMax, GaussianStats.edgeSum, GaussianStats.shareMax] {
+        for plane in [GaussianStats.visibility, GaussianStats.errorMax, GaussianStats.edgeSum, GaussianStats.shareMax,
+                      GaussianStats.views, GaussianStats.errorSum] {
             memset(model.stat(plane), 0, model.capacity * 4)
         }
         edgeViews = 0
         report.live = model.activeCount
         return report
+    }
+
+    /// Relocation donors and receivers from the window statistics, judged only for Gaussians
+    /// that at least `minViews` views of the window reached (enough photographic evidence):
+    /// - **Donors** contributed almost nothing in those views, with a blending weight per view
+    ///   below 2% of the median Gaussian's, in two consecutive windows: hidden behind other
+    ///   splats, redundant, or too small to matter. They are freed, lowest contribution first.
+    /// - **Receivers** cover pixels whose error stays above the image's mean error across those
+    ///   views (error-weighted footprint over blending weight above 1). They are split into the
+    ///   freed slots, sampled by their error per view and the edge guidance.
+    /// At most 0.5% of the live Gaussians move per refine, tapering to zero at the end of
+    /// refinement, and never more than there are receivers, so the model settles instead of
+    /// churning. Returns the donors (not yet freed) and the receivers' weights.
+    func relocationCandidates(_ model: GaussianModel, guidance: [Float], iteration t: Int)
+        -> (donors: [Int], weights: [Float], counts: (judged: Int, donors: Int, receivers: Int)) {
+        typealias R = RelocationConstants
+        let n = model.count
+        let active = model.stat(GaussianStats.active), visibility = model.stat(GaussianStats.visibility)
+        let views = model.stat(GaussianStats.views), errorSum = model.stat(GaussianStats.errorSum)
+        let low = model.stat(GaussianStats.lowWindows)
+        var perView: [Float] = []
+        for i in 0..<n where active[i] > 0.5 && views[i] >= R.minViews { perView.append(visibility[i] / views[i]) }
+        guard let median = Self.median(perView), median > 0 else { return ([], [], (perView.count, 0, 0)) }
+        let threshold = R.lowShare * median
+        var donors: [(contribution: Float, row: Int)] = []
+        var weights = [Float](repeating: 0, count: n)
+        var receivers = 0
+        for i in 0..<n where active[i] > 0.5 && views[i] >= R.minViews {
+            let contribution = visibility[i] / views[i]
+            if contribution < threshold {
+                // Too faint for its error to mean anything: never a receiver.
+                low[i] += 1
+                if low[i] >= R.lowWindows { donors.append((contribution, i)) }
+                continue
+            }
+            low[i] = 0
+            if visibility[i] > 0 && errorSum[i] > visibility[i] {
+                weights[i] = errorSum[i] / views[i] * guidance[i]
+                receivers += 1
+            }
+        }
+        let taper = max(0, 1 - Double(t) / Double(max(1, schedule.stopRefine)))
+        let limit = min(Int(Double(model.activeCount) * R.maxShare * taper), receivers)
+        let counts = (perView.count, donors.count, receivers)
+        guard limit > 0, !donors.isEmpty else { return ([], [], counts) }
+        donors.sort { $0.contribution < $1.contribution || ($0.contribution == $1.contribution && $0.row < $1.row) }
+        return (donors.prefix(limit).map(\.row).sorted(), weights, counts)
     }
 
     private func argmax(_ s: UnsafeMutablePointer<Float>) -> Int { s[0] >= s[1] ? (s[0] >= s[2] ? 0 : 2) : (s[1] >= s[2] ? 1 : 2) }

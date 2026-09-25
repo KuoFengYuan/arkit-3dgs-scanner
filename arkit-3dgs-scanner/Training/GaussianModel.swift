@@ -5,9 +5,13 @@ import Metal
 import simd
 
 /// Planes of the per-row statistics buffer (capacity-strided floats); mirrors GaussianOptim.metal.
+/// `views` (views of the refine window whose frustum reached the row) and `errorSum` (sum of
+/// the error-weighted footprint) feed relocation; `lowWindows` counts consecutive windows in
+/// which the row contributed almost nothing, and is the only plane kept across windows.
 nonisolated enum GaussianStats {
     static let visibility = 0, errorMax = 1, edgeSum = 2, shareMax = 3, shareNow = 4, active = 5
-    static let planes = 6
+    static let views = 6, errorSum = 7, lowWindows = 8
+    static let planes = 9
 }
 
 /// Gaussian parameters with gradients and Adam moments, stored in fixed-capacity shared buffers.
@@ -151,6 +155,8 @@ nonisolated final class GaussianModel: @unchecked Sendable {
         for row in rows where active[row] > 0.5 {
             clearState(row: row, clearParameters: true)
             active[row] = 0
+            // A freed slot keeps no statistics for whichever Gaussian refills it.
+            for plane in 0..<GaussianStats.planes where plane != GaussianStats.active { stat(plane)[row] = 0 }
         }
         freeRows = Array(Set(freeRows).union(rows)).sorted()
     }

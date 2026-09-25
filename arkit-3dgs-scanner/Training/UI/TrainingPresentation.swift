@@ -110,7 +110,9 @@ enum TrainingPresentation {
 /// Measured speed of completed runs on this device, per preset. Time estimates are shown only
 /// from these measurements; nothing is extrapolated from another device.
 nonisolated enum TrainingSpeedHistory {
-    static let key = "gaussianTraining.secondsPerIteration"
+    /// Version 2: measured with the faster rasterizer backward pass, so the per-iteration times
+    /// of the earlier trainer (about 1.4× slower) are not reused.
+    static let key = "gaussianTraining.secondsPerIteration.v2"
 
     /// One measurement per preset and training resolution.
     static func slot(_ configuration: GaussianTrainingConfiguration) -> String {

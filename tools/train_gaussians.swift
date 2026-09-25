@@ -5,11 +5,13 @@
 //
 // xcrun -sdk macosx metal -std=metal3.1 -ffast-math arkit-3dgs-scanner/Training/*.metal -o /tmp/gs.metallib
 // swiftc -O -module-cache-path /tmp/fable-swift-cache \
-//   arkit-3dgs-scanner/Capture/{Localization,Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,ExportManager,TrainingFrameSelector}.swift \
+//   arkit-3dgs-scanner/Capture/{Localization,Models,BlurFilter,CaptureConfig,DepthSampleFilter,RefusionEngine,SurfaceTSDF,ExportManager,TrainingFrameSelector}.swift \
 //   arkit-3dgs-scanner/History/ScanLibrary.swift arkit-3dgs-scanner/Training/*.swift \
 //   tools/train_gaussians.swift -o /tmp/train_gaussians
 // /tmp/train_gaussians /tmp/gs.metallib SCAN [--iterations N] [--long-edge PX] [--max-gaussians N]
 //   [--sh D] [--holdout N] [--no-ppisp] [--no-pose] [--no-mip] [--budget-mb MB] [--out DIR]
+// Densification and optimiser experiments (defaults unchanged unless given): --no-growth-ramp,
+//   --relocate, --replace-by-error, --sparse-adam. GS_REFINE=1 prints every refine.
 import Foundation
 import Metal
 import simd
@@ -19,7 +21,7 @@ import simd
         setvbuf(stdout, nil, _IOLBF, 0)
         var args = Array(CommandLine.arguments.dropFirst())
         guard args.count >= 2 else {
-            print("Usage: train_gaussians METALLIB SCAN [--iterations N] [--long-edge PX] [--max-gaussians N] [--sh D] [--holdout N] [--no-ppisp] [--no-pose] [--no-mip] [--budget-mb MB] [--out DIR] [--save-model DIR] [--enhance-from MODEL_DIR]")
+            print("Usage: train_gaussians METALLIB SCAN [--iterations N] [--long-edge PX] [--max-gaussians N] [--preset quick|standard|high] [--sh D] [--holdout N] [--no-ppisp] [--no-pose] [--no-mip] [--budget-mb MB] [--out DIR] [--save-model DIR] [--enhance-from MODEL_DIR]")
             exit(2)
         }
         let library = URL(fileURLWithPath: args.removeFirst())
@@ -32,7 +34,7 @@ import simd
         var poseFile: String?
         var initNoise: Float = 0, initKeep = 1.0, initRandom = 0, latticeJitter: Float = 0
         var perFrame = false
-        var seedJitter = true
+        var seedJitter = true, sparseAdam = false, replaceByError = false, growthRamp = true, relocation = false
         var excludeIDs: Set<Int> = []
         var holdOutSegment = 0.0, fullResolution = false
         var saveModel: URL?, enhanceFrom: URL?
@@ -40,6 +42,10 @@ import simd
             let a = args.removeFirst()
             switch a {
             case "--iterations": config.iterations = Int(args.removeFirst())!
+            case "--preset":
+                // Another quality preset's iterations, Gaussian cap and SH degree (training resolution kept).
+                let preset = GaussianTrainingConfiguration.preset(GaussianTrainingConfiguration.Preset(rawValue: args.removeFirst())!)
+                (config.preset, config.iterations, config.maxGaussians, config.shDegree) = (preset.preset, preset.iterations, preset.maxGaussians, preset.shDegree)
             case "--long-edge": config.longEdge = Int(args.removeFirst())!
             case "--max-gaussians": config.maxGaussians = Int(args.removeFirst())!
             case "--sh": config.shDegree = Int(args.removeFirst())!
@@ -58,6 +64,10 @@ import simd
             case "--init-lattice-jitter": latticeJitter = Float(args.removeFirst())!
             case "--seed": config.seed = UInt64(args.removeFirst())!
             case "--no-seed-jitter": seedJitter = false
+            case "--sparse-adam": sparseAdam = true
+            case "--replace-by-error": replaceByError = true
+            case "--no-growth-ramp": growthRamp = false
+            case "--relocate": relocation = true
             case "--no-depth-seeds": config.depthSeeds = false
             case "--no-hole-fill": config.holeFilling = false
             case "--depth-loss": config.depthLoss = Double(args.removeFirst())!
@@ -101,6 +111,10 @@ import simd
         let trainer = try GaussianTrainer(configuration: config, dataset: dataset, plan: plan, metal: metal)
         if let poseLR { trainer.poseLearningRate = poseLR }
         trainer.seedJitter = seedJitter
+        trainer.sparseAdam = sparseAdam
+        trainer.replaceByError = replaceByError
+        trainer.growthRamp = growthRamp
+        trainer.relocation = relocation
         print(String(format: "pose learning rate %.1e, seed jitter %@, depth loss %.2f", trainer.poseLearningRate,
                      seedJitter ? "on" : "off", config.depthLossWeight))
         if let enhanceFrom { try trainer.initializeModel(fromSaved: enhanceFrom) } else { try trainer.initializeModel() }
@@ -109,21 +123,28 @@ import simd
         }
         print("initial Gaussians \(trainer.model.activeCount), median size \(trainer.strategy.bounds.medianSize) m, footprint \(TrainingMemoryPlan.footprintBytes >> 20) MB")
         let start = Date()
-        var window: [Double] = [], psnrWindow: [Double] = [], peak = 0, skipped = 0
+        var window: [Double] = [], psnrWindow: [Double] = [], peak = 0, skipped = 0, pairsPeak = 0.0, pairsSeen = 0.0
         while trainer.iteration < config.iterations {
             let r = try trainer.step()
+            // Tile-Gaussian pairs of this view (the profile accumulates them).
+            let pairsTotal = trainer.profile["intersections", default: 0]
+            pairsPeak = max(pairsPeak, pairsTotal - pairsSeen)
+            pairsSeen = pairsTotal
             if r.skipped { skipped += 1; continue }
             window.append(r.loss); psnrWindow.append(r.psnr)
-            if let refine = r.refine, trainer.iteration % (trainer.strategy.schedule.refineEvery * 10) == 0 {
-                print("  refine @\(r.iteration): pruned \(refine.pruned) replaced \(refine.replaced) oversize \(refine.oversize) grown \(refine.grown) holes \(refine.holes) (total \(trainer.holeSeedsAdded)) live \(refine.live)")
+            if let refine = r.refine, trainer.iteration % (trainer.strategy.schedule.refineEvery * 10) == 0
+                || ProcessInfo.processInfo.environment["GS_REFINE"] != nil {
+                print("  refine @\(r.iteration): pruned \(refine.pruned) replaced \(refine.replaced) relocated \(refine.relocated) (judged \(refine.judged) donors \(refine.donors) receivers \(refine.receivers)) oversize \(refine.oversize) grown \(refine.grown) holes \(refine.holes) (total \(trainer.holeSeedsAdded)) live \(refine.live)")
             }
             if ProcessInfo.processInfo.environment["GS_VERBOSE"] != nil { print("step \(r.iteration) \(String(format: "%.1f", r.seconds * 1000)) ms loss \(r.loss) M? gaussians \(r.gaussians)") }
             if r.iteration % 500 == 0 || r.iteration == config.iterations {
                 peak = max(peak, TrainingMemoryPlan.footprintBytes)
                 let elapsed = Date().timeIntervalSince(start)
-                print(String(format: "it %5d  loss %.4f  train PSNR %.2f  Gaussians %7d  %.1f ms/it  footprint %d MB",
+                print(String(format: "it %5d  loss %.4f  train PSNR %.2f  Gaussians %7d  %.1f ms/it  footprint %d MB  peak pairs %.0f",
                              r.iteration, window.reduce(0, +) / Double(window.count), psnrWindow.reduce(0, +) / Double(psnrWindow.count),
-                             r.gaussians, elapsed / Double(max(1, r.iteration - config.startIteration)) * 1000, TrainingMemoryPlan.footprintBytes >> 20))
+                             r.gaussians, elapsed / Double(max(1, r.iteration - config.startIteration)) * 1000, TrainingMemoryPlan.footprintBytes >> 20,
+                             pairsPeak))
+                pairsPeak = 0
                 window.removeAll(); psnrWindow.removeAll()
             }
         }

@@ -15,8 +15,14 @@ nonisolated enum GaussianCheckpoint {
     static let fileName = "checkpoint.gsck"
     static let magic: UInt32 = 0x4B43_5347       // "GSCK"
     static let endMarker: UInt64 = 0x444E_454B_4353_4721
-    static let version = 1
-    static let statPlanes = [GaussianStats.visibility, GaussianStats.errorMax, GaussianStats.edgeSum, GaussianStats.shareMax]
+    /// Version 2 adds the relocation statistics; version 1 checkpoints still resume (those
+    /// planes start at zero).
+    static let version = 2
+    static func statPlanes(version: Int) -> [Int] {
+        let planes = [GaussianStats.visibility, GaussianStats.errorMax, GaussianStats.edgeSum, GaussianStats.shareMax]
+        return version >= 2 ? planes + [GaussianStats.views, GaussianStats.errorSum, GaussianStats.lowWindows] : planes
+    }
+    static var statPlanes: [Int] { statPlanes(version: version) }
 
     enum CheckpointError: LocalizedError {
         case unreadable, corrupt, incompatible(String)
@@ -72,14 +78,15 @@ nonisolated enum GaussianCheckpoint {
         return try? JSONDecoder().decode(Header.self, from: json)
     }
 
-    /// Writes the trainer state atomically to `directory/checkpoint.gsck`.
+    /// Writes the trainer state atomically to `directory/checkpoint.gsck`. `formatVersion` lets
+    /// tests write the previous format.
     static func save(_ trainer: GaussianTrainer, elapsedSeconds: Double, to directory: URL,
-                     stagingBytes: Int = TrainingMemoryPlan.checkpointChunk) throws {
+                     stagingBytes: Int = TrainingMemoryPlan.checkpointChunk, formatVersion: Int = version) throws {
         let fm = FileManager.default
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
         let model = trainer.model
         let rows = model.liveRows
-        var header = Header(version: version, savedAt: Date(), configuration: trainer.configuration,
+        var header = Header(version: formatVersion, savedAt: Date(), configuration: trainer.configuration,
                             datasetSignature: trainer.dataset.signature, iteration: trainer.iteration,
                             epoch: trainer.epoch, epochPosition: trainer.epochPosition, rows: rows.count,
                             adamStep: model.adamStep, strategy: trainer.strategy, ppisp: trainer.ppisp,
@@ -96,7 +103,7 @@ nonisolated enum GaussianCheckpoint {
         var hasher = FNV64()
         var prefix = Data()
         prefix.appendLE(Self.magic)
-        prefix.appendLE(UInt32(version))
+        prefix.appendLE(UInt32(formatVersion))
         prefix.appendLE(UInt64(json.count))
         try handle.write(contentsOf: prefix)
         try handle.write(contentsOf: json)
@@ -123,7 +130,7 @@ nonisolated enum GaussianCheckpoint {
                 }
             }
         }
-        for plane in statPlanes {
+        for plane in statPlanes(version: formatVersion) {
             let source = model.stat(plane)
             for run in runs { try write(UnsafeMutableRawPointer(source + run.lowerBound), bytes: run.count * 4) }
         }
@@ -146,7 +153,8 @@ nonisolated enum GaussianCheckpoint {
             throw FileManager.default.fileExists(atPath: url.path) ? CheckpointError.corrupt : CheckpointError.unreadable
         }
         let model = trainer.model
-        guard header.version == version else { throw CheckpointError.incompatible("version") }
+        guard (1...version).contains(header.version) else { throw CheckpointError.incompatible("version") }
+        let statPlanes = Self.statPlanes(version: header.version)
         guard header.datasetSignature == trainer.dataset.signature else { throw CheckpointError.incompatible("dataset") }
         guard header.configuration == trainer.configuration else { throw CheckpointError.incompatible("configuration") }
         guard header.groupWidths == model.layout.groups.map(\.width), header.rows <= model.capacity,

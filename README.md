@@ -10,7 +10,7 @@ Capture photos, camera poses, and point clouds with ARKit. Refine the data on yo
 - **On-device data refinement:** image selection, validated camera pose refinement, and multi-view depth fusion.
 - **Review before export:** inspect point clouds, replay the capture route in first person, and continue an active scan to fill gaps.
 - **Visible processing:** a bilingual, dark fusion progress page with real stages, elapsed time, and a lightweight particle animation.
-- **On-device 3DGS training:** a Metal trainer with densification, pose refinement, anti-aliasing, and optional colour and capture-motion compensation, inside a fixed memory plan. It includes a live interactive preview and a saved-model viewer.
+- **On-device 3DGS training:** an MRNF-based Metal trainer with this project's additions for accuracy (pose refinement, LiDAR depth seeds and loss, a growth ramp) and speed (exact tile spans, a one-pass SIMD reduction in the backward pass), anti-aliasing, and optional colour and capture-motion compensation, inside a fixed memory plan. It includes a live interactive preview and a saved-model viewer.
 - **COLMAP export:** calibrated images, camera poses, and initialization points in `images/ + sparse/0`.
 
 **Train 3DGS** runs the whole optimisation on the iPhone GPU, with no server. The loop renders, computes the loss, and updates the model and cameras. Training images can be 960, 1,440, or the photos' full 1,920 px. A run keeps going while you use the rest of the app, and on iOS 26 it can continue in the background. It pauses with a checkpoint when you switch apps without background time, when the device is too hot or low on battery, or when memory runs short, and resumes later from History. The COLMAP export for external trainers is unchanged. See [on-device 3DGS training](docs/ON_DEVICE_3DGS.md) for the method, memory safety, file formats, and what was verified where.
@@ -79,9 +79,9 @@ The app trains a 3D Gaussian Splatting model of a saved scan on the phone's GPU.
 
    | Quality | Iterations | Gaussian cap | For |
    | --- | --- | --- | --- |
-   | Quick preview | 3,000 | 300,000 | A fast first look |
-   | Standard (recommended) | 7,000 | 600,000 | Most scans |
-   | High quality | 15,000 | 1,000,000 | The most detail; takes the longest and uses more battery |
+   | Quick preview | 4,000 | 300,000 | A fast first look |
+   | Standard (recommended) | 10,000 | 600,000 | Most scans |
+   | High quality | 20,000 | 1,000,000 | The most detail; takes the longest and uses more battery |
 
 4. Pick a **training resolution**, the long edge of the training images:
 
@@ -126,14 +126,14 @@ The project already declares the task identifiers in `Config/Info.plist`. Withou
 ### After it finishes
 
 - The model stays with the scan, also after the app restarts. In **Scan history**, cards mark scans that have a model, a run in progress, or a run that can resume. Tap **View 3DGS model** to orbit the model.
-- **Enhance model** loads the saved model and keeps training it: pick 3,000, 7,000, or 15,000 more iterations and a training resolution, for example a Low run first and then an enhancement at High (original). The camera refinements and colour model carry over. The current model stays until the enhancement completes; stopping it with *delete* leaves the saved model as it was.
+- **Enhance model** loads the saved model and keeps training it: pick 4,000, 10,000, or 20,000 more iterations and a training resolution, for example a Low run first and then an enhancement at High (original). The camera refinements and colour model carry over. The current model stays until the enhancement completes; stopping it with *delete* leaves the saved model as it was.
 - **Share 3DGS model** sends `scan_…-3dgs.zip`. It contains `gaussians.ply` (the standard 3DGS PLY), metadata, the refined camera poses, and `ppisp.json` when PPISP was used.
 - In other 3DGS viewers, the PLY uses the COLMAP frame, so Y-up viewers show it upside down: rotate it 180° about X. Those viewers ignore `ppisp.json`.
 - From the options menu at the top right:
   - **Retrain** keeps the current model until the new one completes.
   - **Delete 3DGS model** removes only the training results; the scan's photos, depth, and poses stay.
 
-The trainer refines the camera poses, seeds empty surfaces from LiDAR depth, fills remaining holes while training, and uses the LiDAR depth as a geometry loss, so models hold their shape when orbiting away from the capture path. See [on-device 3DGS training](docs/ON_DEVICE_3DGS.md) for the method, measured results, memory safety, and file formats, and the [training architecture](docs/ON_DEVICE_3DGS_ARCHITECTURE.md) for how the code is organised. Training speed, memory use, and heat on an iPhone have not been measured yet. Mac and Simulator results are not a substitute.
+The model is based on MRNF, LichtFeld Studio's densification strategy, with this project's own methods on top. The trainer refines the camera poses, seeds empty surfaces from LiDAR depth, fills remaining holes while training, and uses the LiDAR depth as a geometry loss, so models hold their shape when orbiting away from the capture path. A faster backward pass pays for about 1.4× the iterations: on three replayed scans, held-out PSNR rose by 0.7–0.9 dB, and a Standard run took 10% less time on the Mac. See [on-device 3DGS training](docs/ON_DEVICE_3DGS.md) for the method, measured results, memory safety, and file formats, and the [training architecture](docs/ON_DEVICE_3DGS_ARCHITECTURE.md) for how the code is organised. Training speed, memory use, and heat on an iPhone have not been measured yet. Mac and Simulator results are not a substitute.
 
 ## Interface and controls
 
