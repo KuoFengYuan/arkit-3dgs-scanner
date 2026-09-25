@@ -1,0 +1,31 @@
+ARKit 3DGS Scanner
+Copyright 2026 Kuo Feng-Yuan (KuoFengYuan)
+
+This product was created by Kuo Feng-Yuan (GitHub: KuoFengYuan), including its
+on-device 3D Gaussian Splatting trainer. It is licensed under the Apache License,
+Version 2.0 (see LICENSE).
+
+This is a personal research project. It is not a product of, and is not
+endorsed by, any employer or organisation, and it does not represent their
+views. It is provided "as is", without warranty of any kind (Apache License
+2.0, sections 7 and 8).
+
+Any redistribution or derivative work, including commercial use, must keep this
+NOTICE file and credit Kuo Feng-Yuan (KuoFengYuan) as the original author
+(Apache License 2.0, section 4).
+
+The 3D Gaussian Splatting trainer is an independent Swift and Metal
+implementation of published methods. It contains no source code from the
+original 3D Gaussian Splatting (Inria/MPII) or Mip-Splatting implementations,
+which are licensed for non-commercial use only, nor from LichtFeld Studio
+(GPL-3.0). It follows these publications and projects:
+
+- 3D Gaussian Splatting for Real-Time Radiance Field Rendering (Kerbl et al., 2023)
+- Mip-Splatting: Alias-free 3D Gaussian Splatting (Yu et al., 2024)
+- LichtFeld Studio's MRNF densification defaults (https://github.com/MrNeRF/LichtFeld-Studio)
+- PPISP, Physically-Plausible ISP (https://github.com/nv-tlabs/ppisp, Apache-2.0)
+- Gaussian Splatting on the Move (Seiskari et al., 2024) for the experimental
+  capture-motion model
+
+Third-party patents may cover some of these methods. This notice is not legal
+advice; check before commercial use.

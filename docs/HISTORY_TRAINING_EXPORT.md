@@ -10,7 +10,9 @@ Outputs include `images/`, `sparse/0/cameras.bin`, `images.bin`, `points3D.bin`,
 
 Export validates IDs, pose dimensions and finite values, intrinsics, filenames, and image existence. No valid training frames is an explicit error. Failure preserves the previous ZIP. Entering history details clears the directly shareable cached URL so a complete training package is prepared again.
 
-An empty cloud still produces a valid zero-point `points3D.bin` and empty PLY, replacing stale data. Some trainers need additional initialization. `gaussians.ply` is a trained model, not a required input format; new app versions no longer create it, while old scan models remain available for export or deletion.
+An empty cloud still produces a valid zero-point `points3D.bin` and empty PLY, replacing stale data. Some trainers need additional initialization. `gaussians.ply` is a trained model, not a required input format. On-device training keeps its checkpoint and model in `gaussian-training/`, which the dataset ZIP leaves out (it zips a hard-linked mirror without that folder, so no media is copied); the model has its own `scan_…-3dgs.zip`. Old scan models remain available for export or deletion.
+
+Archives are shared through the system share sheet with the file itself. SwiftUI `ShareLink(item: URL)` handed apps a file link that only AirDrop and Files accepted; LINE and Teams failed. Very large archives can still exceed a receiving app's own size limit.
 
 ## Regression validation
 

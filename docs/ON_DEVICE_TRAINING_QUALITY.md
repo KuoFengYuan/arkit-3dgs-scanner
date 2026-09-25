@@ -2,7 +2,7 @@
 
 **English** | [繁體中文](ON_DEVICE_TRAINING_QUALITY.zh-TW.md)
 
-Gaussian training has been removed from the app. This document covers preparation before export; actual 3DGS training runs in an external tool.
+This document covers data preparation before training. The app can train 3DGS itself ([on-device 3DGS training](ON_DEVICE_3DGS.md)) or export the prepared data to an external trainer; both use the same selection, poses, and point cloud.
 
 Photo selection, cross-frame matching, camera-pose validation, and depth refusion run on the iPhone without desktop COLMAP. Export remains `images/ + sparse/0` for compatible trainers.
 

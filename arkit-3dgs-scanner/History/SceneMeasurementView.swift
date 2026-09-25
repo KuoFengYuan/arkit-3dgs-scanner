@@ -81,8 +81,10 @@ struct SceneMeasurementView: View {
                             Label(error, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(DS.Palette.warning)
                         }
                         if let archive, !working {
-                            ShareLink(item: archive) { Label(L10n.text("分享公尺尺度資料"), systemImage: "square.and.arrow.up") }
-                                .buttonStyle(DSPrimaryButtonStyle())
+                            Button { SystemShare.present([archive]) } label: {
+                                Label(L10n.text("分享公尺尺度資料"), systemImage: "square.and.arrow.up")
+                            }
+                            .buttonStyle(DSPrimaryButtonStyle())
                         } else {
                             Button { exportMetric() } label: {
                                 Label(working ? L10n.text("準備公尺尺度資料…") : L10n.text("匯出公尺尺度 3DGS 資料"),

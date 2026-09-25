@@ -8,6 +8,8 @@ import SceneKit
 import ARKit
 
 struct CaptureView: View {
+    /// Receives the saved scan when the user chooses to train it right after capture.
+    var onTrain: ((URL) -> Void)? = nil
     @StateObject private var controller = CaptureController()
     @Environment(\.scenePhase) private var scenePhase
     @State private var reviewCameraReset = 0
@@ -32,7 +34,8 @@ struct CaptureView: View {
                                      startedAt: controller.processingStartedAt)
             } else {
                 HUDOverlay(controller: controller,
-                           onResetView: showReview ? { reviewCameraReset += 1 } : nil)
+                           onResetView: showReview ? { reviewCameraReset += 1 } : nil,
+                           onTrain: onTrain)
             }
         }
         .statusBarHidden()

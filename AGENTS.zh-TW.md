@@ -23,9 +23,9 @@
 
 - 文件英文優先（README.md、docs/NAME.md），完整繁中對照（README.zh-TW.md、docs/NAME.zh-TW.md），互相連結，同語言內連結對應版本。
 - App 預設繁中，首頁可選英文並保存。使用 L10n 與 en.lproj／zh-Hant.lproj 處理文字、動態訊息、無障礙、錯誤與進度；機器可讀識別碼不隨語言改變。
-- 本機專案、scheme、repo 名稱 arkit-3dgs-scanner；保留 itri.fable bundle ID 維持安裝與資料相容。
+- 本機專案、scheme、repo 名稱與 bundle ID 均為 arkit-3dgs-scanner。識別碼、程式碼與文件中不得出現公司或雇主名稱；本專案為個人研究專案。
 - 寫 capture-meta.json，繼續讀舊 meta.json，匯出改名保留原 bytes。
 - 保留原照片／深度。運動估計不是實測模糊，警告政策與深度融合資格分開。
-- 沒有新指示不恢復手機 Gaussian 訓練；App 準備外部訓練資料。
+- 手機端 3DGS 訓練（Metal，[說明](docs/ON_DEVICE_3DGS.zh-TW.md)）與供外部訓練器使用的 COLMAP 資料匯出並存。訓練必須在裝置上執行：不得把伺服器流程包裝成手機端訓練、記憶體配置須有上限，並在進入背景、過熱、低電量或記憶體不足時暫停並儲存檢查點。不得以 Mac 或 Simulator 結果宣稱裝置上的記憶體或速度。
 
 指令參考[貢獻流程](CONTRIBUTING.zh-TW.md)及[語系文件](docs/LOCALIZATION.zh-TW.md)。

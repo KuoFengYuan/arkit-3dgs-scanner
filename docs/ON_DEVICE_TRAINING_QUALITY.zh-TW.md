@@ -2,7 +2,7 @@
 
 [English](ON_DEVICE_TRAINING_QUALITY.md) | **繁體中文**
 
-App 已移除手機端 Gaussian 訓練；本文件描述的是匯出前的資料處理。實際 3DGS 訓練在外部工具進行。
+本文件描述訓練前的資料處理。App 可以自己訓練 3DGS（[手機端 3DGS 訓練](ON_DEVICE_3DGS.zh-TW.md)），也可以把整理好的資料匯出給外部訓練器；兩者使用相同的選幀、姿態與點雲。
 
 照片挑選、跨影格匹配、相機位置驗證與深度重融合全部在 iPhone 上執行，不需要桌面 COLMAP。匯出仍為 LichtFeld / MrNeRF 可讀的 `images/ + sparse/0`。
 

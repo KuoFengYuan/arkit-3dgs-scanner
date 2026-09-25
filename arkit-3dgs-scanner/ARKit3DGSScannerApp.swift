@@ -83,7 +83,7 @@ private struct ReviewPanelPreview: View {
                                      resetCameraToken: reset)
                     .ignoresSafeArea()
             }
-            HUDOverlay(controller: controller, onResetView: { reset += 1 })
+            HUDOverlay(controller: controller, onResetView: { reset += 1 }, onTrain: { _ in })
         }
         .background(Color.black)
         .onAppear { controller.previewReviewState() }

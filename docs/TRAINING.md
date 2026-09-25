@@ -2,7 +2,7 @@
 
 **English** | [繁體中文](TRAINING.zh-TW.md)
 
-The app prepares datasets on the phone; Gaussian training runs externally. Unzip the exported scan and use `images/ + sparse/0`. The sparse model contains selected image poses, per-image PINHOLE calibration, and initialization points. It does not contain complete SfM observations or tracks.
+This page covers training on a computer. The app can also train on the phone ([on-device 3DGS training](ON_DEVICE_3DGS.md)). For an external trainer, unzip the exported scan and use `images/ + sparse/0`. The sparse model contains selected image poses, per-image PINHOLE calibration, and initialization points. It does not contain complete SfM observations or tracks.
 
 ## LichtFeld Studio / MrNeRF
 
@@ -10,7 +10,7 @@ Open the extracted COLMAP dataset with [LichtFeld Studio](https://github.com/MrN
 
 Use `sparse/0/images.bin` as the training-image list. The images directory preserves all captured originals, including photos excluded by selection. A workflow that independently enumerates that directory must also apply `training-selection.json`'s selected IDs.
 
-`points3D.bin` is the initialization point cloud, not a trained Gaussian model. Mobile output is currently capped at 250,000 points. New scans do not include `gaussians.ply`; that is a potential training result, not a missing input file.
+`points3D.bin` is the initialization point cloud, not a trained Gaussian model. Mobile output is currently capped at 250,000 points. The dataset ZIP does not include a `gaussians.ply`: that is a training result, not a missing input. On-device models are shared separately as `scan_…-3dgs.zip`.
 
 ## Other trainers
 

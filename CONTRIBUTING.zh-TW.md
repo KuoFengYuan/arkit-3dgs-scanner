@@ -20,6 +20,7 @@
 python3 tools/check_project.py
 bash tools/test_localization.sh
 bash tools/test_training_quality.sh
+bash tools/test_gaussian_training.sh
 xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner \
   -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build
 xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner \
@@ -29,6 +30,10 @@ xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner \
 iPhone 與 Simulator 依序建置，避免 build database 鎖定衝突；依受影響模組加跑回歸。編譯／合成測試不代表感測器精度。呼叫語系程式的 Swift 命令列工具需加入 Capture/Localization.swift；沒有 App bundle 資源時會退回中文來源文字。
 
 文件英文優先，搭配 .zh-TW.md；App 預設繁中、可切英文。參見[語系慣例](docs/LOCALIZATION.zh-TW.md)。不提交原始掃描、私人影像、憑證或建置輸出。
+
+## 授權
+
+貢獻的內容一律採用本專案的 [Apache License 2.0](LICENSE)。請保留 [NOTICE](NOTICE)，新增的 3DGS 原始碼檔也請加上相同的 `SPDX-License-Identifier` 檔頭。
 
 ## PR 與合併
 

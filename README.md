@@ -1,28 +1,30 @@
 # ARKit 3DGS Scanner
 
-**Turn iPhone scans into datasets for 3D Gaussian Splatting.**
+**Scan with an iPhone, then train 3D Gaussian Splatting on the phone or export a dataset.**
 
 **English** | [繁體中文](README.zh-TW.md)
 
-Capture photos, camera poses, and point clouds with ARKit. Refine the data on your iPhone, review the scene and capture route, then export a COLMAP dataset for an external 3DGS trainer.
+Capture photos, camera poses, and point clouds with ARKit. Refine the data on your iPhone, review the scene and capture route, then train a 3DGS model on the device or export a COLMAP dataset for an external trainer.
 
 - **Optional LiDAR:** fuse sensor depth or capture with RGB and verified sparse features.
 - **On-device data refinement:** image selection, validated camera pose refinement, and multi-view depth fusion.
 - **Review before export:** inspect point clouds, replay the capture route in first person, and continue an active scan to fill gaps.
 - **Visible processing:** a bilingual, dark fusion progress page with real stages, elapsed time, and a lightweight particle animation.
+- **On-device 3DGS training:** a Metal trainer with densification, pose refinement, anti-aliasing, and optional colour and capture-motion compensation, inside a fixed memory plan. It includes a live interactive preview and a saved-model viewer.
 - **COLMAP export:** calibrated images, camera poses, and initialization points in `images/ + sparse/0`.
 
-The app handles capture and dataset preparation. **On-device Gaussian Splatting training has been removed.** Training runs in an external tool; scanning, refinement, and preview stay on the phone.
+**Train 3DGS** runs the whole optimisation on the iPhone GPU, with no server. The loop renders, computes the loss, and updates the model and cameras. Runs pause with a checkpoint when the app leaves the foreground, when the device is too hot or low on battery, or when memory runs short, and resume later from History. The COLMAP export for external trainers is unchanged. See [on-device 3DGS training](docs/ON_DEVICE_3DGS.md) for the method, memory safety, file formats, and what was verified where.
 
 - **Experimental surface reconstruction:** bounded local RGB-D pose refinement and sparse TSDF surface points, with complete voxel-fusion fallback. TSDF pages full-precision blocks through one bounded scratch file with batched writes. Capped voxel export uses stable spatial-order sampling. Fusion also overlaps a single JPEG prefetch and reuses exact depth-validity checks without changing sampling or thresholds. See [behavior, benchmarks and limits](docs/SURFACE_RECONSTRUCTION.md).
 
 ## Workflow
 
 ```text
-Scan → Refine → Review point cloud → Export COLMAP ZIP → External 3DGS training
+Scan → Refine → Review point cloud ─┬─ Train 3DGS on the iPhone → View / share the model
+                  │                 └─ Export COLMAP ZIP → External 3DGS training
                   └─ Continue scanning to fill gaps
 
-Scan history → Photo / point-cloud / route preview → Refine a copy, export, or delete
+Scan history → Photo / point-cloud / route preview → Train 3DGS, refine a copy, export, or delete
 ```
 
 See [fusion progress, first-person review, and export safeguards](docs/FUSION_REVIEW.md).
@@ -38,6 +40,7 @@ See [fusion progress, first-person review, and export safeguards](docs/FUSION_RE
 | Metric scale | Pick point-cloud distances, calibrate against a known length, independently verify, and export scaled cameras/points |
 | Image selection | Prefers sharper, nonredundant views while retaining all original photos and reliable depth |
 | Synchronized playback | Photos follow their corresponding 3D camera position and direction; adjustable playback FPS |
+| On-device 3DGS | Trains, previews, pauses and resumes a Gaussian model per scan; the saved model opens from History after restarts |
 | Scan history | Preview, refine into a separate version, export, and delete individual, selected, or all scans |
 | Floor plans | Captures or estimates scene structure when supported and sufficient data is available |
 
@@ -55,9 +58,58 @@ open arkit-3dgs-scanner.xcodeproj
 2. Build and run. Allow camera access and wait for tracking to become ready.
 3. Choose LiDAR and refinement options before starting. Move around the scene so surfaces are visible from multiple positions.
 4. Stop the scan, wait for processing, and inspect the point cloud. Continue the active scan if more coverage is needed.
-5. Select **Export 3DGS dataset** to share the dataset ZIP. Unzip it on your computer and load it into a trainer that accepts COLMAP datasets.
+5. Select **Train 3DGS** to build a model on the phone, or **Export 3DGS dataset** to share the dataset ZIP. Unzip the dataset on your computer and load it into a trainer that accepts COLMAP datasets.
 
-The interface supports Traditional Chinese (default) and English; switch languages on the home screen. Documentation is English first with a Traditional Chinese version of every page. The repository, Xcode project, and scheme are named `arkit-3dgs-scanner`. The app identifier remains `itri.fable` to preserve existing installations and scan data.
+The interface supports Traditional Chinese (default) and English; switch languages on the home screen. Documentation is English first with a Traditional Chinese version of every page. The repository, Xcode project, scheme, and app identifier are all `arkit-3dgs-scanner`. Installations built under an earlier identifier appear as a separate app: re-export any scans you want to keep from the old app first.
+
+## Train 3DGS on the iPhone
+
+The app trains a 3D Gaussian Splatting model of a saved scan on the phone's GPU. Nothing is uploaded.
+
+**Requirements:**
+- An iPhone or iPad with an A14 chip or newer (Metal Apple GPU family 7).
+- LiDAR scans train best, because their depth fills surfaces the fused point cloud missed. Camera-only scans train from their sparse points.
+- Keep the app open while training, preferably on power.
+
+**Start a run**
+
+1. Finish a scan, or open **Scan history** and pick a scan.
+2. Tap the **Train 3DGS** card. It is on the review screen right after a capture and in the scan's detail.
+3. Pick a quality:
+
+   | Quality | Iterations | Training images | Gaussian cap | For |
+   | --- | --- | --- | --- | --- |
+   | Quick preview | 3,000 | 720 px | 300,000 | A fast first look |
+   | Standard (recommended) | 7,000 | 960 px | 600,000 | Most scans |
+   | High quality | 15,000 | 1,280 px | 1,000,000 | The most detail; takes the longest and uses more battery |
+
+   After a run finishes on this phone, each choice shows how long it took there. The memory check below the choices lowers the Gaussian cap if the phone has less memory free.
+4. Optional: open **Advanced settings** for camera pose refinement, PPISP colour correction, and anti-aliasing. The defaults suit most scans. PPISP turns on by itself only when the capture's exposure changed.
+5. Tap **Start training**.
+
+**While it trains**
+
+- The model appears live and sharpens as it trains. Drag to orbit, use two fingers to pan, pinch to zoom, and double-tap to reset the view.
+- The card shows the progress, the current stage, and the time left once the speed settles. The line below it shows the iteration, Gaussian count, loss, PSNR, and elapsed time.
+- **Pause**, **Save progress**, or **Stop**. When stopping, keep the progress to resume later or delete this run.
+- The run pauses by itself, with its progress saved, when:
+  - the app leaves the foreground;
+  - the phone is too hot;
+  - the battery drops below 15% off power;
+  - memory runs short.
+
+  It continues when the app returns or the phone cools down. Otherwise, resume it later from the card.
+
+**After it finishes**
+
+- The model stays with the scan, also after the app restarts. In **Scan history**, cards mark scans that have a model, a run in progress, or a run that can resume. Tap **View 3DGS model** to orbit the model.
+- **Share 3DGS model** sends `scan_…-3dgs.zip`. It contains `gaussians.ply` (the standard 3DGS PLY), metadata, the refined camera poses, and `ppisp.json` when PPISP was used.
+- In other 3DGS viewers, the PLY uses the COLMAP frame, so Y-up viewers show it upside down: rotate it 180° about X. Those viewers ignore `ppisp.json`.
+- From the options menu at the top right:
+  - **Retrain** keeps the current model until the new one completes.
+  - **Delete 3DGS model** removes only the training results; the scan's photos, depth, and poses stay.
+
+The trainer refines the camera poses, seeds empty surfaces from LiDAR depth, fills remaining holes while training, and uses the LiDAR depth as a geometry loss, so models hold their shape when orbiting away from the capture path. See [on-device 3DGS training](docs/ON_DEVICE_3DGS.md) for the method, measured results, memory safety, and file formats. Training speed, memory use, and heat on an iPhone have not been measured yet. Mac and Simulator results are not a substitute.
 
 ## Interface and controls
 
@@ -68,7 +120,7 @@ The interface is dark and 3D-first. The camera feed or point cloud fills the scr
   - A tool rail that appears only while scanning.
   - A shutter whose ring shows LiDAR view coverage, the share of surfaces seen over at least 30°. The heat map colours the same angle span per surface ([view coverage](docs/LIDAR_QUALITY_AND_PREVIEW.md#view-coverage-heat-map)).
   - A single **Scan settings** button that also shows the current mode. Its scrollable sections cover capture mode, quality, camera, and coordinate system.
-- **Review and history.** A floating panel holds the metrics, the primary export or share action, and secondary actions. Quality details stay in a separate sheet, and **More actions** in history holds scene-scale validation, optimization, and deletion.
+- **Review and history.** A floating panel holds the metrics and the scan's actions as matching cards: **Train 3DGS**, **Export 3DGS dataset** (then **Share scan**), and, in history, **Scan quality information**. Scan controls follow as secondary buttons. **More actions** in history holds scene-scale validation, optimization, and deletion. Sharing uses the system share sheet with the file itself, so apps such as LINE or Teams receive the ZIP.
 
 Surface reconstruction explicitly includes pose refinement; disable reconstruction first to configure refinement independently. Deletion still requires confirmation and removes the complete selected scan. Touch targets are at least 44 points with spoken labels, and all controls are available in English and Traditional Chinese. See [interface design](docs/INTERFACE_DESIGN.md) for the design system, screen states, responsive layouts, and Simulator preview arguments.
 
@@ -104,6 +156,7 @@ Stopped scans are saved automatically for later review, even before export.
 - Replay captured photos with a synchronized 3D camera marker and route. Playback supports 0.5, 1, 2, 5, 10, 15, and 30 fps. These are saved keyframes, not a real-time video recording.
 - Preview photos are oriented for viewing; original JPEG pixels and calibration remain unchanged.
 - **Optimize training data** refines a copy of the scan on the phone. It prepares training data; it does not train Gaussians.
+- **Train 3DGS** (or **View 3DGS model** / **Resume 3DGS training**) opens the scan's on-device training. Cards show training, a saved model, or a run that can resume; interrupted runs continue from their last checkpoint.
 - **Scene scale and validation** measures point-cloud distances, accepts a known reference, and exports a separate metric COLMAP ZIP. Camera positions and points scale together; raw depth is omitted from that ZIP. Reference checks do not certify whole-scene accuracy. See [loop closure and metric scale](docs/LOOP_CLOSURE_AND_SCALE.md).
 - Deletion removes the selected scan's photos, depth, poses, point clouds, models, and matching standard/metric ZIPs. Unselected scans and copies shared to other apps are unaffected.
 
@@ -135,7 +188,7 @@ scan_…/
 
 New captures use `capture-meta.json`. Legacy `meta.json` files remain readable and are renamed when exporting; if both names exist, the current file wins and the legacy content is retained under a separate capture-specific filename. This avoids exposing `meta.json` to trainer format detection.
 
-Additional floor-plan, world-map, reconstruction, and performance files depend on the enabled features. New scans do not generate `gaussians.ply`; existing models in older scans remain part of those scans for sharing and deletion.
+Additional floor-plan, world-map, reconstruction, and performance files depend on the enabled features. On-device training writes to `gaussian-training/` inside the scan (checkpoint, state, and `model/gaussians.ply` with its sidecars). The dataset ZIP leaves that folder out; the model has its own ZIP. Existing models in older scans remain part of those scans for sharing and deletion.
 
 **Coordinates:** COLMAP cameras and `points3D.bin` are rotated together by 180° around world X by default. PLY previews and JSONL poses retain ARKit world coordinates. Do not mix these coordinate frames without conversion. See [coordinate conventions](docs/COORDINATES.md).
 
@@ -149,6 +202,7 @@ Follow [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md). Changes go
 python3 tools/check_project.py
 bash tools/test_localization.sh
 bash tools/test_training_quality.sh
+bash tools/test_gaussian_training.sh
 bash tools/test_metric_loop.sh
 bash tools/test_fusion_memory.sh
 ```
@@ -163,11 +217,12 @@ xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner \
 ```text
 arkit-3dgs-scanner/Capture/    AR session, keyframes, fusion, pose refinement, image selection, export
 arkit-3dgs-scanner/History/    Scan storage, playback, refinement, and deletion
+arkit-3dgs-scanner/Training/   On-device 3DGS: Metal kernels, trainer, memory plan, checkpoints, export, viewer and UI
 tools/          Dataset conversion, analysis, and regression tests
 docs/           Architecture, coordinate conventions, quality, and performance
 ```
 
-The former `Training/` module, msplat C++ / Metal engine, Swift bridge, and dedicated build settings have been removed. Capture and dataset preparation do not depend on that engine.
+`Training/` is a new implementation in Swift and Metal. The earlier msplat C++ engine, its Swift bridge, and its build settings are not used. Capture and dataset preparation do not depend on the trainer.
 
 Optional Python tools:
 
@@ -181,12 +236,24 @@ python3 -m venv .venv
 
 Swift regression tools cover capture writes, geometry, bounded depth caching, large scans, history export, and playback. Device builds and synthetic tests do not replace real-device checks for tracking quality, temperature, or long-session memory use.
 
+## License
+
+Copyright 2026 Kuo Feng-Yuan ([KuoFengYuan](https://github.com/KuoFengYuan)). Licensed under the [Apache License 2.0](LICENSE).
+
+**This is a personal research project.** It is not a product of, and is not endorsed by, any employer or organisation, and it does not represent their views. It is provided as is, without warranty.
+
+- **Commercial use is allowed**, including the on-device 3DGS trainer, and so are modification and redistribution.
+- **Credit the author.** Any copy or derivative work must keep [LICENSE](LICENSE) and [NOTICE](NOTICE) and credit Kuo Feng-Yuan (KuoFengYuan) as the original author.
+- The 3DGS trainer is an independent Swift and Metal implementation. It contains no code from the original 3D Gaussian Splatting (Inria/MPII) or Mip-Splatting releases, which allow only non-commercial use, and no code from LichtFeld Studio (GPL-3.0). [NOTICE](NOTICE) lists the papers and projects it follows.
+- Third-party patents may still cover some of the methods. This is not legal advice; check before commercial use.
+
 ## Documentation
 
 - [Capture architecture](docs/CAPTURE_ARCHITECTURE.md)
 - [Interface design](docs/INTERFACE_DESIGN.md)
 - [Pose refinement and photo-alignment validation](docs/POSE_REFINEMENT.md)
 - [Loop closure and metric scale](docs/LOOP_CLOSURE_AND_SCALE.md)
+- [On-device 3DGS training](docs/ON_DEVICE_3DGS.md)
 - [On-device dataset refinement](docs/ON_DEVICE_TRAINING_QUALITY.md)
 - [LiDAR surface consistency](docs/LIDAR_SURFACE_CONSENSUS.md)
 - [Camera-only reconstruction](docs/CAMERA_ONLY_ACCURACY.md)
