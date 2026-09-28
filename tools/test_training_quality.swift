@@ -101,6 +101,41 @@ import simd
         let depthURL = scan.appendingPathComponent("depth/d.bin")
         try [Float](repeating: 2, count: 40*30).withUnsafeBytes { try Data($0).write(to: depthURL) }
         try Data(repeating: 2, count: 40*30).write(to: scan.appendingPathComponent("depth/c.bin"))
+
+        // Working distance: the median confident depth; metric sizes scale only below room scale.
+        try [Float](repeating: 0.3, count: 40*30).withUnsafeBytes { try Data($0).write(to: scan.appendingPathComponent("depth/near.bin")) }
+        func withDepth(_ id: Int, _ file: String, x: Double = 0) -> FrameRecord {
+            var r = record(id, x: x); r.depthFile = file; r.confidenceFile = "c.bin"; r.depthWidth = 40; r.depthHeight = 30
+            return r
+        }
+        let roomDistance = TrainingFrameSelector.workingDistance(records: (1...5).map { withDepth($0, "d.bin") }, directory: scan)
+        let nearDistance = TrainingFrameSelector.workingDistance(records: (1...5).map { withDepth($0, "near.bin") }, directory: scan)
+        check(roomDistance == 2 && nearDistance.map { abs($0 - 0.3) < 1e-6 } == true
+              && TrainingFrameSelector.workingDistance(records: [record(1)], directory: scan) == nil,
+              "working distance is the median confident LiDAR depth, and nil without depth")
+        check(TrainingFrameSelector.metricScale(workingDistance: 2) == 1 && TrainingFrameSelector.metricScale(workingDistance: 1.2) == 1
+              && abs(TrainingFrameSelector.metricScale(workingDistance: 0.3) - 0.25) < 1e-6
+              && TrainingFrameSelector.metricScale(workingDistance: 0.05) == 0.125 && TrainingFrameSelector.metricScale(workingDistance: nil) == 1,
+              "metric sizes keep their room-scale values from 1.2 m on and shrink in proportion below, to at most 1/8")
+        // Redundancy: 2 cm apart is a near-duplicate at room scale, 3.8° of parallax at 0.3 m.
+        let pair = [record(30), record(31, x: 0.02)]
+        let pairEvidence = [30: E(detail: 2, signature: flat), 31: E(detail: 1, signature: flat)]
+        check(TrainingFrameSelector.select(pair, evidence: pairEvidence).selectedIDs == [30]
+              && TrainingFrameSelector.select(pair, evidence: pairEvidence, workingDistance: 0.3).selectedIDs == [30, 31],
+              "the redundancy step shrinks with the working distance: 2 cm apart is a distinct view at 0.3 m")
+        // Blur verdicts: readout skew is not image blur, and neighbours must see the same surface.
+        func blurRecord(_ id: Int, x: Double, risk: Double, sharpness: Double) -> FrameRecord {
+            var r = record(id, x: x, risk: risk); r.exposureDuration = 0.006; r.sharpness = sharpness
+            return r
+        }
+        let slow = (0..<4).map { blurRecord(40 + $0, x: Double($0) * 0.01, risk: 12, sharpness: 1) }
+        check(BlurFilter.evaluate(slow).values.contains(.demote) == true
+              && BlurFilter.evaluate(slow, readout: 0.01).values.allSatisfy { $0 == .keep },
+              "with the readout given, 12 px of risk from a 6 ms exposure and 10 ms readout (4.5 px of blur) keeps the photos")
+        let surfaces = (0..<4).map { blurRecord(50 + $0, x: Double($0) * 0.01, risk: 2, sharpness: 10) }
+            + [blurRecord(60, x: 0.3, risk: 2, sharpness: 1), blurRecord(61, x: 0.31, risk: 2, sharpness: 1.1), blurRecord(62, x: 0.32, risk: 2, sharpness: 0.9)]
+        check(BlurFilter.evaluate(surfaces)[60] == .demote && BlurFilter.evaluate(surfaces, neighborScale: 0.25)[60] == .keep,
+              "at close range, photos 30 cm apart are not neighbours, so a less textured surface is not judged blurred")
         var frames = (1...1000).map { i -> FrameRecord in
             var r = record(i); r.imageFile = "frame_1.png"
             r.depthFile = "d.bin"; r.confidenceFile = "c.bin"; r.depthWidth = 40; r.depthHeight = 30

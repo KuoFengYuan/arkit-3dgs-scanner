@@ -17,7 +17,7 @@ Photo selection, cross-frame matching, camera-pose validation, and depth refusio
 
 `TrainingFrameSelector` runs after geometry/RGB review. It does not change `blurVerdict` or depth-fusion inputs. This second selection stage has no 30% exclusion cap.
 
-It decodes one sensor-oriented grayscale thumbnail at a time, at most 320 pixels on the long edge. It measures second differences relative to gradient energy and a 16×12 image signature. Only cameras within 4 cm, within 3° of full rotation, and with similar image signatures are treated as replaceable views; the view with stronger detail wins. Different viewpoints, baselines, content, and views lacking reliable sharpness measurements are retained. This conservative heuristic cannot detect every small occlusion; a textureless surface is not automatically blurry.
+It decodes one sensor-oriented grayscale thumbnail at a time, at most 320 pixels on the long edge. It measures second differences relative to gradient energy and a 16×12 image signature. Only cameras within 4 cm (less at close range, see below), within 3° of full rotation, and with similar image signatures are treated as replaceable views; the view with stronger detail wins. Different viewpoints, baselines, content, and views lacking reliable sharpness measurements are retained. This conservative heuristic cannot detect every small occlusion; a textureless surface is not automatically blurry.
 
 An estimated motion value above 10 px does **not** by itself exclude an image or trigger a recapture banner. Report v3 separates:
 
@@ -26,6 +26,29 @@ An estimated motion value above 10 px does **not** by itself exclude an image or
 - **Low texture / insufficient evidence:** informational, without a recapture banner.
 
 Older reports without these categories show an informational suggestion to optimize again, rather than reclassifying all legacy recapture IDs as blurry. Raw media, selected-image geometry, and depth support remain intact. This changes the warning policy; it does not deblur photos. Better light, shorter exposure, slower movement and turning, and genuinely clearer overlapping views are still needed for better source images.
+
+### Close-range scans (report v4)
+
+The metric sizes of the blur review and of this selection were set on room scans, 1.3–2.2 m from the surfaces. On a tabletop scan at 0.37 m (94D4DD) they left only 244 of 479 photos for training:
+
+- **Blur review neighbours:** the review compares a photo's sharpness with photos within 0.5 m and 30°. At 0.37 m every camera is within 0.8 m of every other, so the comparison included views of other surfaces, and texture differences read as blur.
+- **Motion estimate:** the review demoted photos whose estimate passed 10 px. That estimate includes the 10 ms rolling readout, which skews rows but does not blur them. On this scan, 375 photos passed 10 px on the estimate, and 1 on exposure blur alone.
+- **The 30% cap:** together, the review hit its cap of 30% (139 demoted, 4 dropped).
+- **Redundancy:** the selection then marked 90 photos as redundant views 2 cm apart, which at 0.37 m is 3.4° of parallax.
+
+Since report v4 (`TrainingFrameSelector.policyVersion`):
+
+- **Working distance:** the scan's median confident LiDAR depth (`TrainingFrameSelector.workingDistance`).
+  - Below 1.2 m, the 0.5 m neighbour radius and the 4 cm redundancy step shrink in proportion, down to 1/8.
+  - Room-scale scans keep their values. FBDA13 (1.26 m) and 9F8040 (2.25 m) are unchanged, and 7F2187 (1.15 m) changes by 4%.
+- **Image blur:** the training-image threshold uses exposure blur only, that is, the estimate scaled by exposure / (exposure + readout).
+  - The geometry threshold for depth fusion (25 px) still uses the full estimate.
+  - The HUD's live warning is unchanged.
+- **Result on 94D4DD:** 34 photos demoted, 4 dropped, and 438 of 479 selected.
+- **Older scans:** on-device training evaluates their verdicts and selection again with these rules, in memory. The result is cached in `gaussian-training/selection.json`.
+  - The scan's own `training-selection.json` and `sparse/0` are unchanged and still match each other.
+  - Optimize training data (above) writes a v4 report and export.
+- **Effect on training:** measured in [close-range scans](ON_DEVICE_3DGS.md#close-range-scans).
 
 `training-selection.json` records decisions, replacement frames, reasons, timestamps, and category IDs. All original photos remain in `images/`. **Use `sparse/0/images.bin` as the training-image list.** A trainer that rescans the entire images folder must also respect `selectedIDs`.
 

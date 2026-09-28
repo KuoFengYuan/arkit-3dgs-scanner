@@ -247,6 +247,7 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
         let dataset = try TrainingDataset.prepare(scan: workspace.scan, longEdge: configuration.longEdge,
                                                   holdOutEvery: configuration.holdOutEvery, maxPoints: configuration.seedBudget,
                                                   depthSeedLimit: configuration.depthSeedLimit(cloudPoints:),
+                                                  selectionCache: workspace.selectionCacheURL,
                                                   isCancelled: { [weak self] in self?.cancelRequestedNow ?? true })
         if let keep = cancelValue {
             if !resume, let previous {

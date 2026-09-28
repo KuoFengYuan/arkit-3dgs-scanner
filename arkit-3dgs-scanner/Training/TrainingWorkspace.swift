@@ -57,6 +57,9 @@ nonisolated struct TrainingWorkspace: Sendable {
     static let folderName = ExportManager.gaussianTrainingFolder
     let scan: URL
     var root: URL { scan.appendingPathComponent(Self.folderName, isDirectory: true) }
+    /// The photo selection evaluated again with the current rules, for scans whose own selection
+    /// is older (see `TrainingDataset.FrameSelection`).
+    var selectionCacheURL: URL { root.appendingPathComponent("selection.json") }
     var stateURL: URL { root.appendingPathComponent("state.json") }
     var checkpointURL: URL { root.appendingPathComponent(GaussianCheckpoint.fileName) }
     var modelDirectory: URL { root.appendingPathComponent("model", isDirectory: true) }

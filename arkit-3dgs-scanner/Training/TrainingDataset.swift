@@ -51,14 +51,81 @@ nonisolated struct TrainingDataset: Sendable {
     /// Seed points in ARKit world coordinates (metres) with colour.
     let points: [CloudPoint]
     let width: Int, height: Int
+    /// Median confident LiDAR depth of the scan (m), when it has depth.
+    var workingDistance: Float? = nil
     var trainFrames: [Int] { frames.indices.filter { !frames[$0].isValidation } }
     var validationFrames: [Int] { frames.indices.filter { frames[$0].isValidation } }
+
+    /// A photo with a finite pose, valid intrinsics and a plain image file name.
+    static func isValid(_ r: FrameRecord) -> Bool {
+        r.transform.count == 16 && r.transform.allSatisfy(\.isFinite)
+            && r.intrinsics.width > 0 && r.intrinsics.height > 0 && r.intrinsics.fx > 0 && r.intrinsics.fy > 0
+            && r.imageFile == (r.imageFile as NSString).lastPathComponent
+    }
+
+    /// The records with the blur verdicts a run uses, the usable ones (valid, kept), and the
+    /// selected IDs (see `FrameSelection`). Evaluating again reads a thumbnail of every usable
+    /// photo; with `.stored` the result is cached in `selectionCache`.
+    static func selection(scan directory: URL, saved: [FrameRecord], workingDistance: Float?, frameSelection: FrameSelection,
+                          selectionCache: URL?, isCancelled: () -> Bool = { false })
+        -> (records: [FrameRecord], usable: [FrameRecord], selected: Set<Int>) {
+        let stored = storedSelection(directory.appendingPathComponent("training-selection.json"))
+        var readout: Double?
+        switch frameSelection {
+        case .current(let r): readout = r
+        case .stored where (stored?.version ?? 0) < TrainingFrameSelector.policyVersion: readout = CaptureConfig().rollingShutterReadoutS
+        case .stored, .captured: readout = nil
+        }
+        let scale = TrainingFrameSelector.metricScale(workingDistance: workingDistance)
+        let records = readout.map { BlurFilter.annotate(saved, readout: $0, neighborScale: scale) } ?? saved
+        let usable = records.filter { isValid($0) && $0.blurVerdict == .keep }
+        let usableIDs = Set(usable.map(\.id))
+        if readout == nil, let stored, !Set(stored.selectedIDs).isDisjoint(with: usableIDs) {
+            return (records, usable, Set(stored.selectedIDs))
+        }
+        if case .stored = frameSelection, let selectionCache, let cached = storedSelection(selectionCache),
+           cached.version >= TrainingFrameSelector.policyVersion, cached.inputFrames == records.count,
+           !Set(cached.selectedIDs).isDisjoint(with: usableIDs) {
+            return (records, usable, Set(cached.selectedIDs))
+        }
+        let evidence = TrainingFrameSelector.evidence(records: usable, directory: directory, isCancelled: isCancelled)
+        let report = TrainingFrameSelector.select(records, evidence: evidence, workingDistance: workingDistance)
+        if case .stored = frameSelection, let selectionCache, !isCancelled() {
+            try? FileManager.default.createDirectory(at: selectionCache.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? JSONEncoder().encode(report).write(to: selectionCache, options: .atomic)
+        }
+        return (records, usable, Set(report.selectedIDs))
+    }
+
+    /// How many photos a run of `scan` would use (before any are held out), as `prepare` selects
+    /// them; nil when the scan has none.
+    static func selectedPhotoCount(scan: URL, selectionCache: URL?) -> Int? {
+        let (saved, _) = ScanLibrary.savedRecords(in: scan)
+        let distance = TrainingFrameSelector.workingDistance(records: saved, directory: scan)
+        let (_, usable, selected) = selection(scan: scan, saved: saved, workingDistance: distance, frameSelection: .stored,
+                                              selectionCache: selectionCache)
+        let count = usable.filter { selected.contains($0.id) }.count
+        return count > 0 ? count : nil
+    }
+
+    static func storedSelection(_ url: URL) -> TrainingFrameSelector.Report? {
+        (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode(TrainingFrameSelector.Report.self, from: $0) }
+    }
 
     /// Training resolution for a stored image scaled to `longEdge` (never upscaled).
     static func trainingSize(width: Int, height: Int, longEdge: Int) -> (Int, Int) {
         let scale = min(1, Double(longEdge) / Double(max(width, height)))
         return (max(16, Int((Double(width) * scale).rounded())), max(16, Int((Double(height) * scale).rounded())))
     }
+
+    /// Which photos train. `stored`: the scan's blur verdicts and selection when they were made
+    /// with the current rules (`TrainingFrameSelector.policyVersion`); older ones are evaluated
+    /// again, cached in `selectionCache` (the scan's own report keeps matching its COLMAP
+    /// export). `current`: always evaluated again. `captured`: the scan's own verdicts and
+    /// report whatever their version (the tools' baseline). The current rules put the blur
+    /// threshold on exposure blur only (with `readout`), and scale the blur neighbours and
+    /// redundancy step with the working distance.
+    enum FrameSelection { case stored, current(readout: Double), captured }
 
     /// Uses the same inputs as the COLMAP export: the latest review poses (anchor-corrected and
     /// bundle-adjusted when validated), the RGB frame selection, per-frame intrinsics and the
@@ -68,27 +135,23 @@ nonisolated struct TrainingDataset: Sendable {
     /// saved cloud has none (see `depthSeeds`).
     /// `holdOutSegment` > 0 instead holds out one contiguous stretch of that fraction of the
     /// selected frames, from the middle of the capture (novel views away from the training path).
+    /// `holdOutIDs` fixes the held-out photos (comparing selections on the same views): those
+    /// photos are held out whatever the selection, and no others. `scaledSeedCells` shrinks the
+    /// depth-seed cells below room scale (`TrainingFrameSelector.metricScale`).
     static func prepare(scan directory: URL, longEdge: Int, holdOutEvery: Int, maxPoints: Int,
                         depthSeedLimit: (_ cloudPoints: Int) -> Int = { _ in 0 }, holdOutSegment: Double = 0,
-                        isCancelled: () -> Bool = { false }) throws -> TrainingDataset {
-        let (records, _) = ScanLibrary.savedRecords(in: directory)
-        let usable = records.filter {
-            $0.blurVerdict == .keep && $0.transform.count == 16 && $0.transform.allSatisfy(\.isFinite)
-                && $0.intrinsics.width > 0 && $0.intrinsics.height > 0 && $0.intrinsics.fx > 0 && $0.intrinsics.fy > 0
-                && $0.imageFile == ($0.imageFile as NSString).lastPathComponent
-        }
+                        frameSelection: FrameSelection = .stored, holdOutIDs: Set<Int>? = nil, scaledSeedCells: Bool = true,
+                        selectionCache: URL? = nil, isCancelled: () -> Bool = { false }) throws -> TrainingDataset {
+        let (saved, _) = ScanLibrary.savedRecords(in: directory)
+        let workingDistance = TrainingFrameSelector.workingDistance(records: saved, directory: directory)
+        let (records, usable, selected) = selection(scan: directory, saved: saved, workingDistance: workingDistance,
+                                                    frameSelection: frameSelection, selectionCache: selectionCache, isCancelled: isCancelled)
+        let valid = records.filter(isValid)
         guard !usable.isEmpty else { throw PreparationError.noFrames }
-        // Prefer the stored selection; recompute it (in memory) for scans exported before it existed.
-        var selected: Set<Int>
-        if let data = try? Data(contentsOf: directory.appendingPathComponent("training-selection.json")),
-           let report = try? JSONDecoder().decode(TrainingFrameSelector.Report.self, from: data),
-           !Set(report.selectedIDs).isDisjoint(with: usable.map(\.id)) {
-            selected = Set(report.selectedIDs)
-        } else {
-            let evidence = TrainingFrameSelector.evidence(records: usable, directory: directory, isCancelled: isCancelled)
-            selected = Set(TrainingFrameSelector.select(usable, evidence: evidence).selectedIDs)
-        }
-        let chosen = usable.filter { selected.contains($0.id) }.sorted { $0.id < $1.id }
+        let scale = TrainingFrameSelector.metricScale(workingDistance: workingDistance)
+        let trained = usable.filter { selected.contains($0.id) }
+        let chosen = (holdOutIDs.map { held in valid.filter { held.contains($0.id) } + trained.filter { !held.contains($0.id) } }
+                      ?? trained).sorted { $0.id < $1.id }
         guard !chosen.isEmpty else { throw PreparationError.noFrames }
         // ARKit's raw tracking is smooth frame to frame; corrected pose sets can jump between
         // segments (anchor updates, relocalisation), which would read as motion.
@@ -107,9 +170,9 @@ nonisolated struct TrainingDataset: Sendable {
             let ev: Double? = record.exposureDuration > 0 && record.iso > 0 ? log2(record.exposureDuration * record.iso) : nil
             frames.append(TrainingFrame(id: record.id, imageFile: record.imageFile, intrinsics: record.intrinsics,
                                         transform: record.transform, captureEV: ev,
-                                        isValidation: holdOutSegment > 0
+                                        isValidation: holdOutIDs.map { $0.contains(record.id) } ?? (holdOutSegment > 0
                                             ? abs(Double(index) + 0.5 - Double(chosen.count) / 2) < holdOutSegment * Double(chosen.count) / 2
-                                            : holdOutEvery > 1 && index % holdOutEvery == holdOutEvery / 2,
+                                            : holdOutEvery > 1 && index % holdOutEvery == holdOutEvery / 2),
                                         exposure: record.exposureDuration > 0 ? record.exposureDuration : nil,
                                         motion: velocities[record.id], depthFile: record.depthFile,
                                         confidenceFile: record.confidenceFile, depthWidth: record.depthWidth,
@@ -127,11 +190,13 @@ nonisolated struct TrainingDataset: Sendable {
         let seedLimit = depthSeedLimit(points.count)
         if seedLimit > 0 {
             let training = Set(frames.filter { !$0.isValidation }.map(\.id))
+            let cells = scaledSeedCells ? scale : 1
             points += depthSeeds(records: chosen.filter { training.contains($0.id) }, directory: directory, existing: points,
-                                 limit: seedLimit, isCancelled: isCancelled)
+                                 limit: seedLimit, voxel: 0.04 * cells, lowConfidenceRange: 4 * cells, isCancelled: isCancelled)
         }
         let size = trainingSize(width: first.width, height: first.height, longEdge: longEdge)
-        return TrainingDataset(directory: directory, frames: frames, points: points, width: size.0, height: size.1)
+        return TrainingDataset(directory: directory, frames: frames, points: points, width: size.0, height: size.1,
+                               workingDistance: workingDistance)
     }
 
     /// Densification only splits existing Gaussians, so surfaces without seeds never get any.
@@ -139,7 +204,12 @@ nonisolated struct TrainingDataset: Sendable {
     /// 40% of the 5 cm cells the LiDAR saw had no point. This back-projects a grid of each
     /// training photo's LiDAR depth and adds one seed (coloured from the photo) per empty
     /// `voxel` cell: medium/high-confidence depth first, then low-confidence depth closer than
-    /// 4 m for cells still empty. Reads the scan only.
+    /// `lowConfidenceRange` for cells still empty. Reads the scan only.
+    ///
+    /// The 4 cm cell and 4 m range were set on room scans; `prepare` shrinks both below room
+    /// scale. On 94D4DD (a tabletop at 0.35 m) 4 cm cells left 5,583 confident seeds, most of
+    /// them in the background over 1 m away, because the object's surfaces filled their few
+    /// cells at once.
     ///
     /// Large scenes have more empty cells than `limit`. Every photo gets an equal share of a
     /// candidate budget (8 × `limit`; a photo samples its depth more sparsely only when its
@@ -147,7 +217,8 @@ nonisolated struct TrainingDataset: Sendable {
     /// more candidates than `limit` are thinned on a coarser grid. Seeds thus spread over the
     /// whole scene instead of filling the first photos' surfaces and leaving the rest without.
     static func depthSeeds(records: [FrameRecord], directory: URL, existing: [CloudPoint], limit: Int,
-                           voxel: Float = 0.04, stride: Int = 4, isCancelled: () -> Bool = { false }) -> [CloudPoint] {
+                           voxel: Float = 0.04, lowConfidenceRange: Float = 4, stride: Int = 4,
+                           isCancelled: () -> Bool = { false }) -> [CloudPoint] {
         struct Key: Hashable { var x, y, z: Int32 }
         func key(_ p: SIMD3<Float>, _ size: Float = voxel) -> Key {
             Key(x: Int32((p.x / size).rounded(.down)), y: Int32((p.y / size).rounded(.down)), z: Int32((p.z / size).rounded(.down)))
@@ -182,7 +253,7 @@ nonisolated struct TrainingDataset: Sendable {
                         for x in Swift.stride(from: sampleStep / 2, to: w, by: sampleStep) where seeds.count < candidateCap {
                             let i = y * w + x
                             let z = depth[i], c = confidence[i]
-                            guard z.isFinite, z > 0.1, pass == 0 ? c >= 1 : (c == 0 && z < 4) else { continue }
+                            guard z.isFinite, z > 0.1, pass == 0 ? c >= 1 : (c == 0 && z < lowConfidenceRange) else { continue }
                             // ARKit camera: x right, y up, looking down -z; image rows go down.
                             let cam = SIMD3((Float(x) + 0.5 - cx) / fx * z, -(Float(y) + 0.5 - cy) / fy * z, -z)
                             let world = SIMD3(t[0] * cam.x + t[1] * cam.y + t[2] * cam.z + t[3],
@@ -274,8 +345,9 @@ nonisolated struct TrainingDataset: Sendable {
     /// exposure there is little per-image difference to compensate.
     static let ppispExposureThreshold = 0.15
 
-    init(directory: URL, frames: [TrainingFrame], points: [CloudPoint], width: Int, height: Int) {
+    init(directory: URL, frames: [TrainingFrame], points: [CloudPoint], width: Int, height: Int, workingDistance: Float? = nil) {
         self.directory = directory; self.frames = frames; self.points = points; self.width = width; self.height = height
+        self.workingDistance = workingDistance
     }
 
     /// Stable identity of the training inputs; a checkpoint only resumes on the same inputs.

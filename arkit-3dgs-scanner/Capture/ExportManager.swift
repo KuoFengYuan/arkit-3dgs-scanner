@@ -87,7 +87,8 @@ nonisolated enum ExportManager {
     static func writeTrainingDataset(records: [FrameRecord], points: [CloudPoint],
                                      to directory: URL, flipWorldUp: Bool = true) throws {
         let evidence = TrainingFrameSelector.evidence(records: records, directory: directory)
-        let selection = TrainingFrameSelector.select(records, evidence: evidence)
+        let selection = TrainingFrameSelector.select(records, evidence: evidence,
+                                                     workingDistance: TrainingFrameSelector.workingDistance(records: records, directory: directory))
         let selectedIDs = Set(selection.selectedIDs)
         let records = records.filter { selectedIDs.contains($0.id) }
         guard !records.isEmpty else { throw TrainingExportError.noUsableFrames }

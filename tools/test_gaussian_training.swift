@@ -645,6 +645,25 @@ import simd
         print("  long capture: \(spread.count) seeds on \(walls.count) of 8 walls")
         check(spread.count <= 400 && spread.count > 300 && walls.count == 8,
               "with more empty cells than the limit, depth seeds spread over the whole capture, not only its first photos")
+        // Close range: a tabletop 0.3 m away (low-confidence background 1.5 m away in one
+        // quadrant). Room-scale 4 cm cells give the surface few seeds and take the background;
+        // cells and range scaled to the working distance (1/4) cover the surface and skip it.
+        let nearDir = temp.appendingPathComponent("scan_depthseed_near")
+        try? FileManager.default.removeItem(at: nearDir)
+        for sub in ["images", "depth"] { try FileManager.default.createDirectory(at: nearDir.appendingPathComponent(sub), withIntermediateDirectories: true) }
+        var nearDepth = [Float](repeating: 0.3, count: w * h), nearConfidence = [UInt8](repeating: 2, count: w * h)
+        for y in (h / 2)..<h { for x in (w / 2)..<w { nearConfidence[y * w + x] = 0; nearDepth[y * w + x] = 1.5 } }
+        try nearDepth.withUnsafeBytes { try Data($0).write(to: nearDir.appendingPathComponent("depth/f1_depth.bin")) }
+        try Data(nearConfidence).write(to: nearDir.appendingPathComponent("depth/f1_conf.bin"))
+        try FileManager.default.copyItem(at: dir.appendingPathComponent("images/f1.jpg"), to: nearDir.appendingPathComponent("images/f1.jpg"))
+        let scale = TrainingFrameSelector.metricScale(workingDistance: 0.3)
+        let roomCells = TrainingDataset.depthSeeds(records: [record], directory: nearDir, existing: [], limit: 100_000, stride: 2)
+        let nearCells = TrainingDataset.depthSeeds(records: [record], directory: nearDir, existing: [], limit: 100_000,
+                                                   voxel: 0.04 * scale, lowConfidenceRange: 4 * scale, stride: 2)
+        func surface(_ seeds: [CloudPoint]) -> Int { seeds.filter { abs($0.z + 0.3) < 0.01 }.count }
+        print("  close range: \(surface(roomCells)) surface seeds and \(roomCells.count - surface(roomCells)) background with 4 cm cells, \(surface(nearCells)) and \(nearCells.count - surface(nearCells)) with \(Int(40 * scale)) mm")
+        check(surface(nearCells) >= 8 * surface(roomCells) && nearCells.count == surface(nearCells) && roomCells.count > surface(roomCells),
+              "at 0.3 m, cells scaled to the working distance give the surface many more seeds and skip far low-confidence background")
         // The seed budget follows the Gaussian cap; depth seeds fill what the cloud leaves.
         var standard = GaussianTrainingConfiguration.preset(.standard)
         standard.maxGaussians = 600_000

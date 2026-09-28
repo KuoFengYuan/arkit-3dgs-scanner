@@ -593,6 +593,15 @@ final class CaptureController: NSObject, ObservableObject {
             }
             return r
         }
+        // 近距離掃描：模糊複核的鄰居半徑與訓練挑幀的重複視角步距，依工作距離（LiDAR 深度
+        // 中位數）縮放；逐列讀出造成的是剪切而非模糊，不再讓照片退出訓練
+        // （TrainingFrameSelector.policyVersion 4）。
+        let depthRecords = raw
+        let workingDistance = await Task.detached(priority: .userInitiated) {
+            TrainingFrameSelector.workingDistance(records: depthRecords, directory: dir)
+        }.value
+        let blurScale = TrainingFrameSelector.metricScale(workingDistance: workingDistance)
+        let readout = config.rollingShutterReadoutS
         // 局部 BA：以「ARKit ＋ 錨點修正」為初值，用掃描時建好的跨幀對應做微調。
         // 位置在這裡的理由：
         //   · 必須在錨點修正**之後** —— 那是初值，BA 只做微調
@@ -601,7 +610,7 @@ final class CaptureController: NSObject, ObservableObject {
         let anchorCorrectedRecords = refinedRecords
         if config.baRounds > 0 {
             stage(L10n.text("逐張匹配拍攝影像…"), 0.10, .aligning)
-            let records = BlurFilter.annotate(refinedRecords)
+            let records = BlurFilter.annotate(refinedRecords, readout: readout, neighborScale: blurScale)
             let rounds = config.baRounds
             let surfaceRefinement = config.surfaceReconstruction
             // The live worker is best-effort; release it and rebuild tracks from ALL saved
@@ -636,7 +645,7 @@ final class CaptureController: NSObject, ObservableObject {
         } else if !hasLiDAR, config.cameraOnlyPoseRefinement {
             // Camera-only: image-only tracks and the joint bundle adjustment; held-out tracks decide.
             stage(L10n.text("逐張匹配拍攝影像…"), 0.10, .aligning)
-            let records = BlurFilter.annotate(refinedRecords)
+            let records = BlurFilter.annotate(refinedRecords, readout: readout, neighborScale: blurScale)
             let onProgress: @Sendable (Double) -> Void = { p in
                 Task { @MainActor [weak self] in
                     guard let self, self.phase == .processing, self.processingStage == .aligning, self.scanGeneration == generation else { return }
@@ -665,7 +674,7 @@ final class CaptureController: NSObject, ObservableObject {
         stage(L10n.text("複核模糊幀…"), 0.35, .checking)
         let recordsToCheck = refinedRecords
         let annotated = await Task.detached(priority: .userInitiated) {
-            BlurFilter.annotate(recordsToCheck)
+            BlurFilter.annotate(recordsToCheck, readout: readout, neighborScale: blurScale)
         }.value
         guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
         refinedRecords = annotated
@@ -722,7 +731,7 @@ final class CaptureController: NSObject, ObservableObject {
             if result.report.status == "memoryPressure" {
                 fusionInterrupted = true
                 // Fallback live points were built with anchor poses, not the newly refined poses.
-                refinedRecords = BlurFilter.annotate(anchorCorrectedRecords)
+                refinedRecords = BlurFilter.annotate(anchorCorrectedRecords, readout: readout, neighborScale: blurScale)
                 baResult?.poses = [:]
                 scanNotice = L10n.text("融合時記憶體不足，已停止精細融合並保留即時點雲預覽；照片與深度資料仍完整保留。")
                 points = await accumulator.checkpointPoints(limit: min(cfg.exportMaxPoints, 100_000),
@@ -792,7 +801,8 @@ final class CaptureController: NSObject, ObservableObject {
         let selection = await Task.detached(priority: .utility) {
             TrainingFrameSelector.select(selectionRecords,
                 evidence: TrainingFrameSelector.evidence(records: selectionRecords, directory: dir,
-                                                         isCancelled: { cancel.isCancelled }))
+                                                         isCancelled: { cancel.isCancelled }),
+                workingDistance: workingDistance)
         }.value
         guard isAttached, scanGeneration == generation, !cancel.isCancelled else { return }
         if let notice = selection.notice { scanNotice = [scanNotice, notice].compactMap { $0 }.joined(separator: "\n") }

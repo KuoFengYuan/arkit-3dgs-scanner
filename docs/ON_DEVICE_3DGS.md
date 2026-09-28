@@ -271,6 +271,7 @@ Two changes, both on by default:
 - **LiDAR depth seeds.** Before training, a grid of each training photo's LiDAR depth is back-projected. One seed, coloured from the photo, goes into every empty 4 cm cell. Medium- and high-confidence depth is used first; low-confidence depth under 4 m fills cells that are still empty. FBDA13 gained 48,950 seeds in 3.5 s on the Mac.
   - **Budget:** the saved cloud and the depth seeds together are at most half the Gaussian cap. The cloud is read up to that budget (before, a fixed 250,000 points), and depth seeds fill what it leaves, at least a quarter of the cap. When the memory plan lowers the cap, initialisation thins the seeds to half of it.
   - **Large scenes:** when there are more empty cells than the budget, every photo gets an equal share of the candidates (sampling its depth more sparsely only when needed), photos are visited interleaved across the capture, and the candidates are thinned on a coarser grid. Seeds cover the whole capture; before, the first photos used up the budget and the rest of a long capture got none. On a synthetic walk past 8 walls with room for 400 seeds, all 8 walls got seeds.
+  - **Close range:** the 4 cm cell and the 4 m low-confidence range are room-scale values. Below a working distance of 1.2 m (the scan's median confident LiDAR depth) both shrink in proportion, down to 1/8. On 94D4DD (0.37 m, 12.4 mm cells) the seeds rose from 17,901 to 81,338; see [close-range scans](#close-range-scans).
 - **Hole filling during training.** While densification runs, each refine looks at the last rendered view for pixels the Gaussians barely cover (transmittance > 0.4) that differ from the photo (colour error > 0.08). A faint seed goes on each such pixel's ray, at the pixel's LiDAR depth or else the median depth of covered pixels nearby. Hole seeds take at most half of the free slots, and at most 2,000 per refine. Wrong guesses fade and are pruned.
 
 | Pose rate 10⁻³, seed spread | Held-out, aligned | Empty held-out pixels |
@@ -413,15 +414,45 @@ Two runs of the same settings differ by about 0.05 dB.
 
   This is a coverage limit: the model cannot show what no training photo saw. The seed cloud (`review.ply`) was fused from all photos, including the held-out stretch, so the segment scores are, if anything, optimistic.
 
+## Close-range scans
+
+94D4DD is a tabletop scan: median LiDAR depth 0.37 m, 479 photos, locked exposure, about 0.3 mm of drift. With sizes tuned on room scans, it trained on 214 photos from 17,901 seeds and scored 24.45 dB. Two changes scale those sizes with the working distance below 1.2 m:
+
+- **Depth-seed cells and range:** see [depth seeds](#why-scans-trained-poorly-and-what-changed).
+- **Photo selection (report v4):** blur-review neighbours, a blur threshold on exposure blur only, and the redundancy step. See [dataset refinement](ON_DEVICE_TRAINING_QUALITY.md#close-range-scans-report-v4).
+
+Room-scale scans are unchanged (FBDA13 1.26 m, 9F8040 2.25 m).
+
+Measured on the Mac with Standard settings. Every run used the same 30 held-out photos (every 8th of the capture-time selection). "Aligned" means scored after 30 steps of test-time pose alignment.
+
+| Run | Seeds | Training photos | Iterations | Aligned | Unaligned | Empty held-out pixels |
+| --- | --- | --- | --- | --- | --- | --- |
+| E0: before | 17,901 | 214 | 10,000 | 24.45 dB | 21.47 dB | 8.26% |
+| E1: seed cells | 81,338 | 214 | 10,000 | 24.80 dB | 21.67 dB | 2.80% |
+| E2: + selection | 109,475 | 413 | 10,000 | 24.90 dB | 21.79 dB | 2.25% |
+| E4: seed cells | 81,338 | 214 | 14,000 | 24.46 dB | 21.44 dB | 2.25% |
+| E5: + selection | 109,475 | 413 | 14,000 | 25.10 dB | 21.92 dB | 1.81% |
+
+- **Seeds:** +0.35 dB. Empty held-out pixels fell to a third. Held-out depth more than 5% off the LiDAR fell from 14.1% to 7.2% of pixels.
+- **Selection:** +0.1 dB at equal iterations. It matters for longer training:
+  - With 214 photos, 14,000 iterations overfit (24.80 → 24.46 dB).
+  - With 413 photos, 14,000 iterations reach 25.10 dB.
+- **In the app:** the iteration count follows the photos (Standard: 30 per photo). This scan went from 244 photos and 10,000 iterations to 438 photos and 14,000 iterations. The model went from 24.45 to 25.10 dB (+0.65), and training takes about 45% longer (483 → 713 s here).
+- **Capture-motion model (10 ms rolling readout):** +0.16 dB at 10,000 iterations, but 25.09 dB at 14,000 (no gain), and 4% slower. It stays off.
+- **Memory:** in the second quarter of a run, the process footprint on the Mac rose by up to 270 MB and fell back when growth stopped. Three runs went over the 1,036 MB plan (E1 1,058, E4 1,133, E5 1,095 MB); the others peaked at 895–911 MB. The same rise, smaller, shows before the change (E0).
+  - Repeats of E1 and E4 peaked at 910 and 891 MB.
+  - With `footprint` sampled every 20 s, the GPU buffers stayed at 824 MB, and only CPU allocations (15–51 MB of large blocks) varied.
+  - The cause of the larger rises has not been found yet. On a phone, a memory warning freezes growth and critical pressure pauses the run with a checkpoint ([memory safety](#memory-safety)).
+
 ## Validation
 
 Measured on the Mac GPU with the same Metal source:
 
 - **`tools/test_gaussian_raster.swift`:** forward against a double-precision reference, with parameter and pose gradients checked by finite differences. It covers the Mip filter on and off, with and without capture motion and the LiDAR depth loss, and shows that the banded backward pass matches the single pass (20 checks).
 - **`tools/test_gaussian_loss.swift`:** loss, image and PPISP gradients.
-- **`tools/test_gaussian_training.swift`:** 70 end-to-end checks.
+- **`tools/test_gaussian_training.swift`:** 71 end-to-end checks.
   - Memory-plan fitting and overflow checks; resolution tiers, the full-resolution plan, tile bands, and the held-out segment.
-  - The seed budget, depth seeds spreading over a long capture, and the automatic iteration count.
+  - The seed budget, depth seeds spreading over a long capture, seed cells scaled at close range, and the automatic iteration count.
   - MRNF units, the growth ramp and its ceiling, relocation (evidence, rate, taper, no receivers), PLY export frame, and convergence.
   - SOG: lossless WebP texels through ImageIO, stored ZIP archives against `unzip` and `zip`, palette and texture sizes, and a trained SH 3 model written and read back (positions within 0.04 mm, rotations 0.6°, rendering within 0.1 dB). The write's progress runs from 0 to 1 through its steps in order.
   - PPISP exposure recovery, pose refinement, and capture motion.

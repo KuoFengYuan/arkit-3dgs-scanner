@@ -14,8 +14,12 @@ nonisolated enum TrainingFrameSelector {
         let reason: String
         let replacementID: Int?
     }
+    /// Version 4: blur verdicts on exposure blur only, and the blur neighbours and redundancy
+    /// step scaled with the working distance. Training evaluates older selections again.
+    static let policyVersion = 4
+
     struct Report: Codable, Sendable {
-        var version = 3
+        var version = TrainingFrameSelector.policyVersion
         let inputFrames: Int
         let selectedIDs: [Int]
         let recaptureIDs: [Int]
@@ -62,8 +66,49 @@ nonisolated enum TrainingFrameSelector {
         return out
     }
 
-    static func select(_ records: [FrameRecord], evidence: [Int: Evidence] = [:]) -> Report {
+    /// Metric sizes here and in the 3DGS seeding were tuned on room scans (working distance
+    /// 1.3–2.2 m). Closer scans shrink them in proportion, so a 4 cm step still means the same
+    /// parallax: at 0.35 m it is 6.5°, not a near-duplicate view.
+    static let roomScaleDistance: Float = 1.2
+
+    /// Factor for those metric sizes: 1 from `roomScaleDistance` on, down to 1/8 at close range.
+    static func metricScale(workingDistance: Float?) -> Float {
+        guard let z = workingDistance, z.isFinite, z > 0 else { return 1 }
+        return min(1, max(0.125, z / roomScaleDistance))
+    }
+
+    /// Median confident LiDAR depth (m) over up to `maxPhotos` photos spread across the
+    /// capture, sampled on a coarse grid; nil without depth. Reads the scan only.
+    static func workingDistance(records: [FrameRecord], directory: URL, maxPhotos: Int = 40) -> Float? {
+        let withDepth = records.filter { $0.depthFile != nil && $0.confidenceFile != nil && ($0.depthWidth ?? 0) > 0 && ($0.depthHeight ?? 0) > 0 }
+        guard !withDepth.isEmpty else { return nil }
+        let step = max(1, withDepth.count / maxPhotos)
+        let folder = directory.appendingPathComponent("depth")
+        var samples: [Float] = []
+        for record in Swift.stride(from: 0, to: withDepth.count, by: step).map({ withDepth[$0] }) {
+            guard let w = record.depthWidth, let h = record.depthHeight, let depthFile = record.depthFile, let confidenceFile = record.confidenceFile,
+                  let depth = try? Data(contentsOf: folder.appendingPathComponent(depthFile)), depth.count == w * h * 4,
+                  let confidence = try? Data(contentsOf: folder.appendingPathComponent(confidenceFile)), confidence.count == w * h else { continue }
+            depth.withUnsafeBytes { raw in
+                let z = raw.bindMemory(to: Float.self)
+                for y in Swift.stride(from: 4, to: h, by: 8) {
+                    for x in Swift.stride(from: 4, to: w, by: 8) where confidence[y * w + x] >= 1 {
+                        let v = z[y * w + x]
+                        if v.isFinite && v > 0.1 { samples.append(v) }
+                    }
+                }
+            }
+        }
+        guard !samples.isEmpty else { return nil }
+        samples.sort()
+        return samples[samples.count / 2]
+    }
+
+    /// `workingDistance` (the scan's median depth) scales the 4 cm redundancy step below room
+    /// scale (`metricScale`).
+    static func select(_ records: [FrameRecord], evidence: [Int: Evidence] = [:], workingDistance: Float? = nil) -> Report {
         let candidates = records.filter { $0.blurVerdict == .keep }
+        let step = 0.04 * Double(metricScale(workingDistance: workingDistance))
         func score(_ r: FrameRecord) -> Double {
             if let e = evidence[r.id] { return e.detail }
             return r.sharpness.isFinite ? max(0, r.sharpness) : 0
@@ -75,7 +120,7 @@ nonisolated enum TrainingFrameSelector {
             // Conservative: do not suppress parallax, camera roll, or a new view around an occluder.
             let d2 = pow(x[3]-y[3], 2) + pow(x[7]-y[7], 2) + pow(x[11]-y[11], 2)
             let trace = [0,1,2,4,5,6,8,9,10].reduce(0.0) { $0 + x[$1] * y[$1] }
-            return d2 <= 0.04 * 0.04 && (trace - 1) / 2 >= cos(3 * .pi / 180)
+            return d2 <= step * step && (trace - 1) / 2 >= cos(3 * .pi / 180)
         }
         func similar(_ a: FrameRecord, _ b: FrameRecord) -> Bool {
             guard let x = evidence[a.id], let y = evidence[b.id], !x.signature.isEmpty,

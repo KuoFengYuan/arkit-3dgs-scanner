@@ -12,6 +12,9 @@
 //   [--sh D] [--holdout N] [--no-ppisp] [--no-pose] [--no-mip] [--budget-mb MB] [--out DIR]
 // Densification and optimiser experiments (defaults unchanged unless given): --no-growth-ramp,
 //   --relocate, --replace-by-error, --sparse-adam. GS_REFINE=1 prints every refine.
+// Photo selection experiments: --selection current|captured (blur verdicts and selection
+//   evaluated again with the current rules, or the scan's own), --seed-cells fixed (the room-scale 4 cm cells), --holdout-ids FILE /
+//   --write-holdout-ids FILE (the same held-out photos across runs).
 // --sog-roundtrip [--sog-palette K] [--sog-iterations N]: write the model as SOG, read it back
 //   and score the held-out views again (with --enhance-from DIR --iterations 0 for a saved model).
 import Foundation
@@ -40,6 +43,8 @@ import simd
         var excludeIDs: Set<Int> = []
         var holdOutSegment = 0.0, fullResolution = false
         var saveModel: URL?, enhanceFrom: URL?
+        var frameSelection = TrainingDataset.FrameSelection.stored, scaledSeedCells = true
+        var holdOutIDs: Set<Int>?, writeHoldOutIDs: URL?
         while !args.isEmpty {
             let a = args.removeFirst()
             switch a {
@@ -80,6 +85,19 @@ import simd
             case "--eval-full-res": fullResolution = true
             case "--save-model": saveModel = URL(fileURLWithPath: args.removeFirst())
             case "--enhance-from": enhanceFrom = URL(fileURLWithPath: args.removeFirst())
+            case "--selection":
+                // stored: as the app (older selections evaluated again); current: always evaluated
+                // again; captured: the scan's own verdicts and selection.
+                switch args.removeFirst() {
+                case "current": frameSelection = .current(readout: CaptureConfig().rollingShutterReadoutS)
+                case "captured": frameSelection = .captured
+                default: frameSelection = .stored
+                }
+            case "--seed-cells": scaledSeedCells = args.removeFirst() != "fixed"
+            case "--holdout-ids":
+                let text = try String(contentsOf: URL(fileURLWithPath: args.removeFirst()), encoding: .utf8)
+                holdOutIDs = Set(text.split(whereSeparator: { $0 == "," || $0.isNewline }).compactMap { Int($0.trimmingCharacters(in: .whitespaces)) })
+            case "--write-holdout-ids": writeHoldOutIDs = URL(fileURLWithPath: args.removeFirst())
             case "--exclude-ids": excludeIDs = Set(args.removeFirst().split(separator: ",").compactMap { Int($0) })
             case "--per-frame": perFrame = true
             case "--motion-blur": config.motionBlur = true
@@ -96,9 +114,15 @@ import simd
         let t0 = Date()
         let seedStart = Date()
         var dataset = try TrainingDataset.prepare(scan: scan, longEdge: config.longEdge, holdOutEvery: config.holdOutEvery,
-                                                  maxPoints: config.seedBudget, depthSeedLimit: config.depthSeedLimit(cloudPoints:), holdOutSegment: holdOutSegment)
-        print(String(format: "seeds: %d points (depth seeds %@, seed budget %d) in %.1f s", dataset.points.count,
-                     config.usesDepthSeeds ? "on" : "off", config.seedBudget, Date().timeIntervalSince(seedStart)))
+                                                  maxPoints: config.seedBudget, depthSeedLimit: config.depthSeedLimit(cloudPoints:), holdOutSegment: holdOutSegment,
+                                                  frameSelection: frameSelection, holdOutIDs: holdOutIDs, scaledSeedCells: scaledSeedCells)
+        let scale = scaledSeedCells ? TrainingFrameSelector.metricScale(workingDistance: dataset.workingDistance) : 1
+        print(String(format: "seeds: %d points (depth seeds %@, seed budget %d, working distance %.2f m, seed cell %.1f mm) in %.1f s",
+                     dataset.points.count, config.usesDepthSeeds ? "on" : "off", config.seedBudget, dataset.workingDistance ?? 0,
+                     40 * scale, Date().timeIntervalSince(seedStart)))
+        if let writeHoldOutIDs {
+            try dataset.validationFrames.map { String(dataset.frames[$0].id) }.joined(separator: ",").write(to: writeHoldOutIDs, atomically: true, encoding: .utf8)
+        }
         dataset = try perturbed(dataset, scan: scan, poseFile: poseFile, noise: initNoise, keep: initKeep, random: initRandom,
                                 latticeJitter: latticeJitter)
         if !excludeIDs.isEmpty {
@@ -126,7 +150,7 @@ import simd
         if enhanceFrom != nil {
             print(String(format: "enhancement start: validation PSNR %.3f (unaligned)", try trainer.evaluate().psnr))
         }
-        print("initial Gaussians \(trainer.model.activeCount), median size \(trainer.strategy.bounds.medianSize) m, footprint \(TrainingMemoryPlan.footprintBytes >> 20) MB")
+        print("initial Gaussians \(trainer.model.activeCount), scene extent (10–90%) \(trainer.strategy.bounds.medianSize) m, footprint \(TrainingMemoryPlan.footprintBytes >> 20) MB")
         let start = Date()
         var window: [Double] = [], psnrWindow: [Double] = [], peak = 0, skipped = 0, pairsPeak = 0.0, pairsSeen = 0.0
         while trainer.iteration < config.iterations {

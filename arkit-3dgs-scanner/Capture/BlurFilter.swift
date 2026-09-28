@@ -74,7 +74,12 @@ nonisolated enum BlurFilter {
     static let kMaxRejectFraction: Double = 0.3
 
     /// 回傳每個 record.id 的判定。純函式、不碰檔案，方便單獨推理與測試。
-    static func evaluate(_ records: [FrameRecord]) -> [Int: BlurVerdict] {
+    /// `readout`（秒）有值時，訓練影像的門檻只看曝光期間的模糊：逐列讀出造成的是剪切，
+    /// 不是模糊。幾何（drop）門檻仍看整體風險。
+    /// `neighborScale` 縮放鄰居半徑（近距離掃描用 `TrainingFrameSelector.metricScale`）：
+    /// 0.5m 是房間尺度的「看同一片表面」；0.35m 的桌面掃描裡所有相機都在 0.8m 內，
+    /// 0.5m 會把看不同表面的幀當成鄰居，紋理差異就被誤判成模糊。
+    static func evaluate(_ records: [FrameRecord], readout: Double? = nil, neighborScale: Float = 1) -> [Int: BlurVerdict] {
         var verdict = [Int: BlurVerdict](minimumCapacity: records.count)
         for r in records { verdict[r.id] = .keep }
         guard records.count > kMinNeighbors else { return verdict }
@@ -82,7 +87,8 @@ nonisolated enum BlurFilter {
         let pos = records.map { position(of: $0) }
         let fwd = records.map { forward(of: $0) }
         let cosCone = cos(kNeighborConeDeg * .pi / 180)
-        let r2 = kNeighborRadiusM * kNeighborRadiusM
+        let radius = kNeighborRadiusM * neighborScale
+        let r2 = radius * radius
 
         // 候選（連同嚴重度）先收集，最後才依上限截斷 —— 確保被丟掉的是最差的那些
         var candidates: [(id: Int, v: BlurVerdict, severity: Float)] = []
@@ -106,7 +112,11 @@ nonisolated enum BlurFilter {
                 continue
             }
             // 影像不夠鋭利但深度仍可用 → demote（不進訓練，深度照收）
-            if blur > kTrainBlurPx {
+            // 與 CaptureQualityPolicy.exposureBlur 相同的拆分（曝光佔曝光＋讀出的比例）；
+            // 曝光時間未知時保守地用整體風險。
+            let exposure = records[i].exposureDuration
+            let imageBlur = readout.map { exposure > 0 && $0 >= 0 ? blur * exposure / (exposure + $0) : blur } ?? blur
+            if imageBlur > kTrainBlurPx {
                 candidates.append((records[i].id, .demote, Float(blur / kGeomBlurPx)))
                 continue
             }
@@ -129,8 +139,8 @@ nonisolated enum BlurFilter {
     }
 
     /// 把判定寫回 records（供 poses_refined.jsonl 保留完整資訊，不是靜靜刪掉）
-    static func annotate(_ records: [FrameRecord]) -> [FrameRecord] {
-        let v = evaluate(records)
+    static func annotate(_ records: [FrameRecord], readout: Double? = nil, neighborScale: Float = 1) -> [FrameRecord] {
+        let v = evaluate(records, readout: readout, neighborScale: neighborScale)
         return records.map { r in
             var out = r
             out.blurVerdict = v[r.id] ?? .keep

@@ -961,10 +961,10 @@ struct GaussianTrainingView: View {
             let images = workspace.scan.appendingPathComponent("images")
             let first = (try? FileManager.default.contentsOfDirectory(at: images, includingPropertiesForKeys: nil))?
                 .filter { $0.pathExtension.lowercased() == "jpg" }.sorted { $0.lastPathComponent < $1.lastPathComponent }.first
-            let selection = (try? Data(contentsOf: workspace.scan.appendingPathComponent("training-selection.json")))
-                .flatMap { try? JSONDecoder().decode(TrainingFrameSelector.Report.self, from: $0) }
+            // The photos training uses: an older scan's selection is evaluated again (cached).
+            let photos = TrainingDataset.selectedPhotoCount(scan: workspace.scan, selectionCache: workspace.selectionCacheURL)
             return (workspace.record(activeScan: activeScan), workspace.hasCheckpoint, workspace.hasModel, first,
-                    TrainingDataset.exposureRange(scan: workspace.scan), selection?.selectedIDs.count,
+                    TrainingDataset.exposureRange(scan: workspace.scan), photos,
                     workspace.hasModel ? GaussianExport.metadata(in: workspace.modelDirectory) : nil)
         }.value
         record = loaded.0
