@@ -207,7 +207,7 @@ final class TrainingCenter: ObservableObject {
 
     /// The running continued-processing task (`BGContinuedProcessingTask`).
     private var continuedTask: AnyObject?
-    private var reportedPercent = -1
+    private var reportedSubtitle = ""
 
     /// Asks the system to keep this user-started run going if the app leaves the foreground.
     /// Needs background GPU support on the device and the Background GPU Access capability
@@ -229,7 +229,7 @@ final class TrainingCenter: ObservableObject {
                 }
                 self.continuedTask = task
                 self.continuesInBackground = true
-                self.reportedPercent = -1
+                self.reportedSubtitle = ""
             }
         }
         guard registered else { return }
@@ -245,10 +245,12 @@ final class TrainingCenter: ObservableObject {
         guard let task = continuedTask as? BGContinuedProcessingTask else { return }
         task.progress.totalUnitCount = Int64(max(1, snapshot.total - snapshot.startIteration))
         task.progress.completedUnitCount = Int64(max(0, min(snapshot.iteration, snapshot.total) - snapshot.startIteration))
-        let percent = TrainingPresentation.percent(snapshot)
-        if percent != reportedPercent {
-            reportedPercent = percent
-            task.updateTitle(L10n.text("訓練 3DGS"), subtitle: "\(percent)%・\(TrainingPresentation.stage(snapshot))")
+        // While saving, the percent is the save's (the iterations are done).
+        let percent = snapshot.saving.map(TrainingPresentation.savingPercent) ?? TrainingPresentation.percent(snapshot)
+        let subtitle = "\(percent)%・\(TrainingPresentation.stage(snapshot))"
+        if subtitle != reportedSubtitle {
+            reportedSubtitle = subtitle
+            task.updateTitle(L10n.text("訓練 3DGS"), subtitle: subtitle)
         }
         switch snapshot.phase {
         case .completed, .failed, .cancelled: endContinuedProcessing(success: snapshot.phase == .completed)

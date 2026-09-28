@@ -158,7 +158,9 @@ import simd
             let n = Double(max(1, config.runIterations))
             print(String(format: "  profile %@: %.2f per iteration", k, k == "intersections" ? v / n : v / n * 1000))
         }
+        let evalStart = Date()
         let eval = try trainer.evaluate()
+        let evalSeconds = Date().timeIntervalSince(evalStart)
         for scale in [0.5, 0.25] {
             let zoomed = try trainer.evaluate(scale: scale)
             print(String(format: "validation at %.2fx resolution: PSNR %.3f SSIM %.4f", scale, zoomed.psnr, zoomed.ssim))
@@ -196,10 +198,20 @@ import simd
         try reportCoverage(trainer)
         if let out { try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true); _ = out }
         if let saveModel {
+            // The app's end-of-run save: held-out scoring, then the model files, with the time of
+            // each step against the progress the app shows (to check `savingShares`).
             try FileManager.default.createDirectory(at: saveModel, withIntermediateDirectories: true)
+            print(String(format: "save   0.00 s    0.0%%  validating (%d views, %.2f s)", eval.count, evalSeconds))
+            let saveStart = Date()
+            var lastStep = ""
             try GaussianTrainingSession.writeModelFiles(trainer, into: saveModel, validation: eval.count > 0 ? eval.psnr : nil,
-                                                        elapsedSeconds: seconds, peakFootprintMB: peak >> 20)
-            print("saved model: \(saveModel.path)")
+                                                        elapsedSeconds: seconds, peakFootprintMB: peak >> 20) { saving in
+                let step = "\(saving.step)"
+                guard step != lastStep else { return }
+                lastStep = step
+                print(String(format: "save %6.2f s  %5.1f%%  %@", evalSeconds + Date().timeIntervalSince(saveStart), saving.fraction * 100, step))
+            }
+            print(String(format: "saved model in %.2f s (+ %.2f s validation): %@", Date().timeIntervalSince(saveStart), evalSeconds, saveModel.path))
         }
     }
 

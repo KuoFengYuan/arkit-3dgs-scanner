@@ -27,6 +27,21 @@ nonisolated struct TrainingSnapshot: Equatable, Sendable {
     var preparationProgress = 0.0
     /// Where this run started: the saved model's iteration for Enhance model, else 0.
     var startIteration = 0
+    /// Saving the model at the end of the run (phase `.finishing`).
+    var saving: Saving?
+
+    struct Saving: Equatable, Sendable {
+        enum Step: Equatable, Sendable {
+            /// Scoring the held-out photos: `view` (1-based) of `views`.
+            case validating(view: Int, of: Int)
+            case sog(GaussianSOG.WriteStep)
+            /// Refined poses, report and cover image.
+            case files
+        }
+        var step: Step
+        /// Of the whole save, 0…1.
+        var fraction: Double
+    }
 
     var remainingSeconds: Double? {
         guard let s = secondsPerIteration, phase == .running, total > iteration else { return nil }
@@ -45,8 +60,8 @@ nonisolated struct ViewerRequest: Equatable, Sendable {
 }
 
 /// Runs one scan's on-device training on a background thread. Controls are thread-safe; the
-/// loop checks them between iterations, renders throttled previews, checkpoints periodically
-/// and whenever it pauses, and exports the model when it finishes.
+/// loop checks them between iterations, renders throttled previews, checkpoints when it pauses
+/// or the app leaves, and exports the model when it finishes (reporting the save's progress).
 nonisolated final class GaussianTrainingSession: @unchecked Sendable {
     let workspace: TrainingWorkspace
     let configuration: GaussianTrainingConfiguration
@@ -60,6 +75,9 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
     var onSnapshot: @Sendable (TrainingSnapshot) -> Void = { _ in }
     var onFrame: @Sendable (RenderedFrame, ViewerRequest) -> Void = { _, _ in }
     var onPreparedViews: @Sendable (_ views: [TrainingFrame], _ initialDepth: Double) -> Void = { _, _ in }
+    /// Runs before each attempt to save the finished model; the tests throw from it to act out
+    /// losing the GPU mid-save.
+    var savingProbe: @Sendable () throws -> Void = {}
 
     // Checkpoints are written only when the run pauses, when the app leaves the foreground
     // (even if training continues in the background), and when stopping with the progress
@@ -527,19 +545,75 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
 
     // MARK: Finish and export
 
+    /// Shares of the end-of-run save's time: scoring the held-out photos, the SOG file and the
+    /// other files. On the Mac, 94D4DD (30 held-out photos, 595,000 Gaussians) took 0.74 s,
+    /// 9.8 s and 0.1 s.
+    static let savingShares = (validating: 0.07, sog: 0.92, files: 0.01)
+
     private func finish(_ trainer: GaussianTrainer) throws {
         snapshot.phase = .finishing
-        publish(force: true)
-        let validation = try trainer.evaluate()
-        if validation.count > 0 { snapshot.validationPSNR = validation.psnr }
-        try GaussianTrainingSession.exportModel(trainer, to: workspace, validation: validation.count > 0 ? validation.psnr : nil,
-                                                elapsedSeconds: snapshot.elapsedSeconds, peakFootprintMB: peakFootprint)
+        let shares = Self.savingShares
+        let views = trainer.dataset.validationFrames.count
+        var validation: (psnr: Double, ssim: Double, count: Int)?
+        var foregroundFailures = 0
+        while true {
+            snapshot.saving = TrainingSnapshot.Saving(step: validation == nil ? .validating(view: 1, of: max(1, views)) : .sog(.arranging),
+                                                      fraction: validation == nil ? 0 : shares.validating)
+            publish(force: true)
+            do {
+                try savingProbe()
+                if validation == nil {
+                    validation = try trainer.evaluate { done, of in
+                        self.showSaving(TrainingSnapshot.Saving(step: .validating(view: done + 1, of: of),
+                                                                fraction: shares.validating * Double(done) / Double(of)))
+                    }
+                }
+                let psnr = validation.flatMap { $0.count > 0 ? $0.psnr : nil }
+                if let psnr { snapshot.validationPSNR = psnr }
+                try GaussianTrainingSession.exportModel(trainer, to: workspace, validation: psnr,
+                                                        elapsedSeconds: snapshot.elapsedSeconds, peakFootprintMB: peakFootprint) { saving in
+                    self.showSaving(saving)
+                }
+                break
+            } catch GaussianTrainer.TrainingError.gpuFailure(let reason) {
+                // Leaving the app withdraws GPU access, which a save of several seconds can run
+                // into: wait for the foreground and save again. Saving leaves the model as it was
+                // and a failed save removes its staged files. A failure that repeats in the
+                // foreground stops the run (keeping a checkpoint to finish from later).
+                lock.lock()
+                if appInBackground { backgrounded = true }
+                let away = backgrounded
+                lock.unlock()
+                if !away {
+                    foregroundFailures += 1
+                    if foregroundFailures > 2 {
+                        try? checkpoint(trainer)
+                        throw SessionError.repeatedGPUFailure(reason)
+                    }
+                }
+                lock.lock()
+                while backgrounded && cancelRequested == nil { _ = lock.wait(until: Date().addingTimeInterval(1)) }
+                lock.unlock()
+                if let keep = cancelValue {
+                    if keep { try? checkpoint(trainer) }
+                    return finishCancelled(keepCheckpoint: keep)
+                }
+            }
+        }
         workspace.removeCheckpoint()
         snapshot.checkpointIteration = nil
+        snapshot.saving = nil
         snapshot.phase = .completed
         snapshot.reason = .completed
         saveRecord(status: .completed, reason: .completed)
         publish(force: true)
+    }
+
+    /// A new step of the save shows at once; progress within a step is throttled.
+    private func showSaving(_ saving: TrainingSnapshot.Saving) {
+        let newStep = saving.step != snapshot.saving?.step
+        snapshot.saving = saving
+        publish(force: newStep)
     }
 
     struct Report: Codable {
@@ -561,15 +635,18 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
         var createdAt: Date
     }
 
-    /// Writes the model folder atomically (staged next to it, then swapped in).
+    /// Writes the model folder atomically (staged next to it, then swapped in). `progress` is
+    /// as in `writeModelFiles`.
     static func exportModel(_ trainer: GaussianTrainer, to workspace: TrainingWorkspace, validation: Double?,
-                            elapsedSeconds: Double, peakFootprintMB: Int) throws {
+                            elapsedSeconds: Double, peakFootprintMB: Int,
+                            progress: ((TrainingSnapshot.Saving) -> Void)? = nil) throws {
         let fm = FileManager.default
         let staging = workspace.root.appendingPathComponent(".model-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: staging, withIntermediateDirectories: true)
         var published = false
         defer { if !published { try? fm.removeItem(at: staging) } }
-        try writeModelFiles(trainer, into: staging, validation: validation, elapsedSeconds: elapsedSeconds, peakFootprintMB: peakFootprintMB)
+        try writeModelFiles(trainer, into: staging, validation: validation, elapsedSeconds: elapsedSeconds,
+                            peakFootprintMB: peakFootprintMB, progress: progress)
         let destination = workspace.modelDirectory
         if fm.fileExists(atPath: destination.path) {
             _ = try fm.replaceItemAt(destination, withItemAt: staging)
@@ -581,13 +658,19 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
 
     /// Writes the model files (SOG, metadata, PPISP, refined poses, report, cover) into `staging`.
     /// Training is over, so the SOG writer reuses the gradient and intersection buffers for its
-    /// k-means instead of allocating beyond the memory plan.
+    /// k-means instead of allocating beyond the memory plan. `progress` gets the step and the
+    /// fraction of the whole end-of-run save (`savingShares`: after the held-out scoring).
     static func writeModelFiles(_ trainer: GaussianTrainer, into staging: URL, validation: Double?,
-                                elapsedSeconds: Double, peakFootprintMB: Int) throws {
+                                elapsedSeconds: Double, peakFootprintMB: Int,
+                                progress: ((TrainingSnapshot.Saving) -> Void)? = nil) throws {
         let config = trainer.configuration
+        let shares = savingShares
         try GaussianSOG.write(trainer.model, to: staging.appendingPathComponent(GaussianSOG.fileName), metal: trainer.metal,
                               scratch: .init(points: trainer.model.grads, palette: trainer.raster.keys, labels: trainer.raster.values),
-                              iterations: GaussianSOG.kMeansIterations)
+                              iterations: GaussianSOG.kMeansIterations) { step, fraction in
+            progress?(TrainingSnapshot.Saving(step: .sog(step), fraction: shares.validating + shares.sog * fraction))
+        }
+        progress?(TrainingSnapshot.Saving(step: .files, fraction: shares.validating + shares.sog))
         let metadata = GaussianExport.Metadata(gaussians: trainer.model.activeCount, shDegree: config.shDegree,
                                                mipFilter2D: config.mipFilter,
                                                filterVariancePx2: config.mipFilter ? GaussianCamera.mipFilterVariance : GaussianCamera.plainDilation,
@@ -638,6 +721,7 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
                 try? writeJPEG(frame, to: staging.appendingPathComponent("preview.jpg"))
             }
         }
+        progress?(TrainingSnapshot.Saving(step: .files, fraction: 1))
     }
 
     static func writeJPEG(_ frame: RenderedFrame, to url: URL) throws {

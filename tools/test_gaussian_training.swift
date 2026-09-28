@@ -492,7 +492,25 @@ import simd
                                                                      p[Int(L.quats) + 4 * row + 2], p[Int(L.quats) + 4 * row + 3])),
                                           opacity: 1 / (1 + exp(-p[Int(L.opacities) + row]))) }
         let url = temp.appendingPathComponent("model.sog")
-        let report = try GaussianSOG.write(t.model, to: url, metal: metal)
+        var steps: [(step: GaussianSOG.WriteStep, fraction: Double)] = []
+        let report = try GaussianSOG.write(t.model, to: url, metal: metal) { steps.append(($0, $1)) }
+        // Progress: never decreasing from 0 to 1, through the steps in order.
+        let fractions = steps.map(\.fraction)
+        let order = steps.map { step -> Int in
+            switch step.step {
+            case .arranging: return 0
+            case .clustering: return 1
+            case .encoding: return 2
+            case .archiving: return 3
+            }
+        }
+        let passes = Set(steps.compactMap { if case .clustering(let pass, let of) = $0.step { return "\(pass)/\(of)" }; return nil })
+        let images = Set(steps.compactMap { if case .encoding(let image, let of) = $0.step { return "\(image)/\(of)" }; return nil })
+        check(fractions.first == 0 && fractions.last == 1 && zip(fractions, fractions.dropFirst()).allSatisfy { $0 <= $1 }
+              && zip(order, order.dropFirst()).allSatisfy { $0 <= $1 }
+              && passes == Set((1...GaussianSOG.kMeansIterations + 1).map { "\($0)/\(GaussianSOG.kMeansIterations + 1)" })
+              && images == Set((1...7).map { "\($0)/7" }),
+              "SOG write progress runs from 0 to 1 through arranging, \(passes.count) k-means passes, 7 images and the archive (\(steps.count) updates)")
         let meta = try JSONDecoder().decode(GaussianSOG.Meta.self, from: try StoredZip.entries(Data(contentsOf: url))["meta.json"]!)
         let loaded = try GaussianModel(metal: metal, capacity: t.model.capacity, shDegree: 3, trainable: false)
         try GaussianSOG.read(url, into: loaded)
@@ -990,14 +1008,42 @@ import simd
         let accepted = (try? GaussianTrainingSession.checkResumeFits(rows: fits.gaussianCapacity, plan: fits)) != nil
         check(accepted && (refusal ?? "").contains("可用記憶體不足以載入上次的進度") && (refusal ?? "").contains("MB"),
               "a checkpoint larger than today's memory plan is refused with the memory it needs, not as damaged")
-        // Resume to the end: model files are exported and the checkpoint is removed.
+        // Resume to the end: model files are exported and the checkpoint is removed. The app
+        // leaves while the model is saved and the GPU goes away mid-save: the save waits for the
+        // foreground and starts again instead of failing the run.
         let resumeFrom = GaussianCheckpoint.header(at: workspace.checkpointURL)!.iteration
-        let done = run(resume: true)
+        final class Attempts: @unchecked Sendable { var count = 0; var waited = false; let lock = NSLock() }
+        let attempts = Attempts()
+        let done = run(resume: true) { s in
+            s.savingProbe = {
+                attempts.lock.lock(); attempts.count += 1; let first = attempts.count == 1; attempts.lock.unlock()
+                guard first else { return }
+                s.setBackgrounded(true)
+                throw GaussianTrainer.TrainingError.gpuFailure("background")
+            }
+            while true {
+                attempts.lock.lock(); let tried = attempts.count; attempts.lock.unlock()
+                if tried > 0 { break }
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+            Thread.sleep(forTimeInterval: 0.4)
+            box.lock.lock(); let waiting = box.snapshots.last?.phase == .finishing; box.lock.unlock()
+            attempts.lock.lock(); attempts.waited = waiting && attempts.count == 1; attempts.lock.unlock()
+            s.setBackgrounded(false)
+        }
         let files = [GaussianSOG.fileName, GaussianExport.metadataName, GaussianExport.ppispName, GaussianExport.posesName,
                      GaussianExport.reportName, "preview.jpg"].allSatisfy { FileManager.default.fileExists(atPath: workspace.modelDirectory.appendingPathComponent($0).path) }
         check(done.phase == .completed && files && !FileManager.default.fileExists(atPath: workspace.checkpointURL.path)
               && workspace.record()?.status == .completed && resumeFrom >= 300,
               "resuming from iteration \(resumeFrom) completes the run and saves the model")
+        box.lock.lock()
+        let saving = box.snapshots.filter { $0.phase == .finishing }.compactMap(\.saving)
+        box.lock.unlock()
+        let staged = (try? FileManager.default.contentsOfDirectory(atPath: workspace.root.path))?.filter { $0.hasPrefix(".model-") } ?? []
+        check(attempts.waited && attempts.count == 2 && staged.isEmpty && done.saving == nil
+              && saving.contains { if case .validating = $0.step { return true }; return false }
+              && saving.contains { if case .sog = $0.step { return true }; return false },
+              "losing the GPU mid-save waits in the background and saves again in the foreground, with the save's progress published (\(saving.count) updates)")
         // The scan's own files were never modified.
         let poses = try Data(contentsOf: scan.directory.appendingPathComponent("poses.jsonl"))
         let recorded = ScanLibrary.readRecords(scan.directory.appendingPathComponent("poses.jsonl"))

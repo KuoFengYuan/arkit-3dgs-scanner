@@ -43,6 +43,9 @@
   - **Finish and save model**, which ends the run now and saves the current state as the model, exactly like a completed run (including from a pause);
   - app memory against the training plan;
   - whether switching to another app pauses the run or lets it continue.
+
+  Tap the grabber, or swipe the card down, to shrink it to one row (ring, stage, time left, Pause or Resume); tap the row or swipe up to expand it. The finished model's card shrinks the same way, and the app remembers the choice.
+- **Saving the model:** when the iterations are done, the card shows a bar with the save's step and percentage (see [saving progress](#saving-progress)). Stay in the app until it finishes. If you switch apps without background time, the save waits and starts over when you return, instead of failing the run.
 - **Leaving the screen:** the run keeps training while you use the rest of the app, for example History or another scan's detail. The home screen's **Scan history** card shows *Training 3DGS · n%* (or *paused*), and the scan's **Train 3DGS** card opens the live view again.
 - **In the background (iOS 26+):** when a run starts or resumes, the app asks iOS for a continued-processing task (`BGContinuedProcessingTask`) that requires the GPU. If iOS grants it, switching apps keeps training, without live previews, and iOS shows the progress in a system notice where the user can also stop it. This needs:
   - background GPU support on the device (`BGTaskScheduler.supportedResources` contains `.gpu`);
@@ -198,6 +201,28 @@ The dataset ZIP excludes this folder. `scan_…-3dgs.zip` contains `model/`. Del
 - Viewers without an anti-aliased mode dilate by 0.3 px² without compensation, so small splats look slightly thicker and brighter.
 - Colours are pre-ISP. Viewers ignore `ppisp.json` and show the uncorrected look, the in-app **ISP off** view.
 - Capture-motion settings affect training only.
+
+### Saving progress
+
+When the iterations are done, the app scores the held-out photos and writes the model folder. With SOG this takes seconds, so the card shows a bar with the current step and a percentage instead of a still screen. Measured on 94D4DD (Standard, 595,000 Gaussians, 30 held-out photos) on the Mac, about 11 s in all:
+
+| Step | Shown as | Time |
+| --- | --- | --- |
+| Held-out photos | *Checking held-out photos n/m* | 0.74 s |
+| Positions, rotations, scales and colours into textures | *Arranging Gaussian positions, rotations and sizes* | 0.64 s |
+| SH palette: 3 Lloyd steps, 4 GPU assignments | *Compressing color detail, pass n/4* | 9.3 s |
+| Seven lossless WebP images | *Encoding SOG images n/7* | 0.21 s |
+| ZIP archive, poses, report and cover | *Writing the SOG file*, *Writing poses, report and cover* | 0.1 s |
+
+- **How the bar moves:**
+  - The steps and their counters are exact. The percentage between them uses the time shares above (`GaussianTrainingSession.savingShares`, `GaussianSOG.progressShares`).
+  - Each GPU assignment runs in 8 command buffers, so the bar also moves during the k-means. This costs 0.3 s (8.95 → 9.27 s) and writes a byte-identical file.
+  - On a phone the GPU is slower relative to the CPU, so the k-means share there is probably larger. It has not been timed on an iPhone yet.
+- **Leaving the app while saving:** without background time, iOS withdraws the GPU and the save stops. It then waits for the app to return and starts again.
+  - Saving leaves the model unchanged, a stopped save leaves no files, and the held-out score is kept.
+  - Before this, such a run failed, and everything since the last pause was lost.
+  - A GPU failure that repeats three times in the foreground stops the run with a checkpoint.
+- **Live view:** the SOG writer reuses the rasteriser's buffers as scratch, so the view does not redraw while saving.
 
 ## Why scans trained poorly, and what changed
 
@@ -394,14 +419,14 @@ Measured on the Mac GPU with the same Metal source:
 
 - **`tools/test_gaussian_raster.swift`:** forward against a double-precision reference, with parameter and pose gradients checked by finite differences. It covers the Mip filter on and off, with and without capture motion and the LiDAR depth loss, and shows that the banded backward pass matches the single pass (20 checks).
 - **`tools/test_gaussian_loss.swift`:** loss, image and PPISP gradients.
-- **`tools/test_gaussian_training.swift`:** 68 end-to-end checks.
+- **`tools/test_gaussian_training.swift`:** 70 end-to-end checks.
   - Memory-plan fitting and overflow checks; resolution tiers, the full-resolution plan, tile bands, and the held-out segment.
   - The seed budget, depth seeds spreading over a long capture, and the automatic iteration count.
   - MRNF units, the growth ramp and its ceiling, relocation (evidence, rate, taper, no receivers), PLY export frame, and convergence.
-  - SOG: lossless WebP texels through ImageIO, stored ZIP archives against `unzip` and `zip`, palette and texture sizes, and a trained SH 3 model written and read back (positions within 0.04 mm, rotations 0.6°, rendering within 0.1 dB).
+  - SOG: lossless WebP texels through ImageIO, stored ZIP archives against `unzip` and `zip`, palette and texture sizes, and a trained SH 3 model written and read back (positions within 0.04 mm, rotations 0.6°, rendering within 0.1 dB). The write's progress runs from 0 to 1 through its steps in order.
   - PPISP exposure recovery, pose refinement, and capture motion.
   - Cap under a small budget; checkpoint exactness, corruption, atomic replacement, and resuming a version 1 checkpoint. Leaving the app saves a checkpoint while training continues, and stale partial files are removed.
-  - The session state machine: pause, stop, interrupt, and resume.
+  - The session state machine: pause, stop, interrupt, and resume. Losing the GPU while the finished model is saved waits for the foreground and saves again, with the save's progress published.
   - Enhance model: a saved SOG model reloads with its poses and renders within 0.5 dB of the trained one, and a PLY model exactly (also with a raised SH degree); it continues its schedule and replaces the model only on completion. Finish and save model from a pause.
   - The saved-model viewer, both archives, and a 1,200-frame run within the plan.
 - **Real scans:** alone on the Mac, the Standard preset (10,000 iterations) took 5.3 minutes on FBDA13, with a peak process footprint of 0.99 GB against a 1.04 GB plan. For the High preset see [memory](#speed-and-longer-presets).

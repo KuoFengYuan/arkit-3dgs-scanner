@@ -762,13 +762,15 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
     /// Test-time pose corrections of held-out views from the last aligned evaluation.
     private(set) var heldOutAlignment: [Int: PoseCorrection] = [:]
 
-    func evaluate(frames: [Int]? = nil, alignSteps: Int = 0, captureMotion: Bool = true) throws -> (psnr: Double, ssim: Double, count: Int) {
+    func evaluate(frames: [Int]? = nil, alignSteps: Int = 0, captureMotion: Bool = true,
+                  progress: ((_ done: Int, _ of: Int) -> Void)? = nil) throws -> (psnr: Double, ssim: Double, count: Int) {
         let list = frames ?? dataset.validationFrames
         guard !list.isEmpty, model.count > 0 else { return (0, 0, 0) }
         if alignSteps > 0 { try flushPendingFold() }
         var psnr = 0.0, ssim = 0.0, n = 0
         let degree = activeDegree
-        for index in list {
+        for (position, index) in list.enumerated() {
+            progress?(position, list.count)
             try images.load(index, into: targetImage.contents())
             let ev = dataset.frames[index].captureEV.flatMap { ev in ppisp.seedMeanEV.map { 0.5 * (ev - $0) } } ?? 0
             let heldOut = dataset.frames[index].isValidation

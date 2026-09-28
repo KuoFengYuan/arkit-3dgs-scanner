@@ -32,6 +32,24 @@ enum TrainingPresentation {
 
     static func percent(_ s: TrainingSnapshot) -> Int { Int(fraction(s) * 100) }
 
+    /// Progress of the end-of-run save.
+    static func savingPercent(_ saving: TrainingSnapshot.Saving) -> Int { Int(min(1, max(0, saving.fraction)) * 100) }
+
+    /// What the end-of-run save is doing now.
+    static func savingStep(_ saving: TrainingSnapshot.Saving) -> String {
+        switch saving.step {
+        case .validating(let view, let views):
+            return L10n.text("檢查驗證照片 \(view.formatted())/\(views.formatted())")
+        case .sog(.arranging): return L10n.text("整理高斯的位置、方向與大小")
+        case .sog(.clustering(let pass, let passes)):
+            return L10n.text("壓縮顏色細節・第 \(pass)/\(passes) 輪")
+        case .sog(.encoding(let image, let images)):
+            return L10n.text("編碼 SOG 圖層 \(image)/\(images)")
+        case .sog(.archiving): return L10n.text("寫入 SOG 檔案")
+        case .files: return L10n.text("寫入姿態、報告與封面")
+        }
+    }
+
     /// Remaining time once the per-iteration speed has settled (the first iterations are
     /// faster than the rest because the model is still small).
     static func remaining(_ s: TrainingSnapshot) -> String? {

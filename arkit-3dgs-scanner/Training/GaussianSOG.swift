@@ -57,6 +57,23 @@ nonisolated enum GaussianSOG {
     /// Timings and sizes of one write (the tools print them).
     struct WriteReport { var gaussians = 0, bytes = 0, paletteEntries = 0; var seconds = 0.0, kMeansSeconds = 0.0 }
 
+    /// What a write is doing, for a progress display.
+    enum WriteStep: Equatable, Sendable {
+        /// Positions, rotations, scales and colours into textures.
+        case arranging
+        /// The higher SH bands' palette: k-means `pass` (1-based) of `passes`.
+        case clustering(pass: Int, of: Int)
+        /// Lossless WebP: `image` (1-based) of `images`.
+        case encoding(image: Int, of: Int)
+        /// The ZIP archive to disk.
+        case archiving
+    }
+
+    /// Shares of a write's time by step (arranging, k-means, WebP, archive). On the Mac, 595,000
+    /// Gaussians at SH 3 (94D4DD) took 0.64 s, 8.95 s, 0.21 s and 0.03 s. Without higher SH
+    /// bands the k-means share drops out.
+    static let progressShares = (arranging: 0.07, clustering: 0.90, encoding: 0.025, archiving: 0.005)
+
     /// Buffers the writer may reuse instead of allocating: at the end of training the model's
     /// gradients and the rasterizer's per-intersection buffers are free (points ≥ n·D floats,
     /// palette ≥ K·D floats, labels ≥ n words).
@@ -81,10 +98,12 @@ nonisolated enum GaussianSOG {
     // MARK: Writing
 
     /// Writes the live rows of `model` to `url` (atomically). The SH palette is clustered on
-    /// the GPU with `iterations` Lloyd steps.
+    /// the GPU with `iterations` Lloyd steps. `progress` gets each step and the fraction of the
+    /// whole write done (0…1, never decreasing), on the calling thread.
     @discardableResult
     static func write(_ model: GaussianModel, to url: URL, metal: GaussianMetal, scratch: Scratch = Scratch(points: nil, palette: nil, labels: nil),
-                      iterations: Int = kMeansIterations, paletteEntries: Int? = nil, seed: UInt64 = 0x50C) throws -> WriteReport {
+                      iterations: Int = kMeansIterations, paletteEntries: Int? = nil, seed: UInt64 = 0x50C,
+                      progress: ((WriteStep, Double) -> Void)? = nil) throws -> WriteReport {
         let started = Date()
         var report = WriteReport()
         let rows = model.liveRows
@@ -93,6 +112,11 @@ nonisolated enum GaussianSOG {
         report.gaussians = n
         let L = model.layout, p = model.floats(model.params)
         let rest = model.shRest
+        let shares = progressShares
+        let whole = shares.arranging + (rest > 0 ? shares.clustering : 0) + shares.encoding + shares.archiving
+        /// Reports `step` with `done` of the shares above completed.
+        func advance(_ step: WriteStep, _ done: Double) { progress?(step, min(1, done / whole)) }
+        advance(.arranging, 0)
 
         // Export frame (ARKit world rotated 180° about X), then Morton order.
         var means = [SIMD3<Float>](repeating: .zero, count: n)
@@ -114,6 +138,7 @@ nonisolated enum GaussianSOG {
             means[i] = SIMD3(logTransform(means[i].x), logTransform(means[i].y), logTransform(means[i].z))
             mins = simd_min(mins, means[i]); maxs = simd_max(maxs, means[i])
         }
+        advance(.arranging, shares.arranging * 0.2)
         var meansL = image(), meansU = image(), quats = image(), scalesImage = image(), sh0Image = image()
         for (t, i) in order.enumerated() {
             for k in 0..<3 {
@@ -140,6 +165,7 @@ nonisolated enum GaussianSOG {
             }
             quats[4 * t + 3] = UInt8(252 + largest)
         }
+        advance(.arranging, shares.arranging * 0.4)
         // Scales and DC colour through 256-entry codebooks; opacity in sh0's alpha.
         var scaleValues = [Float](repeating: 0, count: 3 * n), dcValues = [Float](repeating: 0, count: 3 * n)
         for (t, i) in order.enumerated() {
@@ -150,6 +176,7 @@ nonisolated enum GaussianSOG {
             }
         }
         let scaleBook = Codebook1D(values: scaleValues)
+        advance(.arranging, shares.arranging * 0.7)
         let dcBook = Codebook1D(values: dcValues)
         for t in 0..<n {
             let row = rows[order[t]]
@@ -187,8 +214,12 @@ nonisolated enum GaussianSOG {
                 for d in D..<P { pts[t * P + d] = 0 }
             }
             let kStart = Date()
+            let passes = max(0, iterations) + 1
+            advance(.clustering(pass: 1, of: passes), shares.arranging)
             let (palette, labels) = try kMeans(points: points, count: n, dimensions: D, entries: K, iterations: iterations,
-                                               seed: seed, metal: metal, scratch: scratch)
+                                               seed: seed, metal: metal, scratch: scratch) { pass, fraction in
+                advance(.clustering(pass: pass, of: passes), shares.arranging + shares.clustering * fraction)
+            }
             report.kMeansSeconds = Date().timeIntervalSince(kStart)
             report.paletteEntries = K
             let valueBook = Codebook1D(values: palette)
@@ -217,14 +248,20 @@ nonisolated enum GaussianSOG {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         var entries: [(name: String, data: Data)] = [("meta.json", try encoder.encode(meta))]
+        let encodingStart = shares.arranging + (rest > 0 ? shares.clustering : 0)
+        let images = files.count
         while !files.isEmpty {
+            let image = images - files.count + 1
+            advance(.encoding(image: image, of: images), encodingStart + shares.encoding * Double(image - 1) / Double(images))
             let file = files.removeFirst()
             entries.append((file.name, try WebPLossless.encode(rgba: file.rgba, width: file.width, height: file.height)))
         }
+        advance(.archiving, encodingStart + shares.encoding)
         let archive = StoredZip.archive(entries)
         try archive.write(to: url, options: .atomic)
         report.bytes = archive.count
         report.seconds = Date().timeIntervalSince(started)
+        progress?(.archiving, 1)
         return report
     }
 
@@ -258,9 +295,11 @@ nonisolated enum GaussianSOG {
     /// k-means of `count` points of `dimensions` half floats (stored padded, `paddedDimensions`)
     /// into `entries` palette entries: deterministic distinct initial points, then Lloyd steps
     /// (GPU assignment, CPU means). An entry that loses all its points keeps its previous
-    /// value. Returns the palette unpadded (`entries` × `dimensions`).
+    /// value. Returns the palette unpadded (`entries` × `dimensions`). `progress` gets the pass
+    /// (1-based; `iterations` + 1 assignments) and the fraction of the whole k-means done.
     static func kMeans(points: MTLBuffer, count n: Int, dimensions D: Int, entries K: Int, iterations: Int,
-                       seed: UInt64, metal: GaussianMetal, scratch: Scratch) throws -> (palette: [Float], labels: [UInt32]) {
+                       seed: UInt64, metal: GaussianMetal, scratch: Scratch,
+                       progress: ((_ pass: Int, _ fraction: Double) -> Void)? = nil) throws -> (palette: [Float], labels: [UInt32]) {
         let P = paddedDimensions(D)
         let pts = points.contents().bindMemory(to: Float16.self, capacity: n * P)
         let paletteBuffer = try scratch.palette.flatMap { $0.length >= K * P * 2 ? $0 : nil } ?? metal.buffer(K * P * 2, label: "sog-palette")
@@ -280,15 +319,34 @@ nonisolated enum GaussianSOG {
         let labels = labelBuffer.contents().bindMemory(to: UInt32.self, capacity: n)
         var sums = [Float](repeating: 0, count: K * D)
         var members = [Int](repeating: 0, count: K)
-        for step in 0...max(0, iterations) {
-            guard let cb = metal.queue.makeCommandBuffer(), let e = cb.makeComputeCommandEncoder() else { throw SOGError.damaged }
-            e.dispatch(pipeline, threads: n, width: 64, [.buffer(points), .buffer(paletteBuffer), .buffer(labelBuffer),
-                                                         .value(SIMD2<UInt32>(UInt32(n), UInt32(K)))])
-            e.endEncoding()
-            cb.commit()
-            cb.waitUntilCompleted()
-            if let error = cb.error { throw error }
-            guard step < iterations else { break }
+        // Each pass is a GPU assignment, almost all of its time (2.2 s of a pass on the Mac for
+        // 595,000 points and 16,384 entries), and but for the last a short CPU mean update. The
+        // assignment runs in 8 command buffers so progress moves while it runs (8.95 → 9.27 s in
+        // all on the Mac; 16 took 9.6 s).
+        let steps = max(0, iterations)
+        let assignShare = 0.95, meanShare = 0.05
+        let units = Double(steps + 1) * assignShare + Double(steps) * meanShare
+        func done(_ step: Int, assigned: Double, averaged: Double) -> Double {
+            (Double(step) * (assignShare + meanShare) + assigned * assignShare + averaged * meanShare) / units
+        }
+        let chunk = ((n + 7) / 8 + 63) / 64 * 64
+        for step in 0...steps {
+            for start in stride(from: 0, to: n, by: chunk) {
+                progress?(step + 1, done(step, assigned: Double(start) / Double(n), averaged: 0))
+                let count = min(chunk, n - start)
+                guard let cb = metal.queue.makeCommandBuffer(), let e = cb.makeComputeCommandEncoder() else {
+                    throw GaussianTrainer.TrainingError.gpuFailure("command buffer")
+                }
+                e.dispatch(pipeline, threads: count, width: 64, [.buffer(points, start * P * 2), .buffer(paletteBuffer),
+                                                                 .buffer(labelBuffer, start * 4),
+                                                                 .value(SIMD2<UInt32>(UInt32(count), UInt32(K)))])
+                e.endEncoding()
+                cb.commit()
+                cb.waitUntilCompleted()
+                if let error = cb.error { throw GaussianTrainer.TrainingError.gpuFailure(error.localizedDescription) }
+            }
+            guard step < steps else { break }
+            progress?(step + 1, done(step, assigned: 1, averaged: 0))
             for k in 0..<(K * D) { sums[k] = 0 }
             for k in 0..<K { members[k] = 0 }
             for i in 0..<n {
@@ -304,6 +362,7 @@ nonisolated enum GaussianSOG {
                 }
             }
         }
+        progress?(steps + 1, 1)
         return (means, Array(UnsafeBufferPointer(start: labels, count: n)))
     }
 

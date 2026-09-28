@@ -248,6 +248,25 @@ struct DSProgressRing: View {
     }
 }
 
+/// Linear determinate progress.
+struct DSProgressBar: View {
+    let progress: Double
+    var height: CGFloat = 6
+    var tint: Color = DS.Palette.accent
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.14))
+                Capsule().fill(tint)
+                    .frame(width: geometry.size.width * (progress.isFinite ? min(1, max(0, progress)) : 0))
+            }
+        }
+        .frame(height: height)
+        .animation(.easeOut(duration: 0.35), value: progress)
+    }
+}
+
 /// Transient confirmation or error banner shown at the top of an immersive screen.
 struct DSToast: View {
     let text: String

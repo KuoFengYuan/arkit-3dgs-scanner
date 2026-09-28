@@ -49,6 +49,8 @@ struct GaussianTrainingView: View {
     @State private var savedModel: GaussianExport.Metadata?
     @State private var confirmFinish = false
     @State private var showGestureHint = true
+    /// The bottom card over a live or saved model shrinks to one row to show more of the model.
+    @AppStorage("training.panelCollapsed") private var panelCollapsed = false
 
     private var workspace: TrainingWorkspace { TrainingWorkspace(scan: scan) }
     private var displayedFrame: CGImage? { isActive ? center.frame : modelFrame }
@@ -263,33 +265,143 @@ struct GaussianTrainingView: View {
 
     // MARK: Bottom
 
+    /// The card collapses over a live or saved model, not over the setup.
+    private var collapsible: Bool { isActive || (showsModel && !enhancing) }
+    private var collapsed: Bool { collapsible && panelCollapsed }
+
     private var bottomPanel: some View {
         VStack(spacing: DS.Space.s) {
-            if isActive { activeControls }
-            else if showsModel && !enhancing { modelActions }
+            if collapsible { panelHandle }
+            if isActive { if collapsed { collapsedActive } else { activeControls } }
+            else if showsModel && !enhancing { if collapsed { collapsedModel } else { modelActions } }
             else { setupPanel }
         }
-        .padding(DS.Space.m)
+        .padding(.horizontal, DS.Space.m)
+        .padding(.top, collapsible ? DS.Space.xxs : DS.Space.m)
+        .padding(.bottom, collapsed ? DS.Space.s : DS.Space.m)
         .dsFloatingPanel(radius: DS.Radius.xl + 4)
+        // Swipe the card down to shrink it, up to bring it back (not on the setup card).
+        .gesture(DragGesture(minimumDistance: 16).onEnded { value in
+            guard abs(value.translation.height) > max(30, abs(value.translation.width)) else { return }
+            setPanelCollapsed(value.translation.height > 0)
+        }, including: collapsible ? .all : .subviews)
         .frame(maxWidth: DS.Size.panelMaxWidth)
         .padding(.horizontal, DS.Space.m)
         .padding(.bottom, DS.Space.xs)
         .frame(maxWidth: .infinity)
         .animation(DS.springy, value: isActive)
         .animation(DS.springy, value: enhancing)
+        .animation(DS.springy, value: snapshot.phase)
+    }
+
+    private func setPanelCollapsed(_ value: Bool) {
+        guard panelCollapsed != value else { return }
+        withAnimation(DS.springy) { panelCollapsed = value }
+    }
+
+    /// Grabber at the top of the card: tap or swipe to shrink or expand it.
+    private var panelHandle: some View {
+        Button { setPanelCollapsed(!panelCollapsed) } label: {
+            Capsule().fill(DS.Palette.textTertiary)
+                .frame(width: 36, height: 5)
+                .frame(maxWidth: .infinity, minHeight: 20)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(panelCollapsed ? L10n.text("展開面板") : L10n.text("收合面板"))
+        .accessibilityIdentifier("toggleTrainingPanel")
+    }
+
+    /// The run's progress ring: the preparation, the iterations, or a check once training is
+    /// done and the model is being saved (the save has its own bar).
+    private func activeRing(size: CGFloat) -> some View {
+        let saving = snapshot.phase == .finishing
+        return progressRing(snapshot.phase == .preparing ? snapshot.preparationProgress : saving ? 1 : TrainingPresentation.fraction(snapshot),
+                            tint: snapshot.phase == .paused ? DS.Palette.warning : saving ? DS.Palette.success : DS.Palette.accent,
+                            size: size) {
+            if saving {
+                Image(systemName: "checkmark").font(.footnote.weight(.bold)).foregroundStyle(DS.Palette.success)
+            } else {
+                Text(snapshot.phase == .preparing ? "…" : "\(TrainingPresentation.percent(snapshot))%")
+                    .font((size < 50 ? Font.caption2 : Font.footnote).weight(.bold).monospacedDigit())
+            }
+        }
+        .accessibilityElement()
+        .accessibilityLabel(L10n.text("訓練進度"))
+        .accessibilityValue(saving ? L10n.text("訓練完成") : "\(TrainingPresentation.percent(snapshot))%")
+    }
+
+    /// One row while collapsed: progress, what the run is doing, and pause or resume.
+    private var collapsedActive: some View {
+        VStack(alignment: .leading, spacing: DS.Space.xs) {
+            HStack(spacing: DS.Space.s) {
+                Button { setPanelCollapsed(false) } label: {
+                    HStack(spacing: DS.Space.s) {
+                        activeRing(size: 42)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(TrainingPresentation.stage(snapshot)).font(.subheadline.weight(.semibold))
+                                .foregroundStyle(DS.Palette.textPrimary)
+                            if let line = collapsedSubtitle {
+                                Text(line).font(.caption.monospacedDigit()).foregroundStyle(DS.Palette.textSecondary)
+                            }
+                        }
+                        .lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint(L10n.text("展開面板"))
+                if snapshot.phase == .paused {
+                    Button { center.resume() } label: { Label(L10n.text("繼續訓練"), systemImage: "play.fill") }
+                        .buttonStyle(DSIconButtonStyle(size: DS.Size.control, foreground: DS.Palette.accent))
+                        .accessibilityIdentifier("resumeTraining")
+                } else if snapshot.phase == .running {
+                    Button { center.pause() } label: { Label(L10n.text("暫停"), systemImage: "pause.fill") }
+                        .buttonStyle(DSIconButtonStyle(size: DS.Size.control))
+                        .accessibilityIdentifier("pauseTraining")
+                }
+            }
+            if let saving = snapshot.saving, snapshot.phase == .finishing {
+                DSProgressBar(progress: saving.fraction, height: 4, tint: DS.Palette.success)
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+
+    /// Time left while training, the save's step and percent while saving.
+    private var collapsedSubtitle: String? {
+        if snapshot.phase == .finishing, let saving = snapshot.saving {
+            return "\(TrainingPresentation.savingPercent(saving))%・\(TrainingPresentation.savingStep(saving))"
+        }
+        return activeSubtitle
+    }
+
+    /// The model is saved as SOG after training: a bar with the current step, instead of the
+    /// run's controls (none of them applies while saving).
+    private var savingProgress: some View {
+        VStack(alignment: .leading, spacing: DS.Space.xs) {
+            let saving = snapshot.saving ?? TrainingSnapshot.Saving(step: .validating(view: 1, of: 1), fraction: 0)
+            DSProgressBar(progress: saving.fraction, height: 8, tint: DS.Palette.success)
+            HStack(alignment: .firstTextBaseline) {
+                Text(TrainingPresentation.savingStep(saving))
+                    .font(.subheadline).foregroundStyle(DS.Palette.textPrimary)
+                    .lineLimit(1)
+                Spacer(minLength: DS.Space.xs)
+                Text("\(TrainingPresentation.savingPercent(saving))%")
+                    .font(.subheadline.weight(.semibold).monospacedDigit()).foregroundStyle(DS.Palette.success)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(L10n.text("模型儲存進度"))
+        .accessibilityValue("\(TrainingPresentation.savingPercent(snapshot.saving ?? .init(step: .files, fraction: 0)))%・\(snapshot.saving.map(TrainingPresentation.savingStep) ?? "")")
+        .accessibilityIdentifier("savingProgress")
     }
 
     private var activeControls: some View {
         VStack(alignment: .leading, spacing: DS.Space.s) {
             HStack(spacing: DS.Space.s) {
-                progressRing(snapshot.phase == .preparing ? snapshot.preparationProgress : TrainingPresentation.fraction(snapshot),
-                             tint: snapshot.phase == .paused ? DS.Palette.warning : DS.Palette.accent) {
-                    Text(snapshot.phase == .preparing ? "…" : "\(TrainingPresentation.percent(snapshot))%")
-                        .font(.footnote.weight(.bold).monospacedDigit())
-                }
-                .accessibilityElement()
-                .accessibilityLabel(L10n.text("訓練進度"))
-                .accessibilityValue("\(TrainingPresentation.percent(snapshot))%")
+                activeRing(size: 54)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(TrainingPresentation.stage(snapshot)).font(.headline).foregroundStyle(DS.Palette.textPrimary)
                     if let line = activeSubtitle {
@@ -298,10 +410,42 @@ struct GaussianTrainingView: View {
                 }
                 Spacer(minLength: 0)
             }
+            if snapshot.phase == .finishing { savingProgress }
             Text(metricsLine)
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(DS.Palette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if snapshot.phase != .finishing { runControls }
+            Label(footnote.text, systemImage: footnote.symbol)
+                .font(.caption2).foregroundStyle(DS.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                if let checkpoint = snapshot.checkpointIteration {
+                    Label(L10n.text("已儲存至第 \(checkpoint.formatted()) 次迭代"), systemImage: "checkmark.icloud")
+                }
+                Spacer()
+                Text(L10n.text("App 記憶體 \(snapshot.footprintMB) MB・訓練配置 \(snapshot.plannedMB) MB"))
+            }
+            .font(.caption2)
+            .foregroundStyle(DS.Palette.textTertiary)
+        }
+    }
+
+    /// What leaving the app does now.
+    private var footnote: (text: String, symbol: String) {
+        if snapshot.phase == .finishing {
+            return center.continuesInBackground
+                ? (L10n.text("可以切到其他 App，儲存會在背景繼續"), "arrow.triangle.2.circlepath")
+                : (L10n.text("儲存完成前請留在 App 內；切到其他 App 的話，回來後會重新儲存"), "exclamationmark.circle")
+        }
+        return center.continuesInBackground
+            ? (L10n.text("可以切到其他 App，訓練會在背景繼續"), "arrow.triangle.2.circlepath")
+            : (L10n.text("可以在 App 內切換頁面；切到其他 App 時會先暫停並儲存進度"), "pause.circle")
+    }
+
+    /// Pause or resume, save progress, stop, and finish now.
+    private var runControls: some View {
+        VStack(alignment: .leading, spacing: DS.Space.s) {
             HStack(spacing: DS.Space.xs) {
                 if snapshot.phase == .paused {
                     Button { center.resume() } label: { Label(L10n.text("繼續訓練"), systemImage: "play.fill") }
@@ -309,7 +453,7 @@ struct GaussianTrainingView: View {
                         .accessibilityIdentifier("resumeTraining")
                 } else {
                     Button { center.pause() } label: { Label(L10n.text("暫停"), systemImage: "pause.fill") }
-                        .buttonStyle(DSPrimaryButtonStyle(fill: true, isLoading: snapshot.phase == .preparing || snapshot.phase == .finishing))
+                        .buttonStyle(DSPrimaryButtonStyle(fill: true, isLoading: snapshot.phase == .preparing))
                         .disabled(snapshot.phase != .running)
                         .accessibilityIdentifier("pauseTraining")
                 }
@@ -319,7 +463,6 @@ struct GaussianTrainingView: View {
                     .accessibilityIdentifier("checkpointTraining")
                 Button { confirmStop = true } label: { Label(L10n.text("停止訓練"), systemImage: "stop.fill") }
                     .buttonStyle(DSIconButtonStyle(size: DS.Size.primaryHeight, foreground: DS.Palette.danger))
-                    .disabled(snapshot.phase == .finishing)
                     .accessibilityIdentifier("stopTraining")
                     .confirmationDialog(L10n.text("停止訓練？"), isPresented: $confirmStop, titleVisibility: .visible) {
                         Button(L10n.text("停止並保留進度")) { center.cancel(keepCheckpoint: true) }
@@ -340,20 +483,6 @@ struct GaussianTrainingView: View {
                 } message: {
                     Text(L10n.text("以目前的訓練結果建立模型並結束訓練。之後可以用「加強模型」繼續訓練它。"))
                 }
-            Label(center.continuesInBackground ? L10n.text("可以切到其他 App，訓練會在背景繼續")
-                                               : L10n.text("可以在 App 內切換頁面；切到其他 App 時會先暫停並儲存進度"),
-                  systemImage: center.continuesInBackground ? "arrow.triangle.2.circlepath" : "pause.circle")
-                .font(.caption2).foregroundStyle(DS.Palette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                if let checkpoint = snapshot.checkpointIteration {
-                    Label(L10n.text("已儲存至第 \(checkpoint.formatted()) 次迭代"), systemImage: "checkmark.icloud")
-                }
-                Spacer()
-                Text(L10n.text("App 記憶體 \(snapshot.footprintMB) MB・訓練配置 \(snapshot.plannedMB) MB"))
-            }
-            .font(.caption2)
-            .foregroundStyle(DS.Palette.textTertiary)
         }
     }
 
@@ -361,7 +490,7 @@ struct GaussianTrainingView: View {
         switch snapshot.phase {
         case .paused: return L10n.text("進度已儲存，可隨時繼續")
         case .running: return TrainingPresentation.remaining(snapshot)
-        case .finishing: return L10n.text("即將完成")
+        case .finishing: return L10n.text("訓練完成，正在轉存為 SOG 格式")
         default: return nil
         }
     }
@@ -377,12 +506,13 @@ struct GaussianTrainingView: View {
         return parts.map { $0.replacingOccurrences(of: " ", with: "\u{00A0}") }.joined(separator: "・")
     }
 
-    private func progressRing<Label: View>(_ progress: Double, tint: Color, @ViewBuilder label: () -> Label) -> some View {
+    private func progressRing<Label: View>(_ progress: Double, tint: Color, size: CGFloat = 54,
+                                           @ViewBuilder label: () -> Label) -> some View {
         ZStack {
-            DSProgressRing(progress: progress, lineWidth: 5, tint: tint)
+            DSProgressRing(progress: progress, lineWidth: size < 50 ? 4 : 5, tint: tint)
             label().foregroundStyle(DS.Palette.textPrimary)
         }
-        .frame(width: 54, height: 54)
+        .frame(width: size, height: size)
     }
 
     /// The saved model: summary, then sharing in the same card layout as the scan's export.
@@ -421,6 +551,36 @@ struct GaussianTrainingView: View {
                 }
             }
             .buttonStyle(DSCardButtonStyle())
+            .disabled(preparingArchive)
+            .accessibilityIdentifier("exportGaussianModel")
+        }
+    }
+
+    /// One row while collapsed: the finished model and sharing.
+    private var collapsedModel: some View {
+        HStack(spacing: DS.Space.s) {
+            Button { setPanelCollapsed(false) } label: {
+                HStack(spacing: DS.Space.s) {
+                    Image(systemName: "checkmark.seal.fill").font(.title3).foregroundStyle(DS.Palette.success)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(L10n.text("3DGS 模型完成")).font(.subheadline.weight(.semibold)).foregroundStyle(DS.Palette.textPrimary)
+                        if let record {
+                            Text(modelSummary(record)).font(.caption.monospacedDigit()).foregroundStyle(DS.Palette.textSecondary)
+                        }
+                    }
+                    .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint(L10n.text("展開面板"))
+            Button { Task { await share() } } label: {
+                if preparingArchive { ProgressView().tint(DS.Palette.info) }
+                else { Label(L10n.text("分享 3DGS 模型"), systemImage: "square.and.arrow.up") }
+            }
+            .buttonStyle(DSIconButtonStyle(size: DS.Size.control, foreground: DS.Palette.info))
             .disabled(preparingArchive)
             .accessibilityIdentifier("exportGaussianModel")
         }
