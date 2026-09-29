@@ -2,9 +2,9 @@
 
 [English](README.md) | **繁體中文**
 
-[![一次掃描從擷取到完成 3DGS 模型：掃描、融合、訓練與完成的模型](docs/media/demo-poster.jpg)](docs/media/demo.mp4)
+<a href="docs/media/demo.mp4"><img src="docs/media/demo.gif" width="320" alt="一次掃描從擷取到完成 3DGS 模型：掃描、融合、訓練與完成的模型"></a>
 
-*[觀看示範影片](docs/media/demo.mp4)（1 分鐘，以 2.7 倍速播放）：掃描桌面、優化資料，並在 iPhone 上訓練 3DGS 模型。*
+*20 秒循環，8 倍速。[觀看 1 分鐘影片](docs/media/demo.mp4)（2.7 倍速）：掃描桌面、優化資料，並在 iPhone 上訓練 3DGS 模型。*
 
 使用 ARKit 擷取照片、相機姿態與點雲，在手機完成品質檢查、姿態精修、深度融合和預覽；接著可直接在手機上訓練 3D Gaussian Splatting（3DGS）模型，或匯出標準 COLMAP 資料集給外部訓練器。
 
