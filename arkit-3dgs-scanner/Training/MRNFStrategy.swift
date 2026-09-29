@@ -69,6 +69,153 @@ nonisolated enum RelocationConstants {
     static let maxShare = 0.005
 }
 
+/// Densification quotas per region, this project's addition to MRNF (see `RegionQuota`).
+nonisolated enum RegionQuotaConstants {
+    /// The grid covers the bounds' centre ± `span` × their half extent, in `cellsPerAxis` cells
+    /// per axis; Gaussians outside it count towards the border cells.
+    static let cellsPerAxis = 24
+    static let span: Float = 2
+    /// Share of each region's demand from its visible area alone (basic coverage); the rest
+    /// grows with its persistent error (complex regions).
+    static let baseShare: Float = 0.5
+    /// A region seen by fewer training photos than this has its demand scaled down.
+    static let minSupport: Float = 3
+    /// Error ratio (to the scene's area-weighted mean) above which demand stops growing.
+    static let maxErrorRatio: Float = 4
+}
+
+/// How refinement uses the regions.
+nonisolated enum RegionMode: Equatable {
+    /// Plain MRNF, no region statistics.
+    case off
+    /// Region statistics only (for diagnostics); densification is unchanged.
+    case track
+    /// Growth is split between regions by their quota.
+    case quota
+    /// Quotas, and at the cap, slots of proven low contributors in regions over their quota
+    /// move to under-fit Gaussians in regions below it.
+    case quotaReclaim
+}
+
+/// Region statistics and densification quotas. A fixed grid over the scene splits the Gaussian
+/// budget by what the photos show of each cell, not by where the largest splats are:
+/// - **visible area:** the blending weight per training view the cell's Gaussians receive
+///   (pixels, at the training resolution);
+/// - **photo support:** the share of training views whose frustum reached the cell;
+/// - **persistent error:** the cell's error-weighted footprint over its visible area (1 is the
+///   image's mean error), averaged over refine windows.
+/// Averages start as a running mean and become moving averages spanning about one pass over the
+/// photos, so every cell is judged from all the views that see it.
+nonisolated struct RegionQuota: Codable, Equatable {
+    var origin: SIMD3<Float>
+    var cell: Float
+    var area: [Float]
+    var support: [Float]
+    var error: [Float]
+    var windows = 0
+
+    init?(bounds: MRNFBounds) {
+        typealias C = RegionQuotaConstants
+        guard bounds.valid, bounds.maxExtent > 0 else { return nil }
+        let cells = C.cellsPerAxis * C.cellsPerAxis * C.cellsPerAxis
+        cell = 2 * C.span * bounds.maxExtent / Float(C.cellsPerAxis)
+        origin = bounds.center - SIMD3(repeating: C.span * bounds.maxExtent)
+        area = [Float](repeating: 0, count: cells)
+        support = area
+        error = area
+    }
+
+    func region(_ position: SIMD3<Float>) -> Int {
+        let n = RegionQuotaConstants.cellsPerAxis
+        let q = (position - origin) / cell
+        func axis(_ v: Float) -> Int { v.isFinite ? Int(min(Float(n - 1), max(0, v.rounded(.down)))) : 0 }
+        return (axis(q.x) * n + axis(q.y)) * n + axis(q.z)
+    }
+
+    /// Region of every row (live or not) from its current centre.
+    func regions(_ model: GaussianModel) -> [Int32] {
+        let p = model.floats(model.params), means = Int(model.layout.means)
+        return (0..<model.count).map { i in
+            Int32(region(SIMD3(p[means + 3 * i], p[means + 3 * i + 1], p[means + 3 * i + 2])))
+        }
+    }
+
+    /// Folds one refine window of `windowViews` training views into the averages.
+    mutating func update(_ model: GaussianModel, regionOf: [Int32], windowViews: Int, trainingViews: Int) {
+        let active = model.stat(GaussianStats.active), visibility = model.stat(GaussianStats.visibility)
+        let views = model.stat(GaussianStats.views), errorSum = model.stat(GaussianStats.errorSum)
+        var a = [Float](repeating: 0, count: area.count), e = a, s = a
+        for i in 0..<model.count where active[i] > 0.5 {
+            let r = Int(regionOf[i])
+            a[r] += visibility[i]
+            e[r] += errorSum[i]
+            s[r] = max(s[r], views[i])
+        }
+        let w = Float(max(1, windowViews))
+        let pass = min(0.5, max(0.05, Float(windowViews) / Float(max(1, trainingViews))))
+        let alpha = max(1 / Float(windows + 1), pass)
+        for r in 0..<area.count {
+            area[r] += alpha * (a[r] / w - area[r])
+            support[r] += alpha * (min(1, s[r] / w) - support[r])
+            if a[r] > 0 {
+                let ratio = e[r] / a[r]
+                error[r] = error[r] > 0 ? error[r] + max(alpha, pass) * (ratio - error[r]) : ratio
+            }
+        }
+        windows += 1
+    }
+
+    /// Each region's share of the Gaussians: its visible area, scaled down below three photos of
+    /// support, times a base plus a term that grows with its persistent error. Sums to 1.
+    func shares(trainingViews: Int) -> [Float] {
+        typealias C = RegionQuotaConstants
+        var base = [Float](repeating: 0, count: area.count)
+        var weight: Float = 0, weightedError: Float = 0
+        for r in 0..<area.count where area[r] > 0 {
+            base[r] = area[r] * min(1, support[r] * Float(trainingViews) / C.minSupport)
+            weight += base[r]
+            weightedError += base[r] * error[r]
+        }
+        guard weight > 0 else { return base }
+        let meanError = weightedError > 0 ? weightedError / weight : 1
+        var total: Float = 0
+        for r in 0..<area.count where base[r] > 0 {
+            base[r] *= C.baseShare + (1 - C.baseShare) * min(error[r] / meanError, C.maxErrorRatio)
+            total += base[r]
+        }
+        return total > 0 ? base.map { $0 / total } : base
+    }
+
+    /// Splits `k` between regions in proportion to `deficit`, at most `available[r]` each
+    /// (largest remainders first); what no region can take is left for the global pool.
+    static func allot(_ k: Int, deficit: [Float], available: [Int]) -> [Int] {
+        var result = [Int](repeating: 0, count: deficit.count)
+        var remaining = k
+        var open = (0..<deficit.count).filter { deficit[$0] > 0 && available[$0] > 0 }
+        while remaining > 0 && !open.isEmpty {
+            let total = open.reduce(Float(0)) { $0 + deficit[$1] }
+            var given = 0
+            var fractions: [(Float, Int)] = []
+            for r in open {
+                let exact = Float(remaining) * deficit[r] / total
+                let whole = min(Int(exact), available[r] - result[r])
+                result[r] += whole
+                given += whole
+                if result[r] < available[r] { fractions.append((exact - Float(Int(exact)), r)) }
+            }
+            fractions.sort { $0.0 > $1.0 || ($0.0 == $1.0 && $0.1 < $1.1) }
+            for (_, r) in fractions where given < remaining && result[r] < available[r] {
+                result[r] += 1
+                given += 1
+            }
+            remaining -= given
+            open = open.filter { result[$0] < available[$0] }
+            if given == 0 { break }
+        }
+        return result
+    }
+}
+
 /// Scene bounds from the 10th/90th percentile of the live centres.
 nonisolated struct MRNFBounds: Codable, Equatable {
     var center = SIMD3<Float>(), maxExtent: Float = 0, medianSize: Float = 0, valid = false
@@ -90,11 +237,17 @@ nonisolated struct MRNFStrategy: Codable, Equatable {
     /// Growth ramp: live Gaussians when training started. The cap is then reached gradually,
     /// at `growUntil`, instead of within the first refines (nil = no ramp; older checkpoints).
     var growthStart: Int?
+    /// Region statistics and quotas (nil until the first refine that uses them).
+    var regions: RegionQuota?
+    /// Training views, for the regions' photo support and averaging span.
+    var trainingViews: Int?
 
     struct Report: Equatable {
         var pruned = 0, replaced = 0, oversize = 0, grown = 0, holes = 0, live = 0
         /// Relocation: slots moved, and the Gaussians judged, eligible as donors and as receivers.
         var relocated = 0, judged = 0, donors = 0, receivers = 0
+        /// Regions: cells with visible area, and growth splits placed by quota.
+        var regions = 0, quotaGrown = 0
     }
 
     /// A new Gaussian for a pixel no Gaussian covers: on its camera ray at the best depth
@@ -161,7 +314,7 @@ nonisolated struct MRNFStrategy: Codable, Equatable {
     /// covers; they take at most half of the free budget (and `maxHoleSeedsPerRefine`), the
     /// rest refills pruned slots by splitting as before.
     mutating func refine(_ model: GaussianModel, iteration t: Int, seeds: [Seed] = [], replaceByError: Bool = false,
-                         relocate: Bool = false) -> Report {
+                         relocate: Bool = false, regionMode: RegionMode = .off) -> Report {
         var report = Report()
         refinesSinceBounds += 1
         if !bounds.valid || refinesSinceBounds >= MRNFConstants.boundsEveryRefines { updateBounds(model) }
@@ -207,13 +360,45 @@ nonisolated struct MRNFStrategy: Codable, Equatable {
         }
         let ceiling = growthCeiling(at: t, capacity: model.capacity)
         let atCeiling = model.activeCount >= ceiling
+        // Regions: fold this window, then quotas against the live count per region.
+        var regionOf: [Int32] = [], regionShares: [Float] = []
+        if regionMode != .off {
+            if regions == nil, bounds.valid { regions = RegionQuota(bounds: bounds) }
+            if var quota = regions {
+                regionOf = quota.regions(model)
+                quota.update(model, regionOf: regionOf, windowViews: schedule.refineEvery, trainingViews: trainingViews ?? schedule.refineEvery)
+                regionShares = quota.shares(trainingViews: trainingViews ?? schedule.refineEvery)
+                report.regions = regionShares.reduce(0) { $0 + ($1 > 0 ? 1 : 0) }
+                regions = quota
+            }
+        }
+        let quotas = regionMode == .quota || regionMode == .quotaReclaim ? regionShares : []
         model.free(rows: pruned)
         report.pruned = pruned.count
+        var regionCounts = [Int](repeating: 0, count: quotas.count)
+        if !quotas.isEmpty {
+            for i in 0..<n where active[i] > 0.5 { regionCounts[Int(regionOf[i])] += 1 }
+        }
 
-        // Relocation at the cap: see `relocationCandidates`.
+        // Relocation at the cap: see `relocationCandidates`. With region quotas, only regions
+        // over their quota give slots, and only regions below it receive them.
         var relocationWeights: [Float] = []
-        if relocate && atCeiling && t < schedule.stopRefine {
-            let (donors, weights, counts) = relocationCandidates(model, guidance: guidance, iteration: t)
+        let cap = min(maxGaussians, model.capacity)
+        // The cap counts as reached once growth has ended (the ramp stops a few slots short).
+        let reachedCap = model.activeCount + pruned.count >= cap || t >= schedule.growUntil
+        let reclaim = regionMode == .quotaReclaim && !quotas.isEmpty && reachedCap
+        if (relocate && atCeiling || reclaim) && t < schedule.stopRefine {
+            var surplus: [Int]?, below: [Bool]?
+            if reclaim {
+                let targets = quotas.map { $0 * Float(cap) }
+                surplus = (0..<quotas.count).map { r in
+                    let supported = (regions?.support[r] ?? 0) * Float(trainingViews ?? 1) >= RegionQuotaConstants.minSupport
+                    return supported ? max(0, regionCounts[r] - Int(targets[r].rounded(.up))) : 0
+                }
+                below = (0..<quotas.count).map { Float(regionCounts[$0]) < targets[$0] }
+            }
+            let (donors, weights, counts) = relocationCandidates(model, guidance: guidance, iteration: t,
+                                                                 regionOf: regionOf, surplus: surplus, below: below)
             (report.judged, report.donors, report.receivers) = counts
             if !donors.isEmpty {
                 model.free(rows: donors)
@@ -272,7 +457,33 @@ nonisolated struct MRNFStrategy: Codable, Equatable {
                 report.oversize = oversize.count
                 var growWeights = [Float](repeating: 0, count: n)
                 for i in candidates { growWeights[i] = errorMax[i] * guidance[i] }
-                let grown = Self.gumbelTopK(growWeights, k: grow, rng: &rng, excluding: taken)
+                var grown: [Int]
+                if quotas.isEmpty {
+                    grown = Self.gumbelTopK(growWeights, k: grow, rng: &rng, excluding: taken)
+                } else {
+                    // Split the growth between regions by how far each is below its quota of
+                    // the ceiling (children already chosen count towards their region), then
+                    // sample by error within each region; the global pool takes the rest.
+                    for i in parents + oversize { regionCounts[Int(regionOf[i])] += 1 }
+                    let keys = Self.gumbelKeys(growWeights, rng: &rng, excluding: taken)
+                    var byRegion = [[(Float, Int)]](repeating: [], count: quotas.count)
+                    for (key, i) in keys { byRegion[Int(regionOf[i])].append((key, i)) }
+                    let deficit = (0..<quotas.count).map { max(0, quotas[$0] * Float(ceiling) - Float(regionCounts[$0])) }
+                    let allotted = RegionQuota.allot(grow, deficit: deficit, available: byRegion.map(\.count))
+                    grown = []
+                    var rest: [(Float, Int)] = []
+                    for r in 0..<quotas.count where !byRegion[r].isEmpty {
+                        let sorted = byRegion[r].sorted { $0.0 > $1.0 || ($0.0 == $1.0 && $0.1 < $1.1) }
+                        grown += sorted.prefix(allotted[r]).map(\.1)
+                        rest += sorted.dropFirst(allotted[r])
+                    }
+                    report.quotaGrown = grown.count
+                    if grown.count < grow {
+                        rest.sort { $0.0 > $1.0 || ($0.0 == $1.0 && $0.1 < $1.1) }
+                        grown += rest.prefix(grow - grown.count).map(\.1)
+                    }
+                    grown.sort()
+                }
                 report.grown = grown.count
                 parents += oversize + grown
             }
@@ -333,7 +544,10 @@ nonisolated struct MRNFStrategy: Codable, Equatable {
     /// At most 0.5% of the live Gaussians move per refine, tapering to zero at the end of
     /// refinement, and never more than there are receivers, so the model settles instead of
     /// churning. Returns the donors (not yet freed) and the receivers' weights.
-    func relocationCandidates(_ model: GaussianModel, guidance: [Float], iteration t: Int)
+    /// With region quotas, `surplus` limits the donors per region (regions at or below their
+    /// quota give none) and `below` marks the regions whose Gaussians may receive.
+    func relocationCandidates(_ model: GaussianModel, guidance: [Float], iteration t: Int,
+                              regionOf: [Int32] = [], surplus: [Int]? = nil, below: [Bool]? = nil)
         -> (donors: [Int], weights: [Float], counts: (judged: Int, donors: Int, receivers: Int)) {
         typealias R = RelocationConstants
         let n = model.count
@@ -356,6 +570,7 @@ nonisolated struct MRNFStrategy: Codable, Equatable {
                 continue
             }
             low[i] = 0
+            if let below, !below[Int(regionOf[i])] { continue }
             if visibility[i] > 0 && errorSum[i] > visibility[i] {
                 weights[i] = errorSum[i] / views[i] * guidance[i]
                 receivers += 1
@@ -366,7 +581,13 @@ nonisolated struct MRNFStrategy: Codable, Equatable {
         let counts = (perView.count, donors.count, receivers)
         guard limit > 0, !donors.isEmpty else { return ([], [], counts) }
         donors.sort { $0.contribution < $1.contribution || ($0.contribution == $1.contribution && $0.row < $1.row) }
-        return (donors.prefix(limit).map(\.row).sorted(), weights, counts)
+        guard var left = surplus else { return (donors.prefix(limit).map(\.row).sorted(), weights, counts) }
+        var chosen: [Int] = []
+        for donor in donors where chosen.count < limit {
+            let r = Int(regionOf[donor.row])
+            if left[r] > 0 { left[r] -= 1; chosen.append(donor.row) }
+        }
+        return (chosen.sorted(), weights, counts)
     }
 
     private func argmax(_ s: UnsafeMutablePointer<Float>) -> Int { s[0] >= s[1] ? (s[0] >= s[2] ? 0 : 2) : (s[1] >= s[2] ? 1 : 2) }
@@ -409,6 +630,17 @@ nonisolated struct MRNFStrategy: Codable, Equatable {
             return chosen.sorted()
         }
         return keyed.map(\.1).sorted()
+    }
+
+    /// The Gumbel keys `gumbelTopK` ranks, for rows with a positive weight (one draw per row).
+    static func gumbelKeys(_ weights: [Float], rng: inout SplitMix64, excluding: [Bool]) -> [(Float, Int)] {
+        var keyed: [(Float, Int)] = []
+        for (i, w) in weights.enumerated() {
+            let u = min(max(rng.nextFloat(), 1e-10), 1 - 1e-7)
+            guard w > 0, w.isFinite, !excluding[i] else { continue }
+            keyed.append((log(w) - log(-log(u)), i))
+        }
+        return keyed
     }
 
     /// Hoare-partition quickselect: afterwards v[k] is the k-th smallest.

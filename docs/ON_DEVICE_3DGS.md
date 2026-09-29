@@ -381,6 +381,15 @@ With plain MRNF, a Standard run of FBDA13 reached its 600,000-Gaussian cap by it
   - at most 0.5% of the Gaussians move per refine, tapering to zero at the end of refinement, and nothing moves without receivers.
 
   About 1,500–2,500 Gaussians moved per refine, yet held-out PSNR fell by 0.03–0.19 dB. MRNF's own refill already moves 1.4% per refine, and a Gaussian hidden in the window's views can still matter for another view. `tools/train_gaussians.swift --relocate` runs it.
+- **Region quotas (experimental, off).** A 24 × 24 × 24 grid over the scene, the bounds' centre ± twice their half extent, gives each cell a share of the cap. Half of the share follows the cell's visible area (blending weight per training view), for basic coverage. The other half grows with its persistent error (error-weighted footprint over visible area, averaged over about one pass of the photos), for complex regions. Both are scaled down for cells that fewer than three photos see. Growth is split between cells by how far each is below its share, then sampled by error within the cell. Once growth has ended, reclaiming moves slots only from proven low contributors in cells over their share, by the relocation rules above, to under-fit Gaussians in cells below it. Aligned held-out PSNR, the same held-out photos in every run:
+
+  | Run | 9F8040, Standard | 9F8040, Quick (300,000 cap) | FBDA13, Standard |
+  | --- | --- | --- | --- |
+  | Default (two runs) | 29.34 / 29.28 dB | 26.94 / 26.94 dB | 29.97 / 29.92 dB |
+  | Quotas | 29.33 dB | 26.94 dB | 29.86 dB |
+  | Quotas and reclaiming | 29.22 dB | 26.88 dB | — |
+
+  Quotas are neutral and reclaiming loses up to 0.12 dB. MRNF's error-driven growth already puts the Gaussians where the error is: in the default runs, cells below half their share had half the scene's mean error, and the cells with the most error already held more than their share. `tools/train_gaussians.swift --regions track|quota|reclaim` runs it; `track` only prints the per-cell counts against the shares.
 - **Other attempts that lost quality:**
   - Adam only on the Gaussians the view reached ("sparse" or "visible" Adam): −0.15 dB, although it saved 3.5 ms per iteration.
   - Refilling pruned slots by splitting the highest-error Gaussians instead of opaque ones: −0.43 dB.
@@ -450,10 +459,10 @@ Measured on the Mac GPU with the same Metal source:
 
 - **`tools/test_gaussian_raster.swift`:** forward against a double-precision reference, with parameter and pose gradients checked by finite differences. It covers the Mip filter on and off, with and without capture motion and the LiDAR depth loss, and shows that the banded backward pass matches the single pass (20 checks).
 - **`tools/test_gaussian_loss.swift`:** loss, image and PPISP gradients.
-- **`tools/test_gaussian_training.swift`:** 71 end-to-end checks.
+- **`tools/test_gaussian_training.swift`:** 77 end-to-end checks.
   - Memory-plan fitting and overflow checks; resolution tiers, the full-resolution plan, tile bands, and the held-out segment.
   - The seed budget, depth seeds spreading over a long capture, seed cells scaled at close range, and the automatic iteration count.
-  - MRNF units, the growth ramp and its ceiling, relocation (evidence, rate, taper, no receivers), PLY export frame, and convergence.
+  - MRNF units, the growth ramp and its ceiling, relocation (evidence, rate, taper, no receivers), region quotas (allotment, shares, growth by quota, reclaiming only at the cap, checkpoint), PLY export frame, and convergence.
   - SOG: lossless WebP texels through ImageIO, stored ZIP archives against `unzip` and `zip`, palette and texture sizes, and a trained SH 3 model written and read back (positions within 0.04 mm, rotations 0.6°, rendering within 0.1 dB). The write's progress runs from 0 to 1 through its steps in order.
   - PPISP exposure recovery, pose refinement, and capture motion.
   - Cap under a small budget; checkpoint exactness, corruption, atomic replacement, and resuming a version 1 checkpoint. Leaving the app saves a checkpoint while training continues, and stale partial files are removed.

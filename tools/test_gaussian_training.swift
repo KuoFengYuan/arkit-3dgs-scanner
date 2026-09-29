@@ -244,6 +244,7 @@ import simd
             ("memoryPlan", memoryPlan),
             ("resolutionAndHoldOut", resolutionAndHoldOut),
             ("strategyUnits", strategyUnits),
+            ("regionQuotas", regionQuotas),
             ("exportFrame", exportFrame),
             ("sogFormat", sogFormat),
             ("depthSeeding", depthSeeding),
@@ -434,6 +435,106 @@ import simd
     }
 
     /// SOG model files: lossless WebP, stored ZIP, and a trained model written and read back.
+    /// Region quotas: the split of growth by region, the shares, and reclaiming at the cap.
+    static func regionQuotas() throws {
+        check(RegionQuota.allot(10, deficit: [3, 1, 0, 6], available: [100, 100, 100, 2]) == [6, 2, 0, 2]
+              && RegionQuota.allot(10, deficit: [1, 1], available: [2, 3]) == [2, 3]
+              && RegionQuota.allot(5, deficit: [0, 0], available: [4, 4]) == [0, 0],
+              "growth is split by deficit, a region takes at most its candidates, and the rest goes to the others")
+        // Shares: A and B have the same visible area, B twice the scene's error; C is seen by
+        // one photo only; D has visible area but no error at all.
+        let bounds = MRNFBounds(center: SIMD3(2, 0, 0), maxExtent: 2, medianSize: 4, valid: true)
+        var shareQuota = RegionQuota(bounds: bounds)!
+        let (a, b, c, d) = (0, 1, 2, 3)
+        shareQuota.area[a] = 100; shareQuota.area[b] = 100; shareQuota.area[c] = 100; shareQuota.area[d] = 100
+        for r in [a, b, c, d] { shareQuota.support[r] = 0.5 }
+        shareQuota.support[c] = 0.01
+        shareQuota.error[a] = 1; shareQuota.error[b] = 3; shareQuota.error[c] = 1; shareQuota.error[d] = 0
+        let shares = shareQuota.shares(trainingViews: 100)
+        let sum = shares.reduce(0, +)
+        check(abs(sum - 1) < 1e-4 && shares[b] > shares[a] && shares[a] > shares[c] && shares[d] > 0
+              && shares[d] >= 0.5 * shares[a] * 0.99 && shares.enumerated().allSatisfy { [a, b, c, d].contains($0.offset) || $0.element == 0 },
+              "shares follow the visible area, give complex regions more, keep a base for low-error regions and scale down weak photo support")
+        // Growth: 500 small splats with high errorMax at x ≈ 0 and 100 larger ones at x ≈ 4 cover
+        // the same visible area with the same error. MRNF picks parents by errorMax, so nearly all
+        // splits go left; with quotas the right region, far below its half, gets them.
+        func twoClusters() throws -> GaussianModel {
+            let m = try GaussianModel(metal: metal, capacity: 2048, shDegree: 0)
+            let left = (0..<500).map { SIMD3(Float($0 % 25) * 0.004, Float($0 / 25) * 0.004, 0) }
+            let right = (0..<100).map { SIMD3(4 + Float($0 % 10) * 0.004, Float($0 / 10) * 0.004, 0) }
+            m.initialize(positions: left + right, colors: Array(repeating: SIMD3(0.5, 0.5, 0.5), count: 600))
+            let mp = m.floats(m.params)
+            for i in 0..<600 {
+                mp[Int(m.layout.opacities) + i] = 2
+                let isLeft = i < 500
+                m.stat(GaussianStats.visibility)[i] = isLeft ? 1 : 5
+                m.stat(GaussianStats.errorSum)[i] = isLeft ? 1 : 5
+                m.stat(GaussianStats.errorMax)[i] = isLeft ? 10 : 1
+                m.stat(GaussianStats.views)[i] = 6
+            }
+            return m
+        }
+        func rightCount(_ m: GaussianModel) -> Int {
+            let mp = m.floats(m.params), active = m.stat(GaussianStats.active)
+            return (0..<m.count).filter { active[$0] > 0.5 && mp[Int(m.layout.means) + 3 * $0] > 2 }.count
+        }
+        var results: [RegionMode: (grown: Int, right: Int)] = [:]
+        for mode in [RegionMode.off, .quota] {
+            let m = try twoClusters()
+            var grow = MRNFStrategy(schedule: MRNFSchedule(iterations: 1000), maxGaussians: 2000)
+            grow.bounds = bounds
+            grow.growthStart = 600
+            grow.trainingViews = 50
+            let report = grow.refine(m, iteration: grow.schedule.refineEvery, regionMode: mode)
+            results[mode] = (report.grown, rightCount(m))
+        }
+        let plain = results[.off]!, quota = results[.quota]!
+        check(plain.grown == 42 && quota.grown == 42 && plain.right < 110 && quota.right >= 140,
+              "quotas send growth to the region below its share (right region \(plain.right) → \(quota.right) of \(100 + quota.grown))")
+        // Reclaim at the cap: 800 Gaussians at x ≈ 0 and 200 at x ≈ 4 fill a 1,000 cap with the
+        // same visible area; 20 low contributors and 50 under-fit Gaussians in each region. Only
+        // the crowded left region gives slots, and only the right one receives them.
+        let full = try GaussianModel(metal: metal, capacity: 1024, shDegree: 0)
+        let left = (0..<800).map { SIMD3(Float($0 % 40) * 0.004, Float($0 / 40) * 0.004, 0) }
+        let right = (0..<200).map { SIMD3(4 + Float($0 % 20) * 0.004, Float($0 / 20) * 0.004, 0) }
+        full.initialize(positions: left + right, colors: Array(repeating: SIMD3(0.5, 0.5, 0.5), count: 1000))
+        let fp = full.floats(full.params)
+        func setWindow() {
+            for i in 0..<1000 {
+                fp[Int(full.layout.opacities) + i] = 2
+                let isLeft = i < 800, local = isLeft ? i : i - 800
+                let visibility: Float = local < 20 ? 0.01 : (isLeft ? 1.5 : 6)
+                full.stat(GaussianStats.views)[i] = 6
+                full.stat(GaussianStats.visibility)[i] = visibility
+                full.stat(GaussianStats.errorSum)[i] = local >= 20 && local < 70 ? 2 * visibility : 0.5 * visibility
+                full.stat(GaussianStats.errorMax)[i] = 0
+            }
+        }
+        var reclaiming = MRNFStrategy(schedule: MRNFSchedule(iterations: 20_000), maxGaussians: 1000)
+        reclaiming.bounds = bounds
+        reclaiming.trainingViews = 100
+        let step = reclaiming.schedule.refineEvery
+        setWindow()
+        _ = reclaiming.refine(full, iteration: step, regionMode: .quotaReclaim)
+        let rightBefore = rightCount(full)
+        setWindow()
+        let second = reclaiming.refine(full, iteration: 2 * step, regionMode: .quotaReclaim)
+        let active = full.stat(GaussianStats.active)
+        check(second.relocated > 0 && full.activeCount == 1000 && rightCount(full) == rightBefore + second.relocated
+              && (800..<820).allSatisfy { active[$0] > 0.5 },
+              "at the cap, slots move only from the region over its quota to the one below it (\(second.relocated) moved)")
+        var plainCap = MRNFStrategy(schedule: MRNFSchedule(iterations: 20_000), maxGaussians: 1000)
+        plainCap.bounds = bounds
+        plainCap.trainingViews = 100
+        let untouched = try twoClusters()
+        _ = plainCap.refine(untouched, iteration: step, regionMode: .quotaReclaim)
+        check(plainCap.refine(untouched, iteration: 2 * step, regionMode: .quotaReclaim).relocated == 0,
+              "nothing is reclaimed below the cap")
+        // Checkpoints keep the region statistics.
+        let decoded = try JSONDecoder().decode(MRNFStrategy.self, from: JSONEncoder().encode(reclaiming))
+        check(decoded.regions == reclaiming.regions && decoded.regions != nil, "region statistics survive a checkpoint")
+    }
+
     static func sogFormat() throws {
         // WebP: exact texels through ImageIO, with and without alpha.
         var rng = SplitMix64(seed: 17)

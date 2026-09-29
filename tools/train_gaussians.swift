@@ -11,7 +11,7 @@
 // /tmp/train_gaussians /tmp/gs.metallib SCAN [--iterations N] [--long-edge PX] [--max-gaussians N]
 //   [--sh D] [--holdout N] [--no-ppisp] [--no-pose] [--no-mip] [--budget-mb MB] [--out DIR]
 // Densification and optimiser experiments (defaults unchanged unless given): --no-growth-ramp,
-//   --relocate, --replace-by-error, --sparse-adam. GS_REFINE=1 prints every refine.
+//   --relocate, --regions track|quota|reclaim, --replace-by-error, --sparse-adam. GS_REFINE=1 prints every refine.
 // Photo selection experiments: --selection current|captured (blur verdicts and selection
 //   evaluated again with the current rules, or the scan's own), --seed-cells fixed (the room-scale 4 cm cells), --holdout-ids FILE /
 //   --write-holdout-ids FILE (the same held-out photos across runs).
@@ -39,7 +39,7 @@ import simd
         var poseFile: String?
         var initNoise: Float = 0, initKeep = 1.0, initRandom = 0, latticeJitter: Float = 0
         var perFrame = false
-        var seedJitter = true, sparseAdam = false, replaceByError = false, growthRamp = true, relocation = false, sogRoundTrip = false, sogPalette: Int?, sogIterations = GaussianSOG.kMeansIterations
+        var seedJitter = true, sparseAdam = false, replaceByError = false, growthRamp = true, relocation = false, regionMode = RegionMode.off, sogRoundTrip = false, sogPalette: Int?, sogIterations = GaussianSOG.kMeansIterations
         var excludeIDs: Set<Int> = []
         var holdOutSegment = 0.0, fullResolution = false
         var saveModel: URL?, enhanceFrom: URL?
@@ -75,6 +75,14 @@ import simd
             case "--replace-by-error": replaceByError = true
             case "--no-growth-ramp": growthRamp = false
             case "--relocate": relocation = true
+            case "--regions":
+                switch args.removeFirst() {
+                case "off": regionMode = .off
+                case "track": regionMode = .track
+                case "quota": regionMode = .quota
+                case "reclaim": regionMode = .quotaReclaim
+                default: print("--regions off|track|quota|reclaim"); exit(2)
+                }
             case "--sog-roundtrip": sogRoundTrip = true
             case "--sog-palette": sogPalette = Int(args.removeFirst())!
             case "--sog-iterations": sogIterations = Int(args.removeFirst())!
@@ -144,6 +152,7 @@ import simd
         trainer.replaceByError = replaceByError
         trainer.growthRamp = growthRamp
         trainer.relocation = relocation
+        trainer.regionMode = regionMode
         print(String(format: "pose learning rate %.1e, seed jitter %@, depth loss %.2f", trainer.poseLearningRate,
                      seedJitter ? "on" : "off", config.depthLossWeight))
         if let enhanceFrom { try trainer.initializeModel(fromSaved: enhanceFrom) } else { try trainer.initializeModel() }
@@ -163,7 +172,7 @@ import simd
             window.append(r.loss); psnrWindow.append(r.psnr)
             if let refine = r.refine, trainer.iteration % (trainer.strategy.schedule.refineEvery * 10) == 0
                 || ProcessInfo.processInfo.environment["GS_REFINE"] != nil {
-                print("  refine @\(r.iteration): pruned \(refine.pruned) replaced \(refine.replaced) relocated \(refine.relocated) (judged \(refine.judged) donors \(refine.donors) receivers \(refine.receivers)) oversize \(refine.oversize) grown \(refine.grown) holes \(refine.holes) (total \(trainer.holeSeedsAdded)) live \(refine.live)")
+                print("  refine @\(r.iteration): pruned \(refine.pruned) replaced \(refine.replaced) relocated \(refine.relocated) (judged \(refine.judged) donors \(refine.donors) receivers \(refine.receivers)) oversize \(refine.oversize) grown \(refine.grown) (by quota \(refine.quotaGrown), regions \(refine.regions)) holes \(refine.holes) (total \(trainer.holeSeedsAdded)) live \(refine.live)")
             }
             if ProcessInfo.processInfo.environment["GS_VERBOSE"] != nil { print("step \(r.iteration) \(String(format: "%.1f", r.seconds * 1000)) ms loss \(r.loss) M? gaussians \(r.gaussians)") }
             if r.iteration % 500 == 0 || r.iteration == config.iterations {
@@ -207,6 +216,7 @@ import simd
         }
         print(String(format: "done: %d iterations in %.1f s (%.1f ms/it), skipped %d, validation PSNR %.3f SSIM %.4f over %d views, peak footprint %d MB",
                      config.runIterations, seconds, seconds / Double(max(1, config.runIterations)) * 1000, skipped, eval.psnr, eval.ssim, eval.count, peak >> 20))
+        if let regions = trainer.strategy.regions { printRegions(regions, trainer: trainer) }
         if config.ppisp {
             let s = trainer.ppisp.summary
             print(String(format: "PPISP: exposure %.2f..%.2f EV, corner vignetting %.3f", s.minEV, s.maxEV, s.cornerVignetting))
@@ -297,6 +307,31 @@ import simd
 
     /// Share of held-out pixels the model leaves empty (final transmittance above 0.5): the
     /// surfaces no Gaussian reached.
+    /// Live Gaussians per region against its quota share, grouped by that ratio: the share of
+    /// the visible area, of the Gaussians and the area-weighted error in each group.
+    static func printRegions(_ regions: RegionQuota, trainer: GaussianTrainer) {
+        let model = trainer.model
+        let shares = regions.shares(trainingViews: trainer.strategy.trainingViews ?? 1)
+        let regionOf = regions.regions(model)
+        let active = model.stat(GaussianStats.active)
+        var counts = [Int](repeating: 0, count: shares.count)
+        for i in 0..<model.count where active[i] > 0.5 { counts[Int(regionOf[i])] += 1 }
+        let live = Float(max(1, model.activeCount))
+        let totalArea = regions.area.reduce(0, +)
+        let groups: [(String, ClosedRange<Float>)] = [("< 0.5×", 0...0.5), ("0.5–1×", 0.5...1), ("1–2×", 1...2), ("> 2×", 2...Float.infinity)]
+        print(String(format: "regions: %d with visible area, cell %.2f m", shares.filter { $0 > 0 }.count, regions.cell))
+        for (label, range) in groups {
+            var area: Float = 0, gaussians = 0, error: Float = 0, cells = 0
+            for r in 0..<shares.count where shares[r] > 0 {
+                let ratio = Float(counts[r]) / (shares[r] * live)
+                guard range.contains(ratio), !(ratio == range.lowerBound && range.lowerBound > 0) else { continue }
+                area += regions.area[r]; gaussians += counts[r]; error += regions.area[r] * regions.error[r]; cells += 1
+            }
+            print(String(format: "  Gaussians/quota %@: %4d cells, %5.1f%% of visible area, %5.1f%% of Gaussians, mean error %.2f",
+                         label, cells, area / max(totalArea, 1e-9) * 100, Float(gaussians) / live * 100, area > 0 ? error / area : 0))
+        }
+    }
+
     static func reportCoverage(_ trainer: GaussianTrainer) throws {
         let views = trainer.dataset.validationFrames
         guard !views.isEmpty else { return }

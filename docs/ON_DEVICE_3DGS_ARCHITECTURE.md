@@ -127,7 +127,7 @@ stateDiagram-v2
 
 | Stage | Where | Work (kernels) |
 | --- | --- | --- |
-| Refine | CPU | Every `refineEvery` iterations while refining: `MRNFStrategy.refine` edits rows in the shared buffers (prune, replace, grow up to the growth-ramp ceiling, hole seeds, bounds, and the optional relocation). The GPU is idle meanwhile |
+| Refine | CPU | Every `refineEvery` iterations while refining: `MRNFStrategy.refine` edits rows in the shared buffers (prune, replace, grow up to the growth-ramp ceiling, hole seeds, bounds, and the optional relocation or region quotas). The GPU is idle meanwhile |
 | 1. Project | GPU | Fold the last backward pass into the statistics and add position noise (`mrnf_fold`, `mrnf_noise`). Build the photo's edge map (`edge_blur`, `edge_sobel_nms`). Project every Gaussian: EWA covariance, SH colour, Mip filter, optional capture motion, and the number of tiles its ellipse actually reaches, row by row (`project_forward`). Sort by depth (`iota_uint`, 32-bit radix). Scan tile counts (`gather_uint`, `scan_block`, `scan_add`). Record screen share (`screen_share`) |
 | Read back | CPU | Intersection count. Over capacity: skip the view and stop growth |
 | 2. Forward | GPU | Normalise the edge map (`scale_float`). Emit (tile, Gaussian) pairs for the tiles each ellipse reaches (`emit_intersections`, `tileRowSpan`). Stable 16-bit tile sort (depth order is kept). Find tile ranges (`tile_ranges`). Blend front to back in 16 × 16 tiles, with depth (`rasterize_forward`). Then the loss in the same command buffer: optional PPISP (`ppisp_forward`), 0.8 · L1 + 0.2 · D-SSIM (`ssim_forward`, `ssim_backward`), gradients back through PPISP (`ppisp_backward`), and the MRNF error map. The CPU prepares the view's LiDAR target meanwhile |
@@ -230,7 +230,7 @@ Run `bash tools/test_gaussian_training.sh`; it builds and runs all of the tests 
 | --- | --- |
 | `tools/test_gaussian_raster.swift` | Forward against a double-precision CPU reference; parameter and pose gradients by finite differences (Mip filter, capture motion, LiDAR depth loss); banded backward equals one pass (20 checks) |
 | `tools/test_gaussian_loss.swift` | Loss, image and PPISP gradients (7 checks) |
-| `tools/test_gaussian_training.swift` | 68 end-to-end checks: memory plan, the seed budget and iteration count, resolution tiers, MRNF with the growth ramp and relocation, the SOG file (WebP, ZIP, round trip), export frame, convergence, enhancement, PPISP, poses, capture motion, depth seeds, hole filling, checkpoints (including version 1 and saving on leaving the app), the session state machine, the viewer, archives, and a 1,200-frame run. `GS_ONLY=session,enhancement` runs a subset |
+| `tools/test_gaussian_training.swift` | 77 end-to-end checks: memory plan, the seed budget and iteration count, resolution tiers, MRNF with the growth ramp, relocation and region quotas, the SOG file (WebP, ZIP, round trip), export frame, convergence, enhancement, PPISP, poses, capture motion, depth seeds, hole filling, checkpoints (including version 1 and saving on leaving the app), the session state machine, the viewer, archives, and a 1,200-frame run. `GS_ONLY=session,enhancement` runs a subset |
 | `tools/train_gaussians.swift` | Replays a real scan on the Mac GPU with every experiment switch, for example `--long-edge`, `--align-eval`, `--eval-full-res`, `--holdout-segment`, `--save-model`, `--enhance-from`, `--depth-loss`, `--per-frame` |
 
 Mac results say nothing about iPhone speed, memory or heat. Those need device runs.

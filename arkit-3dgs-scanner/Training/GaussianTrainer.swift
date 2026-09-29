@@ -261,6 +261,8 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
     var growthRamp = true
     /// Experiment: evidence-based relocation at the cap (`MRNFStrategy.relocationCandidates`).
     var relocation = false
+    /// Region statistics and densification quotas (`RegionQuota`).
+    var regionMode = RegionMode.off
     /// The view rendered by the last completed step (its render and photo are still in the
     /// buffers at the next refine).
     private var lastRendered: Int?
@@ -306,6 +308,7 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
         let schedule = MRNFSchedule(iterations: configuration.iterations)
         strategy = MRNFStrategy(schedule: schedule, maxGaussians: min(configuration.maxGaussians, plan.gaussianCapacity))
         strategy.seed = configuration.seed
+        strategy.trainingViews = dataset.trainFrames.count
         ppisp = PPISPModel(frames: dataset.frames.count, captureEV: dataset.frames.map(\.captureEV))
         poses = Array(repeating: PoseCorrection(), count: dataset.frames.count)
         edgeMedians = Array(repeating: nil, count: dataset.frames.count)
@@ -522,7 +525,8 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
             if growthFrozen { strategy.maxGaussians = min(strategy.maxGaussians, model.activeCount) }
             let seeds = configuration.usesHoleFilling && !growthFrozen && t < schedule.growUntil && t >= 3 * schedule.refineEvery
                 ? lastRendered.map { holeSeeds(frame: $0) } ?? [] : []
-            refineReport = strategy.refine(model, iteration: t, seeds: seeds, replaceByError: replaceByError, relocate: relocation)
+            refineReport = strategy.refine(model, iteration: t, seeds: seeds, replaceByError: replaceByError, relocate: relocation,
+                                           regionMode: regionMode)
             holeSeedsAdded += refineReport?.holes ?? 0
         }
         iteration = t
