@@ -4,6 +4,10 @@
 
 **English** | [繁體中文](README.zh-TW.md)
 
+[![One scan from capture to a trained 3DGS model: scanning, fusion, training, and the finished model](docs/media/demo-poster.jpg)](docs/media/demo.mp4)
+
+*[Watch the demo](docs/media/demo.mp4) (1 minute, played at 2.7× speed): scan a desk, refine the data, and train a 3DGS model on the iPhone.*
+
 Capture photos, camera poses, and point clouds with ARKit. Refine the data on your iPhone, review the scene and capture route, then train a 3DGS model on the device or export a COLMAP dataset for an external trainer.
 
 - **Optional LiDAR:** fuse sensor depth or capture with RGB and verified sparse features.
