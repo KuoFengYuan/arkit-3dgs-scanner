@@ -60,6 +60,8 @@ Training speed, memory use, and heat on an iPhone have not been measured yet; Ma
 
 Follow [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md): task branches (`Feature/`, `Bugfix/`, `Enhance/`), a PR to `main`, and branch cleanup after the merge. The contribution guide lists the checks, the code layout, and the optional Python tools.
 
+The asset catalog includes a 1024 × 1024 app icon for archived iOS builds and TestFlight distribution.
+
 ```sh
 python3 tools/check_project.py
 bash tools/test_localization.sh

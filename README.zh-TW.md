@@ -60,6 +60,8 @@ iPhone 上的訓練速度、記憶體用量與發熱還沒實測，Mac 與 Simul
 
 遵循 [貢獻流程](CONTRIBUTING.zh-TW.md) 與 [工作規範](AGENTS.zh-TW.md)：使用任務分支（`Feature/`、`Bugfix/`、`Enhance/`），開 PR 到 `main`，合併後刪除分支。貢獻流程裡列出檢查指令、程式結構與可選的 Python 工具。
 
+素材目錄已包含 1024 × 1024 的 App 圖示，可用於 iOS 封存版本與 TestFlight 發佈。
+
 ```sh
 python3 tools/check_project.py
 bash tools/test_localization.sh
