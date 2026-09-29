@@ -61,7 +61,7 @@ python3 -m venv .venv
 
 ## PR 與合併
 
-英文 commit 主旨具體描述改動，前綴 feat:、fix:、enhance: 或 docs:。PR 說明問題、結果、驗證及限制，英文在前、繁中摘要在後。使用 gh 時，把多行說明寫入檔案，透過 --body-file 傳入。
+英文 commit 主旨具體描述改動，前綴 feat:、fix:、enhance: 或 docs:。PR 說明問題、結果、驗證及限制，英文在前、繁中摘要在後。使用 gh 時，把多行說明寫入檔案，透過 --body-file 傳入。commit 與 PR 不加 AI 工具的標註（「Generated with Claude Code」、AI 的 `Co-Authored-By` 行）。
 
 Push 分支、開 PR、確認必要狀態／審核後合併已驗證的 head，通常 squash。若 main 變動影響本次修改，更新分支並重跑相關檢查。禁止 --admin、關閉規則或直接推 main。
 

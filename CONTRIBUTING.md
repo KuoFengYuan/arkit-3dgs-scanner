@@ -61,7 +61,7 @@ Contributions are accepted under the project's [Apache License 2.0](LICENSE). Ke
 
 ## PR and merge
 
-Commit subjects should describe the change in English with `feat:`, `fix:`, `enhance:`, or `docs:`. PRs explain the problem, resulting behavior, verification, and limitations; use English first and add a Traditional Chinese summary. When using `gh`, put multiline descriptions in a file and pass `--body-file`.
+Commit subjects should describe the change in English with `feat:`, `fix:`, `enhance:`, or `docs:`. PRs explain the problem, resulting behavior, verification, and limitations; use English first and add a Traditional Chinese summary. When using `gh`, put multiline descriptions in a file and pass `--body-file`. Leave AI tool attribution out of commits and PRs ("Generated with Claude Code" lines, AI `Co-Authored-By` trailers).
 
 Push the task branch, create the PR, check required statuses/reviews, and merge the exact verified head (normally squash). If main changes in a way that affects the patch, update the branch and rerun relevant checks. Do not use `--admin`, disable rules, or directly push main.
 

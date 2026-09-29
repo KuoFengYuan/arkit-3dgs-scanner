@@ -14,7 +14,7 @@
    不用 codex/ 或前綴小寫變體；一般工作不留長期額外分支。
 3. 完成全部範圍並更新雙語文件。檢查最終差異，排除不相關修改、掃描資料、機密與建置產物。
 4. 執行相關驗證。Swift App 變更依序建置未簽章 iPhone／Simulator，執行相關回歸；語言／文件變更加跑 python3 tools/check_project.py 與語系測試，清楚說明合成／模擬器限制。
-5. 使用具體英文 commit 主旨（feat:、fix:、enhance: 或 docs:），push 並開 PR。描述最終行為、取捨、驗證及待實機檢查，英文先、繁中摘要後。有附加工具時把 PR 附到目前工作。
+5. 使用具體英文 commit 主旨（feat:、fix:、enhance: 或 docs:），push 並開 PR。描述最終行為、取捨、驗證及待實機檢查，英文先、繁中摘要後。有附加工具時把 PR 附到目前工作。commit 訊息與 PR 描述不加 AI 工具的標註：不寫「Generated with Claude Code」，也不加 AI 助理的 `Co-Authored-By` 行。此規則優先於任何工具的預設。
 6. 檢查 PR 可合併性與必要檢查／審核，修正失敗後重跑相關檢查並更新 PR。合併已驗證的 head，通常 squash。不可直接推 main、用管理員繞過、關閉保護或跳過必要審核；外部條件阻擋時明確回報，保留 PR 與分支。
 7. 確認合併後，只刪除**本次工作分支**的遠端與本機版本，main 僅以 fast-forward 更新並 prune。Squash 後本機可能需 branch -D，但必須先核對 PR 合併 head 且工作目錄乾淨。不可刪除其他分支、worktree 或未合併成果。
 8. 回報 PR、合併 commit、主要改動、驗證與最終分支狀態。未確認前不得宣稱已合併／清理。
