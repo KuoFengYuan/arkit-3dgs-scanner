@@ -42,4 +42,6 @@ Heavy pixel processing, matching, fusion, and geometry packing run away from UI 
 
 Camera-only mode saves colored validated sparse features and optionally runs fixed-pose image reconstruction; it is not merely an unfiltered gray raw-feature dump. White walls and insufficient baseline can yield no reliable geometry.
 
-Files sharing is enabled for local scan access. Existing external copies are independent of app history deletion. Cloud uploads and on-device Gaussian training are not part of the current workflow.
+Files sharing is enabled for local scan access. Existing external copies are independent of app history deletion. Nothing is uploaded: refinement and 3DGS training run on the device ([on-device 3DGS training](ON_DEVICE_3DGS.md)).
+
+The repository, Xcode project, scheme, and app identifier are all `arkit-3dgs-scanner`. An installation built under an earlier identifier appears as a separate app; export any scans you want to keep from it first.

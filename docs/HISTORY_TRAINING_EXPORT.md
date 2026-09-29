@@ -14,6 +14,34 @@ An empty cloud still produces a valid zero-point `points3D.bin` and empty PLY, r
 
 Archives are shared through the system share sheet with the file itself. SwiftUI `ShareLink(item: URL)` handed apps a file link that only AirDrop and Files accepted; LINE and Teams failed. Very large archives can still exceed a receiving app's own size limit.
 
+## Dataset layout
+
+Use `sparse/0/images.bin` as the list of training images; `images/` keeps every original photo.
+
+```text
+scan_…/
+├── images/                    # Original sensor-oriented JPEGs
+├── depth/                     # LiDAR depth and confidence, when captured
+├── sparse/0/
+│   ├── cameras.bin            # Per-frame calibration
+│   ├── images.bin             # Selected images and world-to-camera poses
+│   └── points3D.bin           # Initialization point cloud
+├── points.ply                 # Point cloud in ARKit world coordinates
+├── poses.jsonl                # Original capture poses
+├── poses_refined.jsonl        # Selected, processed poses
+├── capture-meta.json          # Device and capture mode
+├── review.ply                 # Saved preview point cloud
+├── review-poses.jsonl         # Preview and playback poses
+├── scan-summary.json          # Frame and point counts
+├── training-selection.json    # Image selection and recapture information
+├── pose-refinement.json       # Pose validation report, when refinement runs
+└── refusion-progress.json     # Fusion timing and resource report, when fusion runs
+```
+
+Floor-plan, world-map, reconstruction, and performance files are added when those features run.
+
+**Coordinates:** COLMAP cameras and `points3D.bin` are rotated together by 180° around world X. `points.ply`, `review.ply`, and the JSONL poses keep ARKit world coordinates. Do not mix the two frames without converting. See [coordinate conventions](COORDINATES.md).
+
 ## Regression validation
 
 ```sh

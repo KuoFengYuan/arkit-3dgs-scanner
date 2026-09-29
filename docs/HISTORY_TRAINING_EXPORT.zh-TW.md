@@ -14,6 +14,34 @@
 
 壓縮檔改以系統分享表分享檔案本身。SwiftUI 的 `ShareLink(item: URL)` 只交出檔案連結，只有 AirDrop 與「檔案」能接收，LINE、Teams 會失敗。檔案非常大時，仍可能超過接收端 App 自己的大小限制。
 
+## 資料集結構
+
+訓練影像清單以 `sparse/0/images.bin` 為準；`images/` 保留所有原始照片。
+
+```text
+scan_…/
+├── images/                    # 感測器原始方向 JPEG
+├── depth/                     # LiDAR 深度與可信度（有擷取時）
+├── sparse/0/
+│   ├── cameras.bin            # 逐幀內參
+│   ├── images.bin             # 選用影像與 world-to-camera 姿態
+│   └── points3D.bin           # 初始化點雲
+├── points.ply                 # ARKit 世界座標點雲
+├── poses.jsonl                # 原始採集姿態
+├── poses_refined.jsonl        # 選用影像的處理後姿態
+├── capture-meta.json          # 裝置與掃描模式
+├── review.ply                 # 預覽點雲
+├── review-poses.jsonl         # 預覽與回放姿態
+├── scan-summary.json          # 影格數與點數
+├── training-selection.json    # 照片選用與補拍資訊
+├── pose-refinement.json       # 相機精修的驗證報告（有執行時）
+└── refusion-progress.json     # 重融合的耗時與資源報告（有執行時）
+```
+
+啟用對應功能時，另有平面圖、世界地圖、影像重建與效能報告等檔案。
+
+**座標：** COLMAP 相機與 `points3D.bin` 一起繞世界 X 軸旋轉 180°；`points.ply`、`review.ply` 與 JSONL 姿態保留 ARKit 世界座標。兩者未經轉換不要混用。詳見[座標慣例](COORDINATES.zh-TW.md)。
+
 ## 驗證
 
 ```sh

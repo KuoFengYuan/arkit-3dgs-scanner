@@ -21,6 +21,8 @@ python3 tools/check_project.py
 bash tools/test_localization.sh
 bash tools/test_training_quality.sh
 bash tools/test_gaussian_training.sh
+bash tools/test_metric_loop.sh
+bash tools/test_fusion_memory.sh
 xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner \
   -sdk iphoneos -configuration Debug CODE_SIGNING_ALLOWED=NO build
 xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner \
@@ -30,6 +32,28 @@ xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner \
 Run device and Simulator builds sequentially to avoid sharing a locked build database. Choose further regressions for the affected subsystem; do not claim sensor accuracy from compiler or synthetic tests. Swift command-line tools calling localized code must include `Capture/Localization.swift` in their sources. Resources fall back to Chinese source text if a standalone binary has no app bundle.
 
 Documentation is English first with a matching `.zh-TW.md` page. App UI defaults to Traditional Chinese with an English setting. See [localization conventions](docs/LOCALIZATION.md). Keep raw scan samples, private images, credentials, and generated build output out of commits.
+
+## Code layout
+
+```text
+arkit-3dgs-scanner/Capture/    AR session, keyframes, fusion, pose refinement, image selection, export
+arkit-3dgs-scanner/History/    Scan storage, playback, refinement, and deletion
+arkit-3dgs-scanner/Training/   On-device 3DGS: Metal kernels, trainer, memory plan, checkpoints, export, viewer and UI
+tools/                         Dataset conversion, analysis, and regression tests
+docs/                          Architecture, coordinate conventions, quality, and performance
+```
+
+The `arkit-3dgs-scanner` scheme runs an optimized Release build; use `arkit-3dgs-scanner-Debug` only for source-level debugging, because Debug fusion and training are much slower (see [fusion diagnostics](docs/SCAN_FUSION_DIAGNOSTICS.md)). `Training/` is a new Swift and Metal implementation; the earlier msplat C++ engine, its bridge, and its build settings are not used. Capture and dataset preparation do not depend on the trainer.
+
+## Optional Python tools
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r tools/requirements.txt
+.venv/bin/python tools/test_math.py
+.venv/bin/python tools/validate_dataset.py /path/to/scan
+.venv/bin/python tools/arkit2gs.py /path/to/scan -o /path/to/dataset --format both
+```
 
 ## License
 
