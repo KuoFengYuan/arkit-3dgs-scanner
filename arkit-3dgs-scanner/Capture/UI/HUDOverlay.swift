@@ -24,6 +24,8 @@ struct HUDOverlay: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var showDiscardConfirm = false
     @State private var showExitConfirm = false
+    /// Width of the top bar's trailing items (see `topBar`).
+    @State private var trailingWidth: CGFloat = 0
     @State private var showAdvanced = false
     @State private var summaryExpanded = false
     /// 手勢說明只在剛進入檢視時短暫出現。
@@ -79,19 +81,35 @@ struct HUDOverlay: View {
 
     // MARK: - 上方列
 
+    /// The status sits centred between equal sides (as wide as the wider side) when it fits;
+    /// with large text or a longer language the trailing items (the scan's numbers) keep their
+    /// full width and the status takes what is left.
     private var topBar: some View {
-        HStack(alignment: .top, spacing: DS.Space.xs) {
-            closeButton
-                .frame(maxWidth: .infinity, alignment: .leading)
-            DSStatusPill(text: phaseTitle, symbol: phaseSymbol, tone: phaseTone,
-                         pulsing: controller.phase == .scanning && controller.trackingReady)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                .fixedSize()
-                .allowsHitTesting(false)
-            HStack(spacing: 0) { trailingTopItems }
-                .frame(maxWidth: .infinity, alignment: .trailing)
+        let side = max(DS.Size.control, trailingWidth)
+        return ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: DS.Space.xs) {
+                closeButton.frame(width: side, alignment: .leading)
+                statusPill.fixedSize()
+                trailingTop.frame(width: side, alignment: .trailing)
+            }
+            HStack(alignment: .top, spacing: DS.Space.xs) {
+                closeButton
+                statusPill.minimumScaleFactor(0.7).frame(maxWidth: .infinity)
+                trailingTop
+            }
         }
+    }
+
+    private var statusPill: some View {
+        DSStatusPill(text: phaseTitle, symbol: phaseSymbol, tone: phaseTone,
+                     pulsing: controller.phase == .scanning && controller.trackingReady, maxLines: 1)
+            .allowsHitTesting(false)
+    }
+
+    private var trailingTop: some View {
+        HStack(spacing: 0) { trailingTopItems }
+            .fixedSize()
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { trailingWidth = $0 }
     }
 
     private var closeButton: some View {

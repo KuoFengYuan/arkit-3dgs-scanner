@@ -21,7 +21,10 @@ struct ScanHistoryView: View {
     private struct DeletionRequest {
         let entries: [ScanEntry]
         var all = false
-        var title: String { all ? L10n.text("刪除全部 \(entries.count) 筆掃描？") : L10n.text("刪除 \(entries.count) 筆掃描？") }
+        var title: String {
+            all ? L10n.text("刪除全部 \(entries.count) 筆掃描？")
+                : entries.count == 1 ? L10n.text("刪除 1 筆掃描？") : L10n.text("刪除 \(entries.count) 筆掃描？")
+        }
     }
 
     private var selectedEntries: [ScanEntry] { entries.filter { selectedIDs.contains($0.id) } }
@@ -92,7 +95,7 @@ struct ScanHistoryView: View {
         // stable anchor once the menu closes).
         .alert(pendingCardDelete?.title ?? L10n.text("刪除掃描？"), isPresented: Binding(get: { pendingCardDelete != nil }, set: { if !$0 { pendingCardDelete = nil } }),
                presenting: pendingCardDelete) { request in
-            Button(L10n.text("永久刪除 \(request.entries.count) 筆掃描"), role: .destructive) {
+            Button(request.entries.count == 1 ? L10n.text("永久刪除 1 筆掃描") : L10n.text("永久刪除 \(request.entries.count) 筆掃描"), role: .destructive) {
                 pendingCardDelete = nil
                 deleting = true
                 Task { await delete(request.entries) }
@@ -112,7 +115,7 @@ struct ScanHistoryView: View {
     private var library: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: DS.Space.m) {
-                Text(L10n.text("共 \(entries.count) 筆")).font(.subheadline).foregroundStyle(DS.Palette.textSecondary)
+                Text(entries.count == 1 ? L10n.text("共 1 筆") : L10n.text("共 \(entries.count) 筆")).font(.subheadline).foregroundStyle(DS.Palette.textSecondary)
                 LazyVGrid(columns: columns, spacing: DS.Space.l) {
                     ForEach(entries) { entry in
                         if selecting {
@@ -213,7 +216,7 @@ struct ScanHistoryView: View {
                         .confirmationDialog(pendingDelete?.title ?? L10n.text("刪除掃描？"), isPresented: Binding(
                             get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
                             titleVisibility: .visible, presenting: pendingDelete) { request in
-                            Button(L10n.text("永久刪除 \(request.entries.count) 筆掃描"), role: .destructive) {
+                            Button(request.entries.count == 1 ? L10n.text("永久刪除 1 筆掃描") : L10n.text("永久刪除 \(request.entries.count) 筆掃描"), role: .destructive) {
                                 pendingDelete = nil
                                 deleting = true
                                 Task { await delete(request.entries) }
@@ -301,8 +304,8 @@ private struct ScanCard: View {
                 Text(L10n.text("\(entry.frameCount) 張影像") + (entry.pointCount.map { L10n.text("・\($0.formatted()) 個點") } ?? ""))
                     .font(.caption)
                     .foregroundStyle(DS.Palette.textSecondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, 2)
         }
@@ -538,7 +541,8 @@ private struct ScanHistoryDetail: View {
             .frame(maxWidth: 420)
             .accessibilityLabel(L10n.text("預覽內容"))
             if selectedTab == 0 {
-                HStack(spacing: DS.Space.xs) {
+                // Wraps onto a second row with large text instead of truncating a pill.
+                DSFlowLayout(spacing: DS.Space.xs) {
                     DSMetric(value: L10n.text("\(currentEntry.frameCount) 張影像"), symbol: "photo.stack")
                     if let points = currentEntry.pointCount {
                         DSMetric(value: L10n.text("\(points.formatted()) 個點"), symbol: "circle.grid.3x3.fill")

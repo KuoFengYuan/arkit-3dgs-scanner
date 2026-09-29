@@ -44,7 +44,7 @@
   - app memory against the training plan;
   - whether switching to another app pauses the run or lets it continue.
 
-  Tap the grabber, or swipe the card down, to shrink it to one row (ring, stage, time left, Pause or Resume); tap the row or swipe up to expand it. The finished model's card shrinks the same way, and the app remembers the choice.
+  The chevron button in the card's corner shrinks it to one row (ring, stage, time left, Pause or Resume), and the chevron in the row, or a tap on the row, expands it. The finished model's card shrinks the same way, and the app remembers the choice.
 - **Saving the model:** when the iterations are done, the card shows a bar with the save's step and percentage (see [saving progress](#saving-progress)). Stay in the app until it finishes. If you switch apps without background time, the save waits and starts over when you return, instead of failing the run.
 - **Leaving the screen:** the run keeps training while you use the rest of the app, for example History or another scan's detail. The home screen's **Scan history** card shows *Training 3DGS · n%* (or *paused*), and the scan's **Train 3DGS** card opens the live view again.
 - **In the background (iOS 26+):** when a run starts or resumes, the app asks iOS for a continued-processing task (`BGContinuedProcessingTask`) that requires the GPU. If iOS grants it, switching apps keeps training, without live previews, and iOS shows the progress in a system notice where the user can also stop it. This needs:

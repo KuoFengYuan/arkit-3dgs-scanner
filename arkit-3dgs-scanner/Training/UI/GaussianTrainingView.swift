@@ -2,6 +2,22 @@
 // Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). On-device 3DGS training; see LICENSE and NOTICE.
 import SwiftUI
 
+/// Hugs its content's height up to `maxHeight`, where taller content (a scroll view) scrolls.
+/// A `frame(maxHeight:)` would instead grow to the limit whenever more room is offered.
+private struct CappedHeight: Layout {
+    var maxHeight: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let content = subviews.first else { return .zero }
+        let natural = content.sizeThatFits(ProposedViewSize(width: proposal.width, height: nil))
+        return CGSize(width: proposal.width ?? natural.width, height: min(natural.height, maxHeight))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(bounds.size))
+    }
+}
+
 /// The single on-device 3DGS experience of a saved scan, opened from History and right after
 /// a capture. Setup → live training (interactive preview of the current model, metrics and
 /// controls) → the saved model's interactive viewer. Interrupted runs resume from a checkpoint.
@@ -51,6 +67,9 @@ struct GaussianTrainingView: View {
     @State private var showGestureHint = true
     /// The bottom card over a live or saved model shrinks to one row to show more of the model.
     @AppStorage("training.panelCollapsed") private var panelCollapsed = false
+    /// Progress rings grow with the text size so their percentage stays readable.
+    @ScaledMetric(relativeTo: .footnote) private var ringScale: CGFloat = 1
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     private var workspace: TrainingWorkspace { TrainingWorkspace(scan: scan) }
     private var displayedFrame: CGImage? { isActive ? center.frame : modelFrame }
@@ -78,12 +97,16 @@ struct GaussianTrainingView: View {
     }
 
     var body: some View {
-        ZStack {
-            DS.Palette.canvas.ignoresSafeArea()
-            surface.ignoresSafeArea()
+        // The reader's height is the space below the navigation bar, fixed by the screen: the
+        // bottom card's limit must not come from a view the card itself can make taller.
+        GeometryReader { geometry in
+            ZStack {
+                DS.Palette.canvas.ignoresSafeArea()
+                surface.ignoresSafeArea()
+            }
+            .safeAreaInset(edge: .top, spacing: 0) { topOverlay }
+            .safeAreaInset(edge: .bottom, spacing: 0) { bottomPanel(maxHeight: max(240, geometry.size.height - 96)) }
         }
-        .safeAreaInset(edge: .top, spacing: 0) { topOverlay }
-        .safeAreaInset(edge: .bottom, spacing: 0) { bottomPanel }
         .navigationTitle(L10n.text("3DGS 訓練"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(DS.Palette.canvas.opacity(0.85), for: .navigationBar)
@@ -269,22 +292,16 @@ struct GaussianTrainingView: View {
     private var collapsible: Bool { isActive || (showsModel && !enhancing) }
     private var collapsed: Bool { collapsible && panelCollapsed }
 
-    private var bottomPanel: some View {
-        VStack(spacing: DS.Space.s) {
-            if collapsible { panelHandle }
-            if isActive { if collapsed { collapsedActive } else { activeControls } }
-            else if showsModel && !enhancing { if collapsed { collapsedModel } else { modelActions } }
-            else { setupPanel }
+    /// Large text or a longer language can make the card taller than `maxHeight` (the space below
+    /// the navigation bar, less room for the top notices): it then scrolls inside instead of
+    /// running under the navigation bar.
+    private func bottomPanel(maxHeight: CGFloat) -> some View {
+        CappedHeight(maxHeight: maxHeight) {
+            ScrollView { panelContent }.scrollBounceBehavior(.basedOnSize)
         }
         .padding(.horizontal, DS.Space.m)
-        .padding(.top, collapsible ? DS.Space.xxs : DS.Space.m)
-        .padding(.bottom, collapsed ? DS.Space.s : DS.Space.m)
+        .padding(.vertical, collapsed ? DS.Space.s : DS.Space.m)
         .dsFloatingPanel(radius: DS.Radius.xl + 4)
-        // Swipe the card down to shrink it, up to bring it back (not on the setup card).
-        .gesture(DragGesture(minimumDistance: 16).onEnded { value in
-            guard abs(value.translation.height) > max(30, abs(value.translation.width)) else { return }
-            setPanelCollapsed(value.translation.height > 0)
-        }, including: collapsible ? .all : .subviews)
         .frame(maxWidth: DS.Size.panelMaxWidth)
         .padding(.horizontal, DS.Space.m)
         .padding(.bottom, DS.Space.xs)
@@ -294,21 +311,28 @@ struct GaussianTrainingView: View {
         .animation(DS.springy, value: snapshot.phase)
     }
 
+    @ViewBuilder
+    private var panelContent: some View {
+        VStack(spacing: DS.Space.s) {
+            if isActive { if collapsed { collapsedActive } else { activeControls } }
+            else if showsModel && !enhancing { if collapsed { collapsedModel } else { modelActions } }
+            else { setupPanel }
+        }
+    }
+
     private func setPanelCollapsed(_ value: Bool) {
         guard panelCollapsed != value else { return }
         withAnimation(DS.springy) { panelCollapsed = value }
     }
 
-    /// Grabber at the top of the card: tap or swipe to shrink or expand it.
-    private var panelHandle: some View {
+    /// Shrinks the card to one row, or brings it back: a plain button, since the card only has
+    /// these two states (a grabber would suggest dragging it to any height).
+    private var panelToggle: some View {
         Button { setPanelCollapsed(!panelCollapsed) } label: {
-            Capsule().fill(DS.Palette.textTertiary)
-                .frame(width: 36, height: 5)
-                .frame(maxWidth: .infinity, minHeight: 20)
-                .contentShape(Rectangle())
+            Label(panelCollapsed ? L10n.text("展開面板") : L10n.text("收合面板"),
+                  systemImage: panelCollapsed ? "chevron.up" : "chevron.down")
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(panelCollapsed ? L10n.text("展開面板") : L10n.text("收合面板"))
+        .buttonStyle(DSIconButtonStyle(size: 36))
         .accessibilityIdentifier("toggleTrainingPanel")
     }
 
@@ -323,7 +347,7 @@ struct GaussianTrainingView: View {
                 Image(systemName: "checkmark").font(.footnote.weight(.bold)).foregroundStyle(DS.Palette.success)
             } else {
                 Text(snapshot.phase == .preparing ? "…" : "\(TrainingPresentation.percent(snapshot))%")
-                    .font((size < 50 ? Font.caption2 : Font.footnote).weight(.bold).monospacedDigit())
+                    .font((size < 50 ? Font.caption : Font.footnote).weight(.bold).monospacedDigit())
             }
         }
         .accessibilityElement()
@@ -345,7 +369,8 @@ struct GaussianTrainingView: View {
                                 Text(line).font(.caption.monospacedDigit()).foregroundStyle(DS.Palette.textSecondary)
                             }
                         }
-                        .lineLimit(1)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
                         Spacer(minLength: 0)
                     }
                     .contentShape(Rectangle())
@@ -361,6 +386,7 @@ struct GaussianTrainingView: View {
                         .buttonStyle(DSIconButtonStyle(size: DS.Size.control))
                         .accessibilityIdentifier("pauseTraining")
                 }
+                panelToggle
             }
             if let saving = snapshot.saving, snapshot.phase == .finishing {
                 DSProgressBar(progress: saving.fraction, height: 4, tint: DS.Palette.success)
@@ -386,7 +412,8 @@ struct GaussianTrainingView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(TrainingPresentation.savingStep(saving))
                     .font(.subheadline).foregroundStyle(DS.Palette.textPrimary)
-                    .lineLimit(1)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: DS.Space.xs)
                 Text("\(TrainingPresentation.savingPercent(saving))%")
                     .font(.subheadline.weight(.semibold).monospacedDigit()).foregroundStyle(DS.Palette.success)
@@ -408,7 +435,9 @@ struct GaussianTrainingView: View {
                         Text(line).font(.subheadline).foregroundStyle(DS.Palette.textSecondary)
                     }
                 }
+                .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
+                panelToggle
             }
             if snapshot.phase == .finishing { savingProgress }
             Text(metricsLine)
@@ -506,13 +535,19 @@ struct GaussianTrainingView: View {
         return parts.map { $0.replacingOccurrences(of: " ", with: "\u{00A0}") }.joined(separator: "・")
     }
 
+    /// A ring of `size` points at the default text size, larger with larger text; its label
+    /// shrinks to fit inside ("100%" at any text size).
     private func progressRing<Label: View>(_ progress: Double, tint: Color, size: CGFloat = 54,
                                            @ViewBuilder label: () -> Label) -> some View {
-        ZStack {
-            DSProgressRing(progress: progress, lineWidth: size < 50 ? 4 : 5, tint: tint)
+        let side = (size * min(ringScale, 1.3)).rounded()
+        let line: CGFloat = size < 50 ? 4 : 5
+        return ZStack {
+            DSProgressRing(progress: progress, lineWidth: line, tint: tint)
             label().foregroundStyle(DS.Palette.textPrimary)
+                .lineLimit(1).minimumScaleFactor(0.5)
+                .padding(line + 3)
         }
-        .frame(width: size, height: size)
+        .frame(width: side, height: side)
     }
 
     /// The saved model: summary, then sharing in the same card layout as the scan's export.
@@ -530,6 +565,7 @@ struct GaussianTrainingView: View {
                     }
                 }
                 Spacer(minLength: 0)
+                panelToggle
             }
             .padding(.bottom, DS.Space.xxs)
             Button { withAnimation(DS.springy) { beginEnhancing() } } label: {
@@ -565,11 +601,13 @@ struct GaussianTrainingView: View {
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(L10n.text("3DGS 模型完成")).font(.subheadline.weight(.semibold)).foregroundStyle(DS.Palette.textPrimary)
+                            .lineLimit(2)
                         if let record {
                             Text(modelSummary(record)).font(.caption.monospacedDigit()).foregroundStyle(DS.Palette.textSecondary)
+                                .lineLimit(4)
                         }
                     }
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                 }
                 .contentShape(Rectangle())
@@ -583,6 +621,7 @@ struct GaussianTrainingView: View {
             .buttonStyle(DSIconButtonStyle(size: DS.Size.control, foreground: DS.Palette.info))
             .disabled(preparingArchive)
             .accessibilityIdentifier("exportGaussianModel")
+            panelToggle
         }
     }
 
@@ -627,22 +666,10 @@ struct GaussianTrainingView: View {
                     .buttonStyle(DSPrimaryButtonStyle())
                     .disabled(!supported || otherScanTraining)
                     .accessibilityIdentifier("resumeFromCheckpoint")
-                HStack {
-                    Button { confirmRestart = true } label: { Label(L10n.text("重新開始"), systemImage: "arrow.counterclockwise") }
-                        .buttonStyle(DSSecondaryButtonStyle())
-                        .confirmationDialog(L10n.text("重新訓練？"), isPresented: $confirmRestart, titleVisibility: .visible) {
-                            restartActions
-                        } message: { Text(L10n.text("新的模型完成後才會取代目前的模型。")) }
-                    Spacer()
-                    Button(role: .destructive) { confirmDiscard = true } label: { Label(L10n.text("刪除進度"), systemImage: "trash") }
-                        .buttonStyle(DSSecondaryButtonStyle(tint: DS.Palette.danger))
-                        .confirmationDialog(L10n.text("刪除訓練進度？"), isPresented: $confirmDiscard, titleVisibility: .visible) {
-                            Button(L10n.text("刪除進度"), role: .destructive) { discardProgress() }
-                            Button(L10n.text("取消"), role: .cancel) {}
-                        } message: {
-                            Text(hasModel ? L10n.text("只刪除這次未完成的訓練；已完成的 3DGS 模型會保留。")
-                                          : L10n.text("只刪除訓練進度；掃描的照片、深度與姿態不受影響。"))
-                        }
+                // Side by side when both fit, else one under the other (large text, English).
+                ViewThatFits(in: .horizontal) {
+                    HStack { restartButton(fill: false); Spacer(minLength: DS.Space.xs); discardButton(fill: false) }
+                    VStack(spacing: DS.Space.xs) { restartButton(fill: true); discardButton(fill: true) }
                 }
                 .disabled(!supported || otherScanTraining)
             } else {
@@ -658,6 +685,26 @@ struct GaussianTrainingView: View {
         }
         .onChange(of: preset) { _, _ in customIterations = nil; Task { await updateEstimate() } }
         .onChange(of: resolution) { _, _ in Task { await updateEstimate() } }
+    }
+
+    private func restartButton(fill: Bool) -> some View {
+        Button { confirmRestart = true } label: { Label(L10n.text("重新開始"), systemImage: "arrow.counterclockwise") }
+            .buttonStyle(DSSecondaryButtonStyle(fill: fill))
+            .confirmationDialog(L10n.text("重新訓練？"), isPresented: $confirmRestart, titleVisibility: .visible) {
+                restartActions
+            } message: { Text(L10n.text("新的模型完成後才會取代目前的模型。")) }
+    }
+
+    private func discardButton(fill: Bool) -> some View {
+        Button(role: .destructive) { confirmDiscard = true } label: { Label(L10n.text("刪除進度"), systemImage: "trash") }
+            .buttonStyle(DSSecondaryButtonStyle(fill: fill, tint: DS.Palette.danger))
+            .confirmationDialog(L10n.text("刪除訓練進度？"), isPresented: $confirmDiscard, titleVisibility: .visible) {
+                Button(L10n.text("刪除進度"), role: .destructive) { discardProgress() }
+                Button(L10n.text("取消"), role: .cancel) {}
+            } message: {
+                Text(hasModel ? L10n.text("只刪除這次未完成的訓練；已完成的 3DGS 模型會保留。")
+                              : L10n.text("只刪除訓練進度；掃描的照片、深度與姿態不受影響。"))
+            }
     }
 
     /// Quality cards, resolution, memory check, and the start button (new run or enhancement).
@@ -701,7 +748,7 @@ struct GaussianTrainingView: View {
             Text(iterationDetail(run: run, automatic: automatic)).font(.caption).foregroundStyle(DS.Palette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: DS.Space.xs) {
-                Text(TrainingSpeedHistory.estimatedSeconds(c).map { L10n.text("預估約 \(TrainingPresentation.approximate($0))，依這支手機上次訓練的速度") }
+                Text(TrainingSpeedHistory.estimatedSeconds(c).map { L10n.text("預估 \(TrainingPresentation.approximate($0))，依這支手機上次訓練的速度") }
                      ?? L10n.text("在這支手機完成一次訓練後，會依它的速度顯示預估時間"))
                     .font(.caption).foregroundStyle(DS.Palette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -750,24 +797,30 @@ struct GaussianTrainingView: View {
                     .foregroundStyle(selected ? DS.Palette.accent : DS.Palette.textSecondary)
                     .frame(width: 28)
                 VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(enhancing ? TrainingPresentation.enhanceTitle(value) : TrainingPresentation.title(value)).font(.subheadline.weight(.semibold))
-                            .foregroundStyle(DS.Palette.textPrimary)
-                        if value == .standard {
-                            Text(L10n.text("建議")).font(.caption2.weight(.bold))
-                                .padding(.horizontal, 6).padding(.vertical, 2)
-                                .foregroundStyle(DS.Palette.onAccent)
-                                .background(DS.Palette.accent, in: Capsule())
+                    let title = Text(enhancing ? TrainingPresentation.enhanceTitle(value) : TrainingPresentation.title(value))
+                        .font(.subheadline.weight(.semibold)).foregroundStyle(DS.Palette.textPrimary)
+                    if value == .standard {
+                        // The badge goes under the title when both do not fit on one line.
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 6) { title.lineLimit(1); recommendedBadge }
+                            VStack(alignment: .leading, spacing: 2) { title.fixedSize(horizontal: false, vertical: true); recommendedBadge }
                         }
+                    } else {
+                        title.fixedSize(horizontal: false, vertical: true)
                     }
                     Text(enhancing ? TrainingPresentation.enhanceDetail(config.runIterations) : TrainingPresentation.detail(value))
                         .font(.caption).foregroundStyle(DS.Palette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    if let estimate, stacksEstimates {
+                        Label(TrainingPresentation.approximate(estimate), systemImage: "clock")
+                            .font(.caption.monospacedDigit()).foregroundStyle(DS.Palette.textSecondary)
+                    }
                 }
                 Spacer(minLength: 0)
-                if let estimate {
+                if let estimate, !stacksEstimates {
                     Text(TrainingPresentation.approximate(estimate)).font(.caption.monospacedDigit())
                         .foregroundStyle(DS.Palette.textSecondary)
+                        .fixedSize()
                 }
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 20))
@@ -786,6 +839,18 @@ struct GaussianTrainingView: View {
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
         .accessibilityIdentifier("trainingPreset.\(value.rawValue)")
+    }
+
+    /// Large text: the quality cards' time goes under their detail, leaving the title the width.
+    private var stacksEstimates: Bool { typeSize >= .xLarge }
+
+    private var recommendedBadge: some View {
+        Text(L10n.text("建議")).font(.caption2.weight(.bold))
+            .lineLimit(1)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .foregroundStyle(DS.Palette.onAccent)
+            .background(DS.Palette.accent, in: Capsule())
+            .fixedSize()
     }
 
     /// Memory check and the two things the user should do while training.

@@ -122,6 +122,16 @@ struct ContentView: View {
                         .font(.subheadline)
                         .foregroundStyle(DS.Palette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    // The count sits under the text: beside it, it squeezed the title and detail
+                    // into narrow lines with large text or in English.
+                    if let scanCount, scanCount > 0 {
+                        Text(scanCount == 1 ? L10n.text("共 1 筆") : L10n.text("共 \(scanCount) 筆"))
+                            .font(.caption.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(DS.Palette.textSecondary)
+                            .padding(.horizontal, 8).padding(.vertical, 3)
+                            .background(DS.Palette.surfaceRaised, in: Capsule())
+                            .padding(.top, 2)
+                    }
                     // A run keeps going while the user is elsewhere in the app; show where it is.
                     if trainingCenter.isBusy {
                         Label(trainingCenter.snapshot.phase == .paused
@@ -135,13 +145,6 @@ struct ContentView: View {
                     }
                 }
                 Spacer(minLength: DS.Space.xs)
-                if let scanCount, scanCount > 0 {
-                    Text(L10n.text("共 \(scanCount) 筆"))
-                        .font(.caption.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(DS.Palette.textSecondary)
-                        .padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(DS.Palette.surfaceRaised, in: Capsule())
-                }
                 Image(systemName: "chevron.right")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(DS.Palette.textTertiary)

@@ -186,7 +186,10 @@ struct DSStatusPill: View {
     var symbol: String? = nil
     var tone: DS.Tone = .neutral
     var pulsing = false
+    /// Lines the text may take (nil: two, or four with large text).
+    var maxLines: Int? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var pulse = false
 
     var body: some View {
@@ -200,7 +203,9 @@ struct DSStatusPill: View {
                 Image(systemName: symbol).font(.footnote.weight(.semibold))
                     .foregroundStyle(tone == .neutral ? DS.Palette.textPrimary : tone.color)
             }
-            Text(text).font(.subheadline.weight(.semibold)).lineLimit(2)
+            // Two lines at the default size; more with large text, so notices are not cut off.
+            Text(text).font(.subheadline.weight(.semibold)).lineLimit(maxLines ?? (typeSize >= .xLarge ? 4 : 2))
+                .fixedSize(horizontal: false, vertical: true)
         }
         .hudText()
         .multilineTextAlignment(.center)
@@ -298,7 +303,8 @@ struct DSSegment<Value: Hashable>: Identifiable {
 }
 
 /// Floating glass segmented control with a sliding accent selection. `fillsWidth` gives every
-/// segment an equal share of the available width (labels shrink slightly instead of truncating).
+/// segment an equal share of the available width. A label that does not fit drops its icon,
+/// then wraps to two lines (large text, longer languages) instead of truncating.
 struct DSSegmentedPicker<Value: Hashable>: View {
     let segments: [DSSegment<Value>]
     @Binding var selection: Value
@@ -312,11 +318,14 @@ struct DSSegmentedPicker<Value: Hashable>: View {
                 Button {
                     withAnimation(DS.springy) { selection = segment.value }
                 } label: {
-                    Label(segment.title, systemImage: segment.symbol)
+                    ViewThatFits(in: .horizontal) {
+                        Label(segment.title, systemImage: segment.symbol).lineLimit(1)
+                        Text(segment.title).lineLimit(1)
+                        Text(segment.title).lineLimit(2).multilineTextAlignment(.center).minimumScaleFactor(0.8)
+                    }
                         .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
                         .padding(.horizontal, fillsWidth ? DS.Space.xs : 14)
+                        .padding(.vertical, 4)
                         .frame(maxWidth: fillsWidth ? .infinity : nil, minHeight: 36)
                         .foregroundStyle(selected ? DS.Palette.onAccent : DS.Palette.textPrimary)
                         .background {
@@ -352,10 +361,10 @@ struct DSActionCardLabel<Leading: View>: View {
             leading().frame(width: 40, height: 40)
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(DS.Palette.textPrimary)
-                    .lineLimit(1).minimumScaleFactor(0.85)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let subtitle {
                     Text(subtitle).font(.caption).foregroundStyle(DS.Palette.textSecondary)
-                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Spacer(minLength: 0)
