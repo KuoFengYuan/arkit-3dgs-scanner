@@ -6,6 +6,46 @@
 
 **A personal research project for noncommercial use. Commercial use is not permitted under the [PolyForm Noncommercial License 1.0.0](LICENSE).**
 
+## Training highlights
+
+> [!IMPORTANT]
+> **Optimised model training: 1.39× faster on iPhone 17 Pro and up to 1.45× faster on Mac (M1 Pro)** in the F21171 benchmark below. The three-scan quality comparison also shows **+1.65 to +2.48 dB PSNR** over this project's initial MRNF-based trainer.
+
+### Training speed: before and after
+
+F21171, fixed **10,000 iterations**, 960 px, PPISP on, 600,000 Gaussian cap, 715 training photos and the same 143 held-out photos. The training method and settings are the same before and after this speed optimisation.
+
+| Device | Before | After | Speed-up |
+| --- | --- | --- | --- |
+| Mac, M1 Pro (two runs each) | 374.2 / 386.7 s | **261.7 / 277.6 s** | **1.37–1.45×** |
+| iPhone 17 Pro (both runs at `serious` thermal state) | 769.4 s | **553.1 s** | **1.39×** |
+
+The Mac speed-up uses the mean of the two before runs; Xcode builds ran during the second after run. On the phone, the improvement is 1.19× against a separate before run that started cooler (658.0 s). The phone used an iOS 27.0 Release benchmark build that calls the trainer directly, without live previews. Other iPhones, High quality, full-resolution training and the normal training screen were not measured. See the [complete speed benchmark](docs/ON_DEVICE_3DGS.md#faster-training-steps-on-a-large-scan).
+
+### PSNR: accumulated quality improvements
+
+Scans captured with iPhone 17 Pro and evaluated on the Mac; **held-out photos, with test-time pose alignment; higher is better**. The MRNF base is this project's initial Swift/Metal implementation. The current results include accuracy improvements and longer presets, which use some of the saved time for more iterations.
+
+| Scan | Initial MRNF base | With accuracy improvements, before speed work | Current trainer | Gain over initial base |
+| --- | --- | --- | --- | --- |
+| FBDA13 | 27.56 dB | 29.13 dB | **30.04 dB** | **+2.48 dB** |
+| 7F2187 | 24.25 dB | 25.97 dB | **26.66 dB** | **+2.41 dB** |
+| 9F8040 | 27.45 dB | 28.31 dB | **29.10 dB** | **+1.65 dB** |
+
+These gains combine the training changes over time; they are not the effect of the latest speed optimisation alone. See [the method and comparison](docs/ON_DEVICE_3DGS.md#method) and [speed and longer presets](docs/ON_DEVICE_3DGS.md#speed-and-longer-presets).
+
+### PSNR: latest speed optimisation at the same workload
+
+The fixed 10,000-iteration F21171 benchmark above checks quality separately from speed. Mac values are means of two runs per version; phone values are one run per version at the same thermal state.
+
+| Device / metric | Before | After | Change |
+| --- | --- | --- | --- |
+| Mac: aligned held-out PSNR | 23.861 dB | **23.859 dB** | −0.002 dB |
+| Mac: colour-aligned PSNR at 1,920 px | 25.329 dB | **25.354 dB** | +0.025 dB |
+| iPhone 17 Pro: aligned held-out PSNR | 23.946 dB | **23.907 dB** | −0.039 dB |
+
+PSNR differences are within the baseline's measured rerun spread of up to 0.10 dB on the Mac. Colour alignment removes overall brightness and colour differences before scoring. The Mac's empty-pixel share rose by 0.4 percentage points on average; with two runs each, that difference is unresolved. [Full quality results and measurement protocol](docs/ON_DEVICE_3DGS.md#faster-training-steps-on-a-large-scan).
+
 <a href="docs/media/demo.mp4"><img src="docs/media/demo.gif" width="320" alt="One scan from capture to a trained 3DGS model: scanning, fusion, training, and the finished model"></a>
 
 *A 20-second loop at 8× speed. [Watch the 1-minute video](docs/media/demo.mp4) (2.7× speed): scan a desk, refine the data, and train a 3DGS model on the iPhone.*
@@ -56,7 +96,7 @@ open arkit-3dgs-scanner/arkit-3dgs-scanner.xcodeproj
 - **Finish early** at any time, then **Enhance model** later to keep training it.
 - **Share:** a `scan_…-3dgs.zip` with `gaussians.sog`, which SuperSplat, PlayCanvas, and LichtFeld Studio open directly.
 
-Training speed, memory use, and heat on an iPhone have not been measured yet; Mac and Simulator results are not a substitute. See [on-device 3DGS training](docs/ON_DEVICE_3DGS.md) for usage, the method, measured results, and file formats.
+Training speed, memory use and thermal state have been measured on iPhone 17 Pro in the benchmark above; other devices and the training screen with live previews still need measurement. Mac and Simulator results do not establish iPhone performance. See [on-device 3DGS training](docs/ON_DEVICE_3DGS.md) for usage, the method, measured results, and file formats.
 
 ## Development
 
