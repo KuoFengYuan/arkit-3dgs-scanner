@@ -1,7 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 """COLMAP sparse model 讀寫（cameras / images / points3D，bin 與 txt 雙格式）。
 
-二進位格式與 COLMAP scripts/python/read_write_model.py 完全一致，
-Inria 3DGS 的 dataset_readers.py 直接可讀。
+二進位與文字格式依 COLMAP 文件的定義（與 COLMAP scripts/python/read_write_model.py
+讀寫的格式相同），Inria 3DGS 的 dataset_readers.py 直接可讀。文字檔的 "#" 標頭行照
+COLMAP 自己寫出的標頭，以便相容工具辨識；讀寫程式碼為本專案自行撰寫。
 images 的姿態為 world-to-camera（OpenCV 相機慣例）、四元數順序 (qw, qx, qy, qz)。
 """
 

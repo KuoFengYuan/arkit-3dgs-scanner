@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 // Camera-only tracking + bundle adjustment on a rendered, textured room corner.
 //
 // swiftc -O -module-cache-path /tmp/fable-swift-cache \

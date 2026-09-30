@@ -14,6 +14,13 @@ Any redistribution or derivative work, including commercial use, must keep this
 NOTICE file and credit Kuo Feng-Yuan (KuoFengYuan) as the original author
 (Apache License 2.0, section 4).
 
+The copyright covers the source code, the documentation and the demo recording
+in docs/media, all the author's own work; every source file carries an
+SPDX-License-Identifier: Apache-2.0 header. The app icon was made with an AI
+image generator at the author's direction. Copyright may not protect such
+images in every jurisdiction; to the extent the author holds rights in it, it
+is licensed on the same terms.
+
 The 3D Gaussian Splatting trainer is an independent Swift and Metal
 implementation of published methods. It contains no source code from the
 original 3D Gaussian Splatting (Inria/MPII) or Mip-Splatting implementations,
@@ -33,5 +40,42 @@ which are licensed for non-commercial use only, nor from LichtFeld Studio
   (https://developer.playcanvas.com/user-manual/gaussian-splatting/formats/sog/);
   the WebP encoder, ZIP handling and k-means are this project's own code
 
+The COLMAP export follows the COLMAP file formats as documented by COLMAP
+(https://colmap.github.io/format.html); its readers and writers are this
+project's own code and include no code from COLMAP.
+
+The app uses only Apple's system frameworks. The Python tools need packages
+installed separately (tools/requirements.txt), each under its own licence; none
+is included in this repository. Apple, iPhone, ARKit and Metal are trademarks of
+Apple Inc.; other names belong to their owners and are used only to describe
+compatibility.
+
 Third-party patents may cover some of these methods. This notice is not legal
 advice; check before commercial use.
+
+---
+
+繁體中文摘要
+
+ARKit 3DGS Scanner，Copyright 2026 Kuo Feng-Yuan（KuoFengYuan），以 Apache
+License 2.0 授權（見 LICENSE）。本專案為個人研究專案，並非任何雇主或機構的產品，
+未經其背書，也不代表其立場；依現狀提供，不附任何擔保。
+
+任何再散布或衍生作品（包含商用）都必須保留本 NOTICE 檔，並註明原作者為
+Kuo Feng-Yuan（KuoFengYuan）（Apache License 2.0 第 4 條）。
+
+版權涵蓋原始碼、文件與 docs/media 中的示範錄影，均為作者本人的作品；每個原始碼檔
+都有 SPDX-License-Identifier: Apache-2.0 檔頭。App 圖示由作者指示 AI 影像生成
+工具製作；這類影像在部分法域可能不受著作權保護，在作者享有權利的範圍內以相同條款
+授權。
+
+3DGS 訓練器是依公開方法以 Swift 與 Metal 獨立實作，不含原版 3D Gaussian
+Splatting（Inria／MPII）與 Mip-Splatting 的程式碼（兩者僅限非商用），也不含
+LichtFeld Studio（GPL-3.0）的程式碼；所參考的論文與專案列於上方英文段落。COLMAP
+匯出依 COLMAP 文件定義的格式，SOG 模型檔依 PlayCanvas 文件定義的格式，兩者的
+程式碼都未包含在內。
+
+App 只使用 Apple 的系統框架；Python 工具所需的套件需另外安裝，各自依其授權，本
+repo 未包含。Apple、iPhone、ARKit 與 Metal 是 Apple Inc. 的商標；其他名稱屬於
+各自的所有者，僅用於說明相容性。部分方法可能涉及第三方專利；本聲明不構成法律意見，
+商用前請自行確認。

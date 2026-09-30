@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 import ARKit
 
 /// 新掃描才能載入世界地圖；續掃沿用 session 的座標系與錨點。

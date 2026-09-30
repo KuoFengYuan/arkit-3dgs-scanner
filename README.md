@@ -67,16 +67,23 @@ python3 tools/check_project.py
 bash tools/test_localization.sh
 ```
 
-## License
+## Copyright and license
 
-Copyright 2026 Kuo Feng-Yuan ([KuoFengYuan](https://github.com/KuoFengYuan)). Licensed under the [Apache License 2.0](LICENSE).
+Copyright © 2026 Kuo Feng-Yuan ([KuoFengYuan](https://github.com/KuoFengYuan)). Licensed under the [Apache License 2.0](LICENSE); all rights not granted by that licence are reserved.
 
 **This is a personal research project.** It is not a product of, and is not endorsed by, any employer or organisation, and it does not represent their views. It is provided as is, without warranty.
 
 - **Commercial use is allowed**, including the on-device 3DGS trainer, and so are modification and redistribution.
 - **Credit the author.** Any copy or derivative work must keep [LICENSE](LICENSE) and [NOTICE](NOTICE) and credit Kuo Feng-Yuan (KuoFengYuan) as the original author.
+- **What the copyright covers:** the source code, the documentation and the demo recording in `docs/media`, all the author's own work. Every source file starts with an `SPDX-License-Identifier: Apache-2.0` header.
+- **App icon:** made with an AI image generator at the author's direction. Copyright may not protect such images in every jurisdiction; to the extent the author holds rights in it, it is licensed on the same terms.
 - The 3DGS trainer is an independent Swift and Metal implementation. It contains no code from the original 3D Gaussian Splatting (Inria/MPII) or Mip-Splatting releases, which allow only non-commercial use, and no code from LichtFeld Studio (GPL-3.0). [NOTICE](NOTICE) lists the papers and projects it follows.
+- **File formats:** the COLMAP export and the SOG model file follow the formats as COLMAP and PlayCanvas document them. No code from either project is included; the readers and writers are this project's own.
+- **Third-party software:** the app uses only Apple's system frameworks. The Python tools need packages installed separately (`tools/requirements.txt`), each under its own licence; none is included in this repository.
+- **Trademarks:** Apple, iPhone, ARKit and Metal are trademarks of Apple Inc. Other product and project names belong to their owners and are used only to describe compatibility; no endorsement is implied.
 - Third-party patents may still cover some of the methods. This is not legal advice; check before commercial use.
+
+The sources were compared with the reference implementations; see [provenance](docs/ON_DEVICE_3DGS.md#provenance-and-licences).
 
 ## Documentation
 

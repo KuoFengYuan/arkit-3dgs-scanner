@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  BlurFilter.swift
 //  fable — 掃描結束後的模糊幀複核（全域、可回頭看的第二道關）

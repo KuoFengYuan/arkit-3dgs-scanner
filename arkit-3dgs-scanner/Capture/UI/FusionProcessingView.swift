@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 import SwiftUI
 
 /// Pipeline phases are set by work completion, never by the decorative animation.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 """ARKit ↔ OpenCV/COLMAP ↔ Nerfstudio 座標系轉換核心。
 
 慣例整理
@@ -90,19 +92,28 @@ def flip_world_up_points(points: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def rotmat2qvec(R: np.ndarray) -> np.ndarray:
-    """旋轉矩陣 → 四元數 (w,x,y,z)。與 COLMAP read_write_model.py 相同的特徵向量法。"""
-    Rxx, Ryx, Rzx, Rxy, Ryy, Rzy, Rxz, Ryz, Rzz = R.flat
-    K = np.array([
-        [Rxx - Ryy - Rzz, 0, 0, 0],
-        [Ryx + Rxy, Ryy - Rxx - Rzz, 0, 0],
-        [Rzx + Rxz, Rzy + Ryz, Rzz - Rxx - Ryy, 0],
-        [Ryz - Rzy, Rzx - Rxz, Rxy - Ryx, Rxx + Ryy + Rzz],
-    ]) / 3.0
-    eigvals, eigvecs = np.linalg.eigh(K)
-    qvec = eigvecs[[3, 0, 1, 2], np.argmax(eigvals)]
-    if qvec[0] < 0:
-        qvec *= -1
-    return qvec
+    """旋轉矩陣 → 單位四元數 (w,x,y,z)，w ≥ 0。
+
+    Shepperd 法：trace 與三個對角元素中最大者決定用平方根求哪一個分量，
+    其餘分量由非對角元素相除而得，分母不會接近 0。輸入須為（近似）正交矩陣。
+    """
+    m = np.asarray(R, dtype=float)
+    trace = m[0, 0] + m[1, 1] + m[2, 2]
+    k = int(np.argmax([trace, m[0, 0], m[1, 1], m[2, 2]]))
+    if k == 0:
+        s = 2.0 * np.sqrt(1.0 + trace)
+        q = [0.25 * s, (m[2, 1] - m[1, 2]) / s, (m[0, 2] - m[2, 0]) / s, (m[1, 0] - m[0, 1]) / s]
+    elif k == 1:
+        s = 2.0 * np.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2])
+        q = [(m[2, 1] - m[1, 2]) / s, 0.25 * s, (m[0, 1] + m[1, 0]) / s, (m[0, 2] + m[2, 0]) / s]
+    elif k == 2:
+        s = 2.0 * np.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2])
+        q = [(m[0, 2] - m[2, 0]) / s, (m[0, 1] + m[1, 0]) / s, 0.25 * s, (m[1, 2] + m[2, 1]) / s]
+    else:
+        s = 2.0 * np.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1])
+        q = [(m[1, 0] - m[0, 1]) / s, (m[0, 2] + m[2, 0]) / s, (m[1, 2] + m[2, 1]) / s, 0.25 * s]
+    qvec = np.array(q) / np.linalg.norm(q)
+    return -qvec if qvec[0] < 0 else qvec
 
 
 def qvec2rotmat(qvec: np.ndarray) -> np.ndarray:

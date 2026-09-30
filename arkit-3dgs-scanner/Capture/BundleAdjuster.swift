@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  BundleAdjuster.swift
 //  fable — 以 ARKit 位姿為初值的局部 BA（重投影誤差，非幾何對齊）

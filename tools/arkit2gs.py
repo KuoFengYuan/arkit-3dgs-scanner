@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 """ARKit 掃描資料 → Nerfstudio / COLMAP(Inria 3DGS) 訓練資料集。
 
 輸入：fable App 匯出的掃描資料夾（或解壓後的 .zip）

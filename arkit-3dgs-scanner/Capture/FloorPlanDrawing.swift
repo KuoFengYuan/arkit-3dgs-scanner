@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  FloorPlanDrawing.swift
 //  fable — 平面圖的「製圖層」：把 RoomPlan 參數轉成建築平面圖的畫法

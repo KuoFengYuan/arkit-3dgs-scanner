@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  HUDOverlay.swift
 //  fable — 掃描 HUD：狀態、單一提示插槽、工具列、快門與檢視面板

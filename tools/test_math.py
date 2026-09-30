@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 """座標轉換數學的自動驗證。任何一項失敗都代表輸出資料集會壞掉 —— 改動 geometry.py 後必跑。
 
     python test_math.py
@@ -49,6 +51,13 @@ def t_quaternion_roundtrip():
         R = random_rotation()
         R2 = G.qvec2rotmat(G.rotmat2qvec(R))
         assert np.allclose(R, R2, atol=1e-9), f"四元數往返誤差過大\n{R}\n{R2}"
+    # 繞各軸 180° 與接近 180°（trace ≈ -1）：走到 Shepperd 法的每個分支，w 仍 ≥ 0。
+    for axis in np.eye(3):
+        for angle in (np.pi, np.pi - 1e-6, 2.0, 0.0):
+            q = np.concatenate([[np.cos(angle / 2)], np.sin(angle / 2) * axis])
+            R = G.qvec2rotmat(q)
+            q2 = G.rotmat2qvec(R)
+            assert q2[0] >= 0 and np.allclose(G.qvec2rotmat(q2), R, atol=1e-9), f"軸 {axis} 角度 {angle}: {q2}"
 
 
 def t_gl_cv_projection_equivalence():

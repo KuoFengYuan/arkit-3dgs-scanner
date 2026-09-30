@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  test_voxel_shard.swift
 //  fable — 分片 voxel 融合格的離線驗證（不需要 iPhone）

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  FloorPlanView.swift
 //  fable — review 階段的平面圖預覽（匯出前先看，不要盲匯）

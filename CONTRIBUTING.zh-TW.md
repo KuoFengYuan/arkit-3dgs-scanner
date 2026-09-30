@@ -57,7 +57,12 @@ python3 -m venv .venv
 
 ## 授權
 
-貢獻的內容一律採用本專案的 [Apache License 2.0](LICENSE)。請保留 [NOTICE](NOTICE)，新增的 3DGS 原始碼檔也請加上相同的 `SPDX-License-Identifier` 檔頭。
+貢獻的內容一律採用本專案的 [Apache License 2.0](LICENSE)。請保留 [NOTICE](NOTICE)。
+
+- **檔頭：** 每個原始碼檔（Swift、Metal、Python、shell）開頭都要有 `SPDX-License-Identifier: Apache-2.0` 與版權行；有 shebang 的放在 shebang 之後。
+- **不複製程式碼：** 依論文或格式文件自行撰寫。GPL 或非商用授權的程式碼（例如 LichtFeld Studio、原版 3D Gaussian Splatting）一律不得放入，連單一函式也不行。
+- **寬鬆授權的第三方程式碼：** 若必須放入，要連同其版權與授權文字一起保留，並列在 NOTICE。
+- **素材：** 在 PR 中說明圖片與影片的來源，包含 AI 生成的素材。
 
 ## PR 與合併
 

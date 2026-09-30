@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 import SwiftUI
 
 /// 拍攝關鍵影格與對應的修正後相機位置同步顯示；並非原始連續錄影。

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 // Regression: successful writes, failed writes, closed writers and atomic archive retries.
 // swiftc arkit-3dgs-scanner/Capture/Localization.swift arkit-3dgs-scanner/Capture/TrainingFrameSelector.swift -module-cache-path /tmp/fable-swift-cache arkit-3dgs-scanner/Capture/Models.swift \
 //   arkit-3dgs-scanner/Capture/BlurFilter.swift arkit-3dgs-scanner/Capture/FrameWriter.swift \

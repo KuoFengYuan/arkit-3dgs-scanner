@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 // Pose-guided revisit matching and revisit tracks for the joint bundle adjustment, on a
 // rendered two-pass scan of a textured wall with exact depth. Run by tools/test_metric_loop.sh.
 import Foundation

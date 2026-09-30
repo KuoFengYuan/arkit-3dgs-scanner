@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  render_floorplan.swift
 //  fable — 在 macOS 上直接跑製圖層，產出 SVG 以檢視畫法（不需要 iPhone）

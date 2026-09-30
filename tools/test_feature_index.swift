@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  test_feature_index.swift
 //  fable — 特徵匹配空間索引的離線驗證（不需要 iPhone）

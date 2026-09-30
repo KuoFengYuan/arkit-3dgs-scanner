@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  ply_to_floorplan.swift
 //  fable — 從既有的 points.ply 重新產生 2D 平面圖（svg / dxf / json）

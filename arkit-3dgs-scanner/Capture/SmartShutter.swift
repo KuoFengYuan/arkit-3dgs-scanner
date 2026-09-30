@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  SmartShutter.swift
 //  fable — 基於「位移距離 + 視角旋轉差」的自動抓幀決策
