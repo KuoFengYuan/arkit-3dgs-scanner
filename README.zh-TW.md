@@ -171,6 +171,4 @@ Copyright © 2026 Kuo Feng-Yuan（[KuoFengYuan](https://github.com/KuoFengYuan)�
 - **商標**：Apple、iPhone、ARKit 與 Metal 是 Apple Inc. 的商標。其他產品與專案名稱屬於各自的所有者，僅用於說明相容性，不代表任何背書。
 - 部分方法仍可能涉及第三方專利；本授權未授予第三方專利的權利。
 
-**先前發布內容：** 截至 commit `d5d8e31` 以 Apache 2.0 發布的內容，仍保有原授權的權利，包含商業使用；本次變更不撤回已授予的權利。詳見[授權範圍與歷史](docs/LICENSING.zh-TW.md)及[歷史 Apache 2.0 條款](licenses/Apache-2.0.txt)。
-
 原始碼已與參考實作比對過，見[來源與授權](docs/ON_DEVICE_3DGS.zh-TW.md#來源與授權)。
