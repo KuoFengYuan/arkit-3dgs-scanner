@@ -171,6 +171,4 @@ Copyright © 2026 Kuo Feng-Yuan ([KuoFengYuan](https://github.com/KuoFengYuan)).
 - **Trademarks:** Apple, iPhone, ARKit and Metal are trademarks of Apple Inc. Other product and project names belong to their owners and are used only to describe compatibility; no endorsement is implied.
 - Third-party patents may still cover some of the methods. This licence does not grant rights to third-party patents.
 
-**Earlier releases:** material published under Apache 2.0 through commit `d5d8e31` keeps its original permissions, including commercial use. This change does not revoke those grants. See [licensing scope and history](docs/LICENSING.md) and the [historical Apache 2.0 text](licenses/Apache-2.0.txt).
-
 The sources were compared with the reference implementations; see [provenance](docs/ON_DEVICE_3DGS.md#provenance-and-licences).
