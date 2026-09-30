@@ -9,42 +9,23 @@
 ## Training highlights
 
 > [!IMPORTANT]
-> **Optimised model training: 1.39× faster on iPhone 17 Pro and up to 1.45× faster on Mac (M1 Pro)** in the F21171 benchmark below. The three-scan quality comparison also shows **+1.65 to +2.48 dB PSNR** over this project's initial MRNF-based trainer.
+> **Optimised model training: 1.39× faster on iPhone 17 Pro and up to 1.45× faster on Mac (M1 Pro).** Training time and PSNR at the same workload are compared together below.
 
-### Training speed: before and after
+**Dataset source:** F21171 is a room-and-bathroom scan captured by the project author. The table reports measured training results on the author's own scan.
 
-F21171, fixed **10,000 iterations**, 960 px, PPISP on, 600,000 Gaussian cap, 715 training photos and the same 143 held-out photos. The training method and settings are the same before and after this speed optimisation.
+F21171, fixed **10,000 iterations**, 960 px, PPISP on, 600,000 Gaussian cap, 715 training photos and the same 143 held-out photos. The training method and settings are the same before and after this speed optimisation. PSNR is scored on held-out photos after test-time pose alignment; higher is better.
 
-| Device | Before | After | Speed-up |
-| --- | --- | --- | --- |
-| Mac, M1 Pro (two runs each) | 374.2 / 386.7 s | **261.7 / 277.6 s** | **1.37–1.45×** |
-| iPhone 17 Pro (both runs at `serious` thermal state) | 769.4 s | **553.1 s** | **1.39×** |
-
-The Mac speed-up uses the mean of the two before runs; Xcode builds ran during the second after run. On the phone, the improvement is 1.19× against a separate before run that started cooler (658.0 s). The phone used an iOS 27.0 Release benchmark build that calls the trainer directly, without live previews. Other iPhones, High quality, full-resolution training and the normal training screen were not measured. See the [complete speed benchmark](docs/ON_DEVICE_3DGS.md#faster-training-steps-on-a-large-scan).
-
-### PSNR: accumulated quality improvements
-
-Scans captured with iPhone 17 Pro and evaluated on the Mac; **held-out photos, with test-time pose alignment; higher is better**. The MRNF base is this project's initial Swift/Metal implementation. The current results include accuracy improvements and longer presets, which use some of the saved time for more iterations.
-
-| Scan | Initial MRNF base | With accuracy improvements, before speed work | Current trainer | Gain over initial base |
+| Device / metric | Training time: before → after | Speed-up | PSNR: before → after | PSNR change |
 | --- | --- | --- | --- | --- |
-| FBDA13 | 27.56 dB | 29.13 dB | **30.04 dB** | **+2.48 dB** |
-| 7F2187 | 24.25 dB | 25.97 dB | **26.66 dB** | **+2.41 dB** |
-| 9F8040 | 27.45 dB | 28.31 dB | **29.10 dB** | **+1.65 dB** |
+| Mac, M1 Pro: aligned PSNR | 374.2 / 386.7 → **261.7 / 277.6 s** | **1.37–1.45×** | 23.861 → **23.859 dB** | −0.002 dB |
+| Mac, M1 Pro: colour-aligned PSNR at 1,920 px | Same Mac runs | Same speed-up | 25.329 → **25.354 dB** | +0.025 dB |
+| iPhone 17 Pro: aligned PSNR | 769.4 → **553.1 s** | **1.39×** | 23.946 → **23.907 dB** | −0.039 dB |
 
-These gains combine the training changes over time; they are not the effect of the latest speed optimisation alone. See [the method and comparison](docs/ON_DEVICE_3DGS.md#method) and [speed and longer presets](docs/ON_DEVICE_3DGS.md#speed-and-longer-presets).
+Mac PSNR values are means of two runs per version; speed-up uses the mean time before the change. Xcode builds ran during the second after run. The phone values are one run per version, both at `serious` thermal state. Against a separate before run that started cooler (658.0 s), the phone's improvement is 1.19×.
 
-### PSNR: latest speed optimisation at the same workload
+PSNR differences are within the baseline's measured rerun spread of up to 0.10 dB on the Mac. Colour alignment removes overall brightness and colour differences before scoring. The Mac's empty-pixel share rose by 0.4 percentage points on average; with two runs each, that difference is unresolved.
 
-The fixed 10,000-iteration F21171 benchmark above checks quality separately from speed. Mac values are means of two runs per version; phone values are one run per version at the same thermal state.
-
-| Device / metric | Before | After | Change |
-| --- | --- | --- | --- |
-| Mac: aligned held-out PSNR | 23.861 dB | **23.859 dB** | −0.002 dB |
-| Mac: colour-aligned PSNR at 1,920 px | 25.329 dB | **25.354 dB** | +0.025 dB |
-| iPhone 17 Pro: aligned held-out PSNR | 23.946 dB | **23.907 dB** | −0.039 dB |
-
-PSNR differences are within the baseline's measured rerun spread of up to 0.10 dB on the Mac. Colour alignment removes overall brightness and colour differences before scoring. The Mac's empty-pixel share rose by 0.4 percentage points on average; with two runs each, that difference is unresolved. [Full quality results and measurement protocol](docs/ON_DEVICE_3DGS.md#faster-training-steps-on-a-large-scan).
+The phone used an iOS 27.0 Release benchmark build that calls the trainer directly, without live previews. Other iPhones, High quality, full-resolution training and the normal training screen were not measured. [Full speed and quality results](docs/ON_DEVICE_3DGS.md#faster-training-steps-on-a-large-scan).
 
 <a href="docs/media/demo.mp4"><img src="docs/media/demo.gif" width="320" alt="One scan from capture to a trained 3DGS model: scanning, fusion, training, and the finished model"></a>
 
