@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 // Synthetic checks for the camera-only replay metrics (tools/camera_only_metrics.swift).
 // bash tools/test_camera_only_replay.sh

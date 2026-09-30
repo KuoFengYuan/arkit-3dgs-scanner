@@ -4,11 +4,13 @@
 
 **English** | [繁體中文](README.zh-TW.md)
 
+**A personal research project for noncommercial use. Commercial use is not permitted under the [PolyForm Noncommercial License 1.0.0](LICENSE).**
+
 <a href="docs/media/demo.mp4"><img src="docs/media/demo.gif" width="320" alt="One scan from capture to a trained 3DGS model: scanning, fusion, training, and the finished model"></a>
 
 *A 20-second loop at 8× speed. [Watch the 1-minute video](docs/media/demo.mp4) (2.7× speed): scan a desk, refine the data, and train a 3DGS model on the iPhone.*
 
-Capture photos, camera poses, and point clouds with ARKit, refine them on the phone, then train a 3DGS model on the iPhone GPU or export a COLMAP dataset for a desktop trainer. Nothing is uploaded.
+This project explores capturing and reconstructing 3D scenes on an iPhone. Capture photos, camera poses, and point clouds with ARKit, refine them on the phone, then train a 3DGS model on the iPhone GPU or export a COLMAP dataset for a desktop trainer. Capture, refinement, and on-device training run locally; the app does not upload scans.
 
 ## Features
 
@@ -69,19 +71,21 @@ bash tools/test_localization.sh
 
 ## Copyright and license
 
-Copyright © 2026 Kuo Feng-Yuan ([KuoFengYuan](https://github.com/KuoFengYuan)). Licensed under the [Apache License 2.0](LICENSE); all rights not granted by that licence are reserved.
+Copyright © 2026 Kuo Feng-Yuan ([KuoFengYuan](https://github.com/KuoFengYuan)). Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE); all rights not granted by that licence are reserved.
 
 **This is a personal research project.** It is not a product of, and is not endorsed by, any employer or organisation, and it does not represent their views. It is provided as is, without warranty.
 
-- **Commercial use is allowed**, including the on-device 3DGS trainer, and so are modification and redistribution.
-- **Credit the author.** Any copy or derivative work must keep [LICENSE](LICENSE) and [NOTICE](NOTICE) and credit Kuo Feng-Yuan (KuoFengYuan) as the original author.
-- **What the copyright covers:** the source code, the documentation and the demo recording in `docs/media`, all the author's own work. Every source file starts with an `SPDX-License-Identifier: Apache-2.0` header.
+- **Noncommercial use only under this licence**, including the on-device 3DGS trainer. Use, modification and redistribution are permitted for the purposes defined in [LICENSE](LICENSE), including noncommercial research and personal study. Commercial use is outside this grant.
+- **Credit the author.** Redistribution must provide the licence terms or their URL and the `Required Notice:` attribution in [NOTICE](NOTICE). Keeping [LICENSE](LICENSE) and [NOTICE](NOTICE) with copies and derivative works supplies both.
+- **What the copyright covers:** the source code, the documentation and the demo recording in `docs/media`, all the author's own work. Every source file starts with an `SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0` header.
 - **App icon:** made with an AI image generator at the author's direction. Copyright may not protect such images in every jurisdiction; to the extent the author holds rights in it, it is licensed on the same terms.
 - The 3DGS trainer is an independent Swift and Metal implementation. It contains no code from the original 3D Gaussian Splatting (Inria/MPII) or Mip-Splatting releases, which allow only non-commercial use, and no code from LichtFeld Studio (GPL-3.0). [NOTICE](NOTICE) lists the papers and projects it follows.
 - **File formats:** the COLMAP export and the SOG model file follow the formats as COLMAP and PlayCanvas document them. No code from either project is included; the readers and writers are this project's own.
 - **Third-party software:** the app uses only Apple's system frameworks. The Python tools need packages installed separately (`tools/requirements.txt`), each under its own licence; none is included in this repository.
 - **Trademarks:** Apple, iPhone, ARKit and Metal are trademarks of Apple Inc. Other product and project names belong to their owners and are used only to describe compatibility; no endorsement is implied.
-- Third-party patents may still cover some of the methods. This is not legal advice; check before commercial use.
+- Third-party patents may still cover some of the methods. This licence does not grant rights to third-party patents.
+
+**Earlier releases:** material published under Apache 2.0 through commit `d5d8e31` keeps its original permissions, including commercial use. This change does not revoke those grants. See [licensing scope and history](docs/LICENSING.md) and the [historical Apache 2.0 text](licenses/Apache-2.0.txt).
 
 The sources were compared with the reference implementations; see [provenance](docs/ON_DEVICE_3DGS.md#provenance-and-licences).
 

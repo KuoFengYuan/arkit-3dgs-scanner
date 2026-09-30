@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). On-device 3DGS training; see LICENSE and NOTICE.
 # On-device 3DGS training: kernel gradients, loss/PPISP gradients and end-to-end training tests.
 # Runs the app's Metal kernels on the Mac GPU (same source; not a substitute for iPhone runs).

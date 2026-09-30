@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). On-device 3DGS training; see LICENSE and NOTICE.
 // Optimiser and MRNF per-iteration kernels: dense Adam with MRNF's regularisers, statistic
 // folding and low-opacity position noise. Refinement (prune, split, decay) runs on the CPU

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 // Regression: eviction releases descriptors while preserving older BA observations.
 // swiftc -O -module-cache-path /tmp/fable-swift-cache \

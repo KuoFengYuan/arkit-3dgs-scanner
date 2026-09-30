@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 // Replays a saved LiDAR scan through the live preview grid and compares its view-coverage
 // heat map with the true angular span of the viewing directions. Reads the scan only.

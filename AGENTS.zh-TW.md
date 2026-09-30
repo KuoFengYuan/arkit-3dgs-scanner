@@ -21,6 +21,7 @@
 
 ## 語言與相容性
 
+- 專案自有原始碼、文件與媒體採用 PolyForm Noncommercial 1.0.0，本授權不允許商業用途。新的專案原始碼檔使用 `SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0`。保留第三方聲明，以及先前發布內容已授予的 Apache 2.0 權利；詳見[授權說明](docs/LICENSING.zh-TW.md)。
 - 文件英文優先（README.md、docs/NAME.md），完整繁中對照（README.zh-TW.md、docs/NAME.zh-TW.md），互相連結，同語言內連結對應版本。
 - App 預設繁中，首頁可選英文並保存。使用 L10n 與 en.lproj／zh-Hant.lproj 處理文字、動態訊息、無障礙、錯誤與進度；機器可讀識別碼不隨語言改變。
 - 本機專案、scheme、repo 名稱與 bundle ID 均為 arkit-3dgs-scanner。識別碼、程式碼與文件中不得出現公司或雇主名稱；本專案為個人研究專案。
