@@ -51,6 +51,7 @@ flowchart TB
 | `GaussianLoss.swift`、`PPISP.swift` | L1 + D-SSIM 損失與 MRNF 誤差圖；PPISP 色彩模型（參數在 CPU，逐像素運算在 GPU） |
 | `MRNFStrategy.swift` | 排程、學習率、場景範圍與密化（修剪、替換、生長、補洞種子） |
 | `TrainingDataset.swift` | 影格選擇、保留影像、種子點雲與 LiDAR 深度種子、相機、LiDAR 深度目標、串流解碼影像 |
+| `CovisibleSharpness.swift` | 每張照片相對於拍到同一表面的其他照片的實測清晰度（以 LiDAR 重投影比對），以及由此得到的實驗性訓練權重 |
 | `TrainingMemoryPlan.swift` | 有溢位檢查的記憶體配置與自動預算 |
 | `GaussianCheckpoint.swift` | 可續訓的 `checkpoint.gsck` 格式 |
 | `GaussianExport.swift` | 保存的模型檔（SOG，或 SOG 之前的 PLY）、PLY 寫入與讀取、中繼資料、`ppisp.json`、COLMAP 座標系轉換 |
@@ -130,7 +131,7 @@ stateDiagram-v2
 | 密化 | CPU | 在密化期間每 `refineEvery` 次迭代，由 `MRNFStrategy.refine` 直接修改共用緩衝區中的列（修剪、替換、在成長漸進的上限內生長、補洞種子、範圍，以及可選的重新分配或區域配額）。此時 GPU 閒置 |
 | 1. 投影 | GPU | 把上一次反向傳播併入統計並加上位置雜訊（`mrnf_fold`、`mrnf_noise`）。建立照片的邊緣圖（`edge_blur`、`edge_sobel_nms`）。投影每個高斯：EWA 共變異、SH 顏色、Mip 濾波、可選的拍攝運動，並逐列計算橢圓實際碰到的 tile 數（`project_forward`）。依深度排序（`iota_uint`、32 位元 radix）。計算 tile 數的前綴和（`gather_uint`、`scan_block`、`scan_add`）。記錄畫面佔比（`screen_share`） |
 | 讀回 | CPU | 交點數。超過容量時跳過這個視角並停止生長 |
-| 2. 前向 | GPU | 正規化邊緣圖（`scale_float`）。只為每個橢圓實際碰到的 tile 產生（tile, 高斯）配對（`emit_intersections`、`tileRowSpan`）。穩定的 16 位元 tile 排序（保留深度順序）。找出各 tile 的範圍（`tile_ranges`）。以 16 × 16 tile 由前往後混合，並輸出深度（`rasterize_forward`）。接著在同一個 command buffer 算損失：可選的 PPISP（`ppisp_forward`）、0.8 · L1 + 0.2 · D-SSIM（`ssim_forward`、`ssim_backward`）、梯度反向通過 PPISP（`ppisp_backward`），以及 MRNF 誤差圖。CPU 同時準備這個視角的 LiDAR 深度 |
+| 2. 前向 | GPU | 正規化邊緣圖（`scale_float`）。只為每個橢圓實際碰到的 tile 產生（tile, 高斯）配對（`emit_intersections`、`tileRowSpan`）。穩定的 16 位元 tile 排序（保留深度順序）。找出各 tile 的範圍（`tile_ranges`）。以 16 × 16 tile 由前往後混合，並輸出深度（`rasterize_forward`）。接著在同一個 command buffer 算損失：可選的 PPISP（`ppisp_forward`）、0.8 · L1 + 0.2 · D-SSIM（`ssim_forward`、`ssim_backward`，含實驗性的視角權重 w（預設 1；小於 1 時乘上損失，另加 (1 − w) · 0.8 · 視窗平均值的 L1））、梯度反向通過 PPISP（`ppisp_backward`），以及 MRNF 誤差圖。CPU 同時準備這個視角的 LiDAR 深度 |
 | 3. 反向傳播 | GPU | 以每段最多 2,048 個 tile、每段一個 command buffer，逐 tile 反向重播；第一段同時清除梯度。960 × 720 分 2 段，1,920 × 1,440 分 6 段（`rasterize_backward`，含 LiDAR 深度損失）。每個 SIMD 群組以 16 次 shuffle 加總 32 個像素對每個高斯的 13 個值（`simdSum16`），再以 device atomic 累加。接著從畫面空間算到 3D 參數與相機姿態的梯度（`project_backward`）；密化期間也在這裡累加這個視角的重新分配統計（`relocation_fold`），免得之後的預覽渲染先覆寫它的 tile 數 |
 | 4. Adam | GPU | 六組參數的 `adam_step`，含 MRNF 不透明度正則、密化期間的尺度模式與畫面佔比懲罰 |
 | 更新 | CPU | PPISP 梯度與 Adam（每張影像 9 個參數、每台相機 27 個）。姿態微調開始後，對這個視角的姿態修正做一次 Adam 更新 |
@@ -229,9 +230,10 @@ stateDiagram-v2
 | 工具 | 涵蓋內容 |
 | --- | --- |
 | `tools/test_gaussian_raster.swift` | 前向渲染對照雙精度 CPU 參考實作；以有限差分驗證參數與姿態梯度（Mip 濾波、拍攝運動、LiDAR 深度損失）；分段反向傳播與一次算完相同（20 項） |
-| `tools/test_gaussian_loss.swift` | 損失、影像與 PPISP 梯度（7 項） |
-| `tools/test_gaussian_training.swift` | 77 項端對端檢查：記憶體配置、種子上限與迭代次數、解析度分級、MRNF（含成長漸進、重新分配與區域配額）、SOG 檔（WebP、ZIP、寫入讀回）、匯出座標、收斂、加強模型、PPISP、姿態、拍攝運動、深度種子、補洞、檢查點（含第 1 版與離開 App 時存檔）、工作階段狀態機、檢視器、壓縮檔，以及 1,200 張影像的訓練。`GS_ONLY=session,enhancement` 可只跑部分測試 |
-| `tools/train_gaussians.swift` | 在 Mac GPU 上重跑真實掃描，每個實驗都有開關，例如 `--long-edge`、`--align-eval`、`--eval-full-res`、`--holdout-segment`、`--save-model`、`--enhance-from`、`--depth-loss`、`--per-frame` |
+| `tools/test_gaussian_loss.swift` | 損失、影像與 PPISP 梯度；視角權重與其低通項；區塊差異與區塊權重（10 項） |
+| `tools/test_gaussian_training.swift` | 79 項端對端檢查：記憶體配置、種子上限與迭代次數、解析度分級、MRNF（含成長漸進、重新分配與區域配額）、SOG 檔（WebP、ZIP、寫入讀回）、匯出座標、收斂、加強模型、PPISP、姿態、拍攝運動、深度種子、實測清晰度（模糊、亮度、噪訊、沒有鄰近照片）與其權重、補洞、檢查點（含第 1 版與離開 App 時存檔）、工作階段狀態機、檢視器、壓縮檔，以及 1,200 張影像的訓練。`GS_ONLY=session,enhancement` 可只跑部分測試 |
+| `tools/train_gaussians.swift` | 在 Mac GPU 上重跑真實掃描，每個實驗都有開關，例如 `--long-edge`、`--align-eval`、`--eval-full-res`、`--holdout-segment`、`--save-model`、`--enhance-from`、`--depth-loss`、`--per-frame`。`--view-metrics FILE` 以照片原解析度寫出每張保留影像的細節（邊緣 PSNR、GMSD、保留的帶通細節、空像素比例），`--dump-views DIR --dump-ids …` 輸出其渲染；`--sharpness-weights`、`--transient-mask`、`--pose-smoothing`、`--add-ids` 是大場景實驗（預設都關閉） |
+| `tools/measure_view_sharpness.swift` | 以 CSV 列出每張照片相對於選用照片與全部照片的實測清晰度，以及曝光、ISO 與運動估計（`SHARP_PAIRS=FILE` 另外寫出所有拍到同一表面的照片對） |
 
 Mac 上的結果無法代表 iPhone 的速度、記憶體或發熱，這些都需要實機測試。
 

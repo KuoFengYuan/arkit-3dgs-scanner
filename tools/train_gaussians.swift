@@ -17,9 +17,15 @@
 //   --write-holdout-ids FILE (the same held-out photos across runs).
 // --sog-roundtrip [--sog-palette K] [--sog-iterations N]: write the model as SOG, read it back
 //   and score the held-out views again (with --enhance-from DIR --iterations 0 for a saved model).
+// Detail at the photos' resolution (needs --align-eval): --view-metrics FILE (per-view CSV: PSNR,
+//   edge PSNR, GMSD, band-pass detail, empty share, colour-aligned PSNR), --dump-views DIR --dump-ids A,B.
+// Large-scene experiments (off unless given): --sharpness-weights S [--sharpness-floor F],
+//   --transient-mask, --pose-smoothing W, --add-ids FILE (train these photos too).
 import Foundation
 import Metal
 import simd
+import ImageIO
+import CoreGraphics
 
 @main struct TrainGaussians {
     static func main() throws {
@@ -45,6 +51,9 @@ import simd
         var saveModel: URL?, enhanceFrom: URL?
         var frameSelection = TrainingDataset.FrameSelection.stored, scaledSeedCells = true
         var holdOutIDs: Set<Int>?, writeHoldOutIDs: URL?
+        var viewMetrics: URL?, dumpViews: URL?, dumpIDs: Set<Int> = []
+        var extraIDs: Set<Int> = []
+        var sharpnessStrength: Float = 0, sharpnessFloor: Float = 0.25, transientMask = false, poseSmoothing = 0.0
         while !args.isEmpty {
             let a = args.removeFirst()
             switch a {
@@ -106,6 +115,18 @@ import simd
                 let text = try String(contentsOf: URL(fileURLWithPath: args.removeFirst()), encoding: .utf8)
                 holdOutIDs = Set(text.split(whereSeparator: { $0 == "," || $0.isNewline }).compactMap { Int($0.trimmingCharacters(in: .whitespaces)) })
             case "--write-holdout-ids": writeHoldOutIDs = URL(fileURLWithPath: args.removeFirst())
+            case "--transient-mask": transientMask = true
+            case "--add-ids":
+                // Experiment: also train these photos (e.g. dropped by the blur review), held out or not by the usual rule.
+                let text = try String(contentsOf: URL(fileURLWithPath: args.removeFirst()), encoding: .utf8)
+                extraIDs = Set(text.split(whereSeparator: { $0 == "," || $0.isNewline }).compactMap { Int($0.trimmingCharacters(in: .whitespaces)) })
+            case "--pose-smoothing": poseSmoothing = Double(args.removeFirst())!
+            case "--sharpness-weights": sharpnessStrength = Float(args.removeFirst())!
+            case "--no-sharpness-weights": sharpnessStrength = 0
+            case "--sharpness-floor": sharpnessFloor = Float(args.removeFirst())!
+            case "--view-metrics": viewMetrics = URL(fileURLWithPath: args.removeFirst())
+            case "--dump-views": dumpViews = URL(fileURLWithPath: args.removeFirst())
+            case "--dump-ids": dumpIDs = Set(args.removeFirst().split(separator: ",").compactMap { Int($0) })
             case "--exclude-ids": excludeIDs = Set(args.removeFirst().split(separator: ",").compactMap { Int($0) })
             case "--per-frame": perFrame = true
             case "--motion-blur": config.motionBlur = true
@@ -123,7 +144,8 @@ import simd
         let seedStart = Date()
         var dataset = try TrainingDataset.prepare(scan: scan, longEdge: config.longEdge, holdOutEvery: config.holdOutEvery,
                                                   maxPoints: config.seedBudget, depthSeedLimit: config.depthSeedLimit(cloudPoints:), holdOutSegment: holdOutSegment,
-                                                  frameSelection: frameSelection, holdOutIDs: holdOutIDs, scaledSeedCells: scaledSeedCells)
+                                                  frameSelection: frameSelection, holdOutIDs: holdOutIDs, scaledSeedCells: scaledSeedCells,
+                                                  extraTrainingIDs: extraIDs)
         let scale = scaledSeedCells ? TrainingFrameSelector.metricScale(workingDistance: dataset.workingDistance) : 1
         print(String(format: "seeds: %d points (depth seeds %@, seed budget %d, working distance %.2f m, seed cell %.1f mm) in %.1f s",
                      dataset.points.count, config.usesDepthSeeds ? "on" : "off", config.seedBudget, dataset.workingDistance ?? 0,
@@ -147,6 +169,20 @@ import simd
         let metal = try GaussianMetal(libraryURL: library)
         let trainer = try GaussianTrainer(configuration: config, dataset: dataset, plan: plan, metal: metal)
         if let poseLR { trainer.poseLearningRate = poseLR }
+        trainer.transientMasking = transientMask
+        trainer.poseSmoothing = poseSmoothing
+        if sharpnessStrength > 0 {
+            // Experiment: photos blurrier than other training photos of the same surface teach
+            // detail less, weight max(floor, e^(-strength · deficit)).
+            let started = Date()
+            let scores = CovisibleSharpness.scores(frames: dataset.frames, directory: dataset.directory, peers: Set(dataset.trainFrames),
+                                                   metricScale: TrainingFrameSelector.metricScale(workingDistance: dataset.workingDistance))
+            trainer.viewWeights = CovisibleSharpness.weights(scores, count: dataset.frames.count, strength: sharpnessStrength, floor: sharpnessFloor)
+            let w = dataset.trainFrames.map { trainer.viewWeights[$0] }.sorted()
+            if !w.isEmpty { print(String(format: "sharpness weights (strength %.2f, floor %.2f) in %.1f s: %d scored, weight p10 %.2f, median %.2f, mean %.2f",
+                         sharpnessStrength, sharpnessFloor, Date().timeIntervalSince(started), scores.count,
+                         w[w.count / 10], w[w.count / 2], w.reduce(0, +) / Float(w.count))) }
+        }
         trainer.seedJitter = seedJitter
         trainer.sparseAdam = sparseAdam
         trainer.replaceByError = replaceByError
@@ -208,6 +244,9 @@ import simd
                 print(String(format: "validation aligned at full resolution (%dx%d): PSNR %.3f SSIM %.4f over %d views",
                              f.intrinsics.width, f.intrinsics.height, full.psnr, full.ssim, full.count))
             }
+            if viewMetrics != nil || dumpViews != nil {
+                try reportViewMetrics(trainer, csv: viewMetrics, dump: dumpViews, dumpIDs: dumpIDs)
+            }
             if holdOutSegment > 0 { try reportHeldOutViews(trainer) }
             if config.captureMotion != nil {
                 let still = try trainer.evaluate(alignSteps: alignSteps, captureMotion: false)
@@ -217,6 +256,19 @@ import simd
         print(String(format: "done: %d iterations in %.1f s (%.1f ms/it), skipped %d, validation PSNR %.3f SSIM %.4f over %d views, peak footprint %d MB",
                      config.runIterations, seconds, seconds / Double(max(1, config.runIterations)) * 1000, skipped, eval.psnr, eval.ssim, eval.count, peak >> 20))
         if let regions = trainer.strategy.regions { printRegions(regions, trainer: trainer) }
+        if transientMask {
+            let share = trainer.transientMaskedShare
+            print(String(format: "transient masks: %.2f%% of blocks masked", Double(share.blocks) / Double(max(1, share.total)) * 100))
+            if let viewMetrics {
+                // The last mask of every training photo: id, block columns, masked block indices.
+                let columns = trainer.loss.blocks.columns
+                let lines = trainer.dataset.frames.indices.compactMap { i -> String? in
+                    guard let m = trainer.transientMasks[i] else { return nil }
+                    return ([trainer.dataset.frames[i].id, columns] + m.indices.filter { m[$0] == 0 }).map(String.init).joined(separator: ",")
+                }
+                try lines.joined(separator: "\n").write(to: viewMetrics.deletingLastPathComponent().appendingPathComponent("masks.csv"), atomically: true, encoding: .utf8)
+            }
+        }
         if config.ppisp {
             let s = trainer.ppisp.summary
             print(String(format: "PPISP: exposure %.2f..%.2f EV, corner vignetting %.3f", s.minEV, s.maxEV, s.cornerVignetting))
@@ -386,6 +438,35 @@ import simd
         }
     }
 
+    /// Local detail of each held-out view at the photos' own resolution, after the test-time
+    /// alignment of the last aligned evaluation (so 960 and 1,440 px models are scored alike).
+    /// Whole-image PSNR hides blur: a soft render of a large wall scores well. The CSV adds
+    /// PSNR on the photo's strongest edges, GMSD and the band-pass detail kept in textured
+    /// blocks (see `ViewDetail`). `dump` writes the renders of `dumpIDs` as PNG.
+    static func reportViewMetrics(_ trainer: GaussianTrainer, csv: URL?, dump: URL?, dumpIDs: Set<Int>) throws {
+        guard let f = trainer.dataset.frames.first else { return }
+        let scale = Double(f.intrinsics.width) / Double(trainer.dataset.width)
+        var rows = ["id,psnr,edge_psnr,gmsd,detail_ratio,textured_blocks,empty,color_psnr,color_edge_psnr"]
+        var sums = [Double](repeating: 0, count: 4), n = 0, colorSum = 0.0
+        if let dump { try FileManager.default.createDirectory(at: dump, withIntermediateDirectories: true) }
+        _ = try trainer.evaluate(scale: scale, aligned: true) { index, image, photo, w, h in
+            let id = trainer.dataset.frames[index].id
+            let d = ViewDetail.measure(image: image, photo: photo, width: w, height: h)
+            // Share of pixels the model leaves empty (final transmittance above 0.5).
+            let empty = Double((0..<(w * h)).filter { image[$0].w > 0.5 }.count) / Double(w * h)
+            rows.append(String(format: "%d,%.4f,%.4f,%.5f,%.4f,%d,%.4f,%.4f,%.4f", id, d.psnr, d.edgePSNR, d.gmsd, d.detailRatio, d.texturedBlocks, empty,
+                               d.alignedPSNR, d.alignedEdgePSNR))
+            sums[0] += d.psnr; sums[1] += d.edgePSNR; sums[2] += d.gmsd; sums[3] += log2(max(1e-6, d.detailRatio)); n += 1
+            colorSum += d.alignedPSNR
+            if let dump, dumpIDs.contains(id) { ViewDetail.writePNG(image, width: w, height: h, to: dump.appendingPathComponent("render_\(id).png")) }
+        }
+        guard n > 0 else { return }
+        print(String(format: "view detail at %dx%d over %d views: PSNR %.3f (colour-aligned %.3f), edge PSNR %.3f, GMSD %.4f, detail ratio %.3f",
+                     f.intrinsics.width, f.intrinsics.height, n, sums[0] / Double(n), colorSum / Double(n), sums[1] / Double(n), sums[2] / Double(n),
+                     pow(2, sums[3] / Double(n))))
+        if let csv { try rows.joined(separator: "\n").write(to: csv, atomically: true, encoding: .utf8) }
+    }
+
     /// Writes the model as SOG (reusing the gradient and intersection buffers, as the app
     /// does), reads it back into the trainer, and scores the held-out views again.
     static func reportSOGRoundTrip(_ trainer: GaussianTrainer, metal: GaussianMetal, alignSteps: Int, palette: Int?, iterations: Int) throws {
@@ -430,5 +511,128 @@ import simd
             rows.append((frames[i].id, psnr, angle))
         }
         for row in rows { print(String(format: "frame %d psnr %.3f neighbour-rotation %.3f", row.0, row.1, row.2)) }
+    }
+}
+
+/// Local detail of a render against its photo (luma for the gradient terms, RGB for PSNR).
+/// - `edgePSNR`: PSNR on the photo's strongest 10% of Sobel gradients (edges and texture).
+/// - `gmsd`: gradient magnitude similarity deviation (Xue et al., 2014; Prewitt, c = 0.0026),
+///   lower is better; computed at full resolution, without the usual 2× downsampling.
+/// - `alignedPSNR`, `alignedEdgePSNR`: the same after a per-channel gain and offset fitted to the
+///   photo (a global brightness or colour offset of the novel view is not lost detail).
+/// - `detailRatio`: in 32 × 32 blocks where the photo has texture, band-pass energy
+///   (3 × 3 minus 7 × 7 box blur) of the render over the photo's, geometric mean. Below 1 the
+///   render is softer than the photo; a noisy photo also lowers it, so compare runs, not scans.
+enum ViewDetail {
+    struct Result { var psnr, edgePSNR, gmsd, detailRatio: Double; var texturedBlocks: Int; var alignedPSNR = 0.0, alignedEdgePSNR = 0.0 }
+
+    static func measure(image: UnsafePointer<SIMD4<Float>>, photo: UnsafePointer<UInt8>, width w: Int, height h: Int) -> Result {
+        let n = w * h
+        var yr = [Float](repeating: 0, count: n), yg = [Float](repeating: 0, count: n)
+        var sq = [Float](repeating: 0, count: n)
+        for p in 0..<n {
+            let c = simd_clamp(SIMD3(image[p].x, image[p].y, image[p].z), SIMD3(repeating: 0), SIMD3(repeating: 1))
+            let g = SIMD3(Float(photo[4 * p]), Float(photo[4 * p + 1]), Float(photo[4 * p + 2])) / 255
+            let d = c - g
+            sq[p] = simd_dot(d, d)
+            yr[p] = simd_dot(c, SIMD3(0.299, 0.587, 0.114)); yg[p] = simd_dot(g, SIMD3(0.299, 0.587, 0.114))
+        }
+        let mse = sq.reduce(0.0) { $0 + Double($1) } / Double(n * 3)
+        // Colour-aligned error: a per-channel gain and offset fitted by least squares first, so a
+        // global brightness or colour offset of the novel-view ISP does not count as lost detail.
+        var alignedSq = [Float](repeating: 0, count: n)
+        for c in 0..<3 {
+            var sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0
+            for p in 0..<n {
+                let x = Double(min(1, max(0, image[p][c]))), y = Double(photo[4 * p + c]) / 255
+                sx += x; sy += y; sxx += x * x; sxy += x * y
+            }
+            let N = Double(n), den = N * sxx - sx * sx
+            let gain = den > 1e-9 ? (N * sxy - sx * sy) / den : 1, offset = (sy - gain * sx) / N
+            for p in 0..<n {
+                let x = Double(min(1, max(0, image[p][c]))), y = Double(photo[4 * p + c]) / 255
+                let d = Float(min(1, max(0, gain * x + offset)) - y)
+                alignedSq[p] += d * d
+            }
+        }
+        let alignedMSE = alignedSq.reduce(0.0) { $0 + Double($1) } / Double(n * 3)
+        // Gradients (Sobel for the edge mask, Prewitt for GMSD) on the interior.
+        var sobel = [Float](repeating: 0, count: n), gms = [Double]()
+        gms.reserveCapacity(n)
+        for y in 1..<(h - 1) {
+            for x in 1..<(w - 1) {
+                let i = y * w + x
+                func grad(_ v: [Float], _ k: Float) -> Float {
+                    let gx = (v[i - w + 1] + k * v[i + 1] + v[i + w + 1]) - (v[i - w - 1] + k * v[i - 1] + v[i + w - 1])
+                    let gy = (v[i + w - 1] + k * v[i + w] + v[i + w + 1]) - (v[i - w - 1] + k * v[i - w] + v[i - w + 1])
+                    return (gx * gx + gy * gy).squareRoot() / (2 + k)
+                }
+                sobel[i] = grad(yg, 2)
+                let mr = Double(grad(yr, 1)), mg = Double(grad(yg, 1)), c = 0.0026
+                gms.append((2 * mr * mg + c) / (mr * mr + mg * mg + c))
+            }
+        }
+        let meanGMS = gms.reduce(0, +) / Double(max(1, gms.count))
+        let gmsd = (gms.reduce(0) { $0 + ($1 - meanGMS) * ($1 - meanGMS) } / Double(max(1, gms.count))).squareRoot()
+        let sampled = Swift.stride(from: 0, to: n, by: 7).map { sobel[$0] }.sorted()
+        let edgeThreshold = sampled[sampled.count * 9 / 10]
+        var edgeSum = 0.0, alignedEdgeSum = 0.0, edgeCount = 0
+        for p in 0..<n where sobel[p] >= edgeThreshold && sobel[p] > 0 { edgeSum += Double(sq[p]); alignedEdgeSum += Double(alignedSq[p]); edgeCount += 1 }
+        let edgeMSE = edgeSum / Double(max(1, edgeCount) * 3), alignedEdgeMSE = alignedEdgeSum / Double(max(1, edgeCount) * 3)
+        // Band-pass energy per 32 × 32 block.
+        let br = bandPass(yr, w, h), bg = bandPass(yg, w, h)
+        var logs: [Double] = []
+        let block = 32
+        for by in Swift.stride(from: 4, to: h - block - 4, by: block) {
+            for bx in Swift.stride(from: 4, to: w - block - 4, by: block) {
+                var er = 0.0, eg = 0.0, grad = 0.0
+                for y in by..<(by + block) { for x in bx..<(bx + block) {
+                    let i = y * w + x
+                    er += Double(br[i] * br[i]); eg += Double(bg[i] * bg[i]); grad += Double(sobel[i])
+                } }
+                // Texture: mean gradient above 0.01 (a white wall's noise stays below it).
+                guard grad / Double(block * block) > 0.01, eg > 1e-9 else { continue }
+                logs.append(log2(max(er, 1e-12) / eg))
+            }
+        }
+        let detail = logs.isEmpty ? 0 : pow(2, logs.reduce(0, +) / Double(logs.count))
+        func psnr(_ m: Double) -> Double { m > 0 ? -10 * log10(m) : 99 }
+        return Result(psnr: psnr(mse), edgePSNR: psnr(edgeMSE), gmsd: gmsd, detailRatio: detail, texturedBlocks: logs.count,
+                      alignedPSNR: psnr(alignedMSE), alignedEdgePSNR: psnr(alignedEdgeMSE))
+    }
+
+    /// 3 × 3 minus 7 × 7 box blur (separable, clamped borders).
+    static func bandPass(_ v: [Float], _ w: Int, _ h: Int) -> [Float] {
+        func box(_ src: [Float], _ r: Int) -> [Float] {
+            var tmp = [Float](repeating: 0, count: src.count), out = tmp
+            let k = Float(2 * r + 1)
+            for y in 0..<h { for x in 0..<w {
+                var s: Float = 0
+                for d in -r...r { s += src[y * w + min(w - 1, max(0, x + d))] }
+                tmp[y * w + x] = s / k
+            } }
+            for y in 0..<h { for x in 0..<w {
+                var s: Float = 0
+                for d in -r...r { s += tmp[min(h - 1, max(0, y + d)) * w + x] }
+                out[y * w + x] = s / k
+            } }
+            return out
+        }
+        let a = box(v, 1), b = box(v, 3)
+        return zip(a, b).map { $0 - $1 }
+    }
+
+    static func writePNG(_ image: UnsafePointer<SIMD4<Float>>, width: Int, height: Int, to url: URL) {
+        var bytes = [UInt8](repeating: 255, count: width * height * 4)
+        for p in 0..<(width * height) {
+            for c in 0..<3 { bytes[4 * p + c] = UInt8((min(1, max(0, image[p][c])) * 255).rounded()) }
+        }
+        guard let provider = CGDataProvider(data: Data(bytes) as CFData),
+              let cg = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                               space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                               provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
+              let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else { return }
+        CGImageDestinationAddImage(dest, cg, nil)
+        CGImageDestinationFinalize(dest)
     }
 }

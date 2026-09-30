@@ -156,7 +156,10 @@ nonisolated struct PoseCorrection: Codable, Equatable, Sendable {
     var translationMeters: Double { simd_length(translation) }
 
     /// Adam step from dL/d[R'|t'] (row-major 3x4) of the corrected world-to-camera matrix.
-    mutating func update(poseGradient g: [Float], base w2c: simd_double4x4, learningRate lr: Double) {
+    /// `neighbours` (experiment) adds a prior of `neighbourWeight` × the anchor's toward the mean
+    /// correction of the photos next to this one in time (ARKit drift is smooth in time).
+    mutating func update(poseGradient g: [Float], base w2c: simd_double4x4, learningRate lr: Double,
+                         neighbours: (rotation: SIMD3<Double>, translation: SIMD3<Double>)? = nil, neighbourWeight: Double = 0) {
         let dR = simd_double3x3(rows: [SIMD3(Double(g[0]), Double(g[1]), Double(g[2])),
                                         SIMD3(Double(g[4]), Double(g[5]), Double(g[6])),
                                         SIMD3(Double(g[8]), Double(g[9]), Double(g[10]))])
@@ -176,6 +179,10 @@ nonisolated struct PoseCorrection: Codable, Equatable, Sendable {
         for k in 0..<3 {
             grad[k] += w * rotation[k] / (Self.rotationSigma * Self.rotationSigma)
             grad[3 + k] += w * translation[k] / (Self.translationSigma * Self.translationSigma)
+            if let n = neighbours, neighbourWeight > 0 {
+                grad[k] += w * neighbourWeight * (rotation[k] - n.rotation[k]) / (Self.rotationSigma * Self.rotationSigma)
+                grad[3 + k] += w * neighbourWeight * (translation[k] - n.translation[k]) / (Self.translationSigma * Self.translationSigma)
+            }
         }
         steps += 1
         let c1 = 1 - pow(0.9, Double(steps)), c2 = 1 - pow(0.999, Double(steps))
@@ -270,6 +277,29 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
     private(set) var holeSeedsAdded = 0
     /// LiDAR depth of the current view for the depth loss (allocated on first use, ~200 KB).
     private var lidarBuffer: MTLBuffer?
+    /// Experiment (all 1 = off): gradient weight of each view's photometric loss, from
+    /// `CovisibleSharpness.weights`. Below 1, the loss keeps (1 - weight) as an L1 on the window
+    /// means (GaussianLoss.metal).
+    var viewWeights: [Float]
+    /// Experiment (off): transient masking. Once `transientStart` of the run has passed, the
+    /// 16 × 16 blocks of a photo whose mean colour the model misses by far more than the photo's
+    /// other blocks (moving people, reflections of them) are left out of its gradients at the
+    /// photo's next visit. Block means, not pixel errors, so detail the model has not learnt yet
+    /// (right mean, missing texture) is not masked.
+    var transientMasking = false
+    static let transientStart = 0.5
+    /// A block is transient above max(`transientFloor`, `transientFactor` × the photo's median
+    /// block difference), next to another such block, where the render covers it, and when it
+    /// was already transient at the photo's previous visit (a region the model has not learnt
+    /// yet improves between visits; a moving person in one photo does not).
+    static let transientFloor: Float = 0.12, transientFactor: Float = 6
+    private(set) var transientMasks: [[UInt8]?] = []
+    private var transientCandidates: [[Bool]?] = []
+    /// Masked share of blocks over the masks built so far (reports).
+    private(set) var transientMaskedShare = (blocks: 0, total: 0)
+    /// Experiment (0 = off): weight of the temporal smoothness prior on pose corrections,
+    /// relative to the prior that anchors them to the ARKit pose (`PoseCorrection.update`).
+    var poseSmoothing = 0.0
 
     /// Adam moves a view only when it is sampled, so a view's total correction is bounded by
     /// about the rate × its updates. Scale the rate so that bound does not shrink for shorter
@@ -312,6 +342,9 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
         ppisp = PPISPModel(frames: dataset.frames.count, captureEV: dataset.frames.map(\.captureEV))
         poses = Array(repeating: PoseCorrection(), count: dataset.frames.count)
         edgeMedians = Array(repeating: nil, count: dataset.frames.count)
+        viewWeights = Array(repeating: 1, count: dataset.frames.count)
+        transientMasks = Array(repeating: nil, count: dataset.frames.count)
+        transientCandidates = Array(repeating: nil, count: dataset.frames.count)
         poseLearningRate = Self.poseLearningRate(iterations: configuration.iterations, trainFrames: dataset.trainFrames.count)
     }
 
@@ -568,6 +601,12 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
         let live = max(1, model.activeCount)
         let pixels = dataset.width * dataset.height
         profile["intersections", default: 0] += Double(intersections)
+        let masking = transientMasking && Double(t) >= Self.transientStart * Double(configuration.iterations)
+        let mask = masking ? transientMasks[frame] : nil
+        if let mask {
+            let weights = loss.blockWeight.contents().bindMemory(to: Float.self, capacity: mask.count)
+            for i in mask.indices { weights[i] = Float(mask[i]) / 255 }
+        }
         do {
             // Render and loss in one command buffer; the LiDAR target is prepared on the CPU
             // meanwhile (the previous backward pass, its only reader, has finished).
@@ -575,10 +614,11 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
                 e.dispatch(scale, threads: pixels, [.buffer(edgeMap), .value(SIMD2<Float>(median > 0 ? 1 / median : 0, Float(pixels)))])
                 try raster.encodeRaster(e, camera: cam, count: count, intersections: intersections, target: target,
                                         background: .zero)
-                loss.encode(e, raw: target.image, target: targetImage, ppisp: uniforms)
+                loss.encode(e, raw: target.image, target: targetImage, ppisp: uniforms, weight: viewWeights[frame], mask: mask != nil)
             }
             let depthTarget = try lidarTarget(frame: frame, iteration: t)
             try wait(forward, "forward")
+            if masking { transientMasks[frame] = transientMask(frame) }
             for (band, rows) in GaussianRasterizer.backwardBands(tilesX: cam.tilesX, tilesY: cam.tilesY).enumerated() {
                 try run("backward") { e in
                     if band == 0 { raster.encodeBackwardClear(e, count: count) }
@@ -644,11 +684,51 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
             let base = GaussianCamera.worldToCamera(arkitRowMajorC2W: dataset.frames[frame].transform)
             let progress = Double(t - poseStart) / Double(max(1, configuration.iterations - poseStart))
             poses[frame].update(poseGradient: raster.poseGradient, base: base,
-                                learningRate: poseLearningRate * pow(0.1, progress))
+                                learningRate: poseLearningRate * pow(0.1, progress),
+                                neighbours: poseSmoothing > 0 ? neighbourCorrection(frame) : nil, neighbourWeight: poseSmoothing)
         }
         return TrainingStepReport(iteration: t, frame: frame, loss: values.loss, psnr: values.psnr,
                                   gaussians: model.activeCount, seconds: Date().timeIntervalSince(started),
                                   refine: refineReport)
+    }
+
+    /// Mean correction of the nearest training photos before and after `frame` in capture order
+    /// (frames are sorted by ID; held-out photos are skipped).
+    private func neighbourCorrection(_ frame: Int) -> (rotation: SIMD3<Double>, translation: SIMD3<Double>)? {
+        let frames = dataset.frames
+        var picked: [PoseCorrection] = []
+        for direction in [-1, 1] {
+            var j = frame + direction
+            while j >= 0 && j < frames.count && frames[j].isValidation { j += direction }
+            guard j >= 0, j < frames.count else { continue }
+            picked.append(poses[j])
+        }
+        guard !picked.isEmpty else { return nil }
+        let n = Double(picked.count)
+        return (picked.map(\.rotation).reduce(.zero, +) / n, picked.map(\.translation).reduce(.zero, +) / n)
+    }
+
+    /// Block weights (255 = keep, 0 = transient) from the block differences of the forward pass.
+    private func transientMask(_ frame: Int) -> [UInt8] {
+        let (columns, rows) = loss.blocks
+        let n = columns * rows
+        // -1: a block the render barely covers (no evidence).
+        let d = Array(UnsafeBufferPointer(start: loss.blockDifference.contents().bindMemory(to: Float.self, capacity: n), count: n))
+        let threshold = max(Self.transientFloor, Self.transientFactor * (MRNFStrategy.median(d.filter { $0 >= 0 }) ?? 0))
+        var candidate = [Bool](repeating: false, count: n)
+        for r in 0..<rows {
+            for c in 0..<columns where d[r * columns + c] > threshold {
+                let neighbours = [(c - 1, r), (c + 1, r), (c, r - 1), (c, r + 1)]
+                candidate[r * columns + c] = neighbours.contains { $0.0 >= 0 && $0.1 >= 0 && $0.0 < columns && $0.1 < rows && d[$0.1 * columns + $0.0] > threshold }
+            }
+        }
+        let previous = transientCandidates[frame]
+        transientCandidates[frame] = candidate
+        var mask = [UInt8](repeating: 255, count: n)
+        var masked = 0
+        if let previous { for i in 0..<n where candidate[i] && previous[i] { mask[i] = 0; masked += 1 } }
+        transientMaskedShare = (transientMaskedShare.blocks + masked, transientMaskedShare.total + n)
+        return mask
     }
 
     // MARK: LiDAR depth loss
@@ -816,7 +896,10 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
     /// the photos' own resolution (detail the training resolution cannot hold). `aligned` reuses
     /// the test-time pose corrections of the last aligned evaluation. Larger renders get their
     /// own rasterizer (evaluation tools only; the training plan does not include it).
-    func evaluate(scale: Double, frames: [Int]? = nil, aligned: Bool = false) throws -> (psnr: Double, ssim: Double, count: Int) {
+    /// `inspect` receives each view's final image (after the ISP, as scored) and the photo.
+    func evaluate(scale: Double, frames: [Int]? = nil, aligned: Bool = false,
+                  inspect: ((_ index: Int, _ image: UnsafePointer<SIMD4<Float>>, _ photo: UnsafePointer<UInt8>, _ width: Int, _ height: Int) -> Void)? = nil)
+        throws -> (psnr: Double, ssim: Double, count: Int) {
         let list = frames ?? dataset.validationFrames
         guard !list.isEmpty, model.count > 0 else { return (0, 0, 0) }
         let w = max(16, Int((Double(dataset.width) * scale).rounded())), h = max(16, Int((Double(dataset.height) * scale).rounded()))
@@ -849,6 +932,10 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
             try run { e in
                 try raster.encodeRaster(e, camera: cam, count: model.count, intersections: m, target: scaledTarget, background: .zero)
                 scaledLoss.encode(e, raw: scaledTarget.image, target: photo, ppisp: isp)
+            }
+            if let inspect {
+                let image = (isp != nil ? scaledLoss.isp : scaledTarget.image).contents().bindMemory(to: SIMD4<Float>.self, capacity: w * h)
+                inspect(index, image, photo.contents().bindMemory(to: UInt8.self, capacity: w * h * 4), w, h)
             }
             let v = scaledLoss.values
             psnr += v.psnr; ssim += v.ssim; n += 1

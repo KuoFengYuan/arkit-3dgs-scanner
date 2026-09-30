@@ -6,15 +6,17 @@ import Metal
 /// Mirrors `LossParams` in GaussianLoss.metal.
 nonisolated struct GaussianLossParams {
     var width: UInt32, height: UInt32, border: UInt32, decoupled: UInt32
-    var lambda: Float, invInterior: Float, unused0: Float = 0, unused1: Float = 0
+    var lambda: Float, invInterior: Float, weight: Float = 1, masked: Float = 0
 
-    init(width: Int, height: Int, lambda: Float, decoupled: Bool) {
+    init(width: Int, height: Int, lambda: Float, decoupled: Bool, weight: Float = 1, masked: Bool = false) {
         self.width = UInt32(width); self.height = UInt32(height)
         let border = width > 10 && height > 10 ? 5 : 0
         self.border = UInt32(border)
         self.decoupled = decoupled ? 1 : 0
         self.lambda = lambda
         invInterior = 1 / Float(max(1, (width - 2 * border) * (height - 2 * border)))
+        self.weight = weight
+        self.masked = masked ? 1 : 0
     }
 }
 
@@ -23,6 +25,10 @@ nonisolated final class GaussianLossEvaluator: @unchecked Sendable {
     static let lambda: Float = 0.2
     let width: Int, height: Int
     let isp, ispGrad, rawGrad, errorMap, sums, ppispGrad: MTLBuffer
+    /// Per 16 × 16 block: the mean-colour difference of the last `encode` (L1 over RGB of the
+    /// block means, isp against target), and the gradient weights `encode(mask: true)` applies.
+    let blockDifference, blockWeight: MTLBuffer
+    var blocks: (columns: Int, rows: Int) { groups }
     private let partials: MTLBuffer
     private let ppispForward, ppispBackward, forward, backward, clear: MTLComputePipelineState
 
@@ -39,6 +45,11 @@ nonisolated final class GaussianLossEvaluator: @unchecked Sendable {
         partials = try metal.buffer(p * 12 * 4, label: "ssim-partials")
         sums = try metal.buffer(16, label: "loss-sums")
         ppispGrad = try metal.buffer(40 * 4, label: "ppisp-grad")
+        let blockCount = ((width + 15) / 16) * ((height + 15) / 16)
+        blockDifference = try metal.buffer(blockCount * 4, label: "loss-block-difference")
+        blockWeight = try metal.buffer(blockCount * 4, label: "loss-block-weight")
+        let ones = blockWeight.contents().bindMemory(to: Float.self, capacity: blockCount)
+        for i in 0..<blockCount { ones[i] = 1 }
         ppispForward = try metal.pipeline("ppisp_forward")
         ppispBackward = try metal.pipeline("ppisp_backward")
         forward = try metal.pipeline("ssim_forward")
@@ -56,20 +67,23 @@ nonisolated final class GaussianLossEvaluator: @unchecked Sendable {
 
     /// Forward and backward of the loss. Afterwards `rawGrad` holds dL/d(raw render),
     /// `errorMap` the unnormalised error, `sums` [L1 sum, SSIM sum, error sum, squared error sum]
-    /// and `ppispGrad` the 37 ISP gradient slots (when `ppisp` is enabled).
-    func encode(_ encoder: MTLComputeCommandEncoder, raw: MTLBuffer, target: MTLBuffer, ppisp: PPISPUniforms?) {
+    /// and `ppispGrad` the 37 ISP gradient slots (when `ppisp` is enabled). `weight` scales the
+    /// gradients only (a training view's weight); the loss values stay unweighted. `mask` also
+    /// scales each block's gradients by `blockWeight`.
+    func encode(_ encoder: MTLComputeCommandEncoder, raw: MTLBuffer, target: MTLBuffer, ppisp: PPISPUniforms?,
+                weight: Float = 1, mask: Bool = false) {
         let usesISP = ppisp != nil
-        let params = GaussianLossParams(width: width, height: height, lambda: Self.lambda, decoupled: usesISP)
+        let params = GaussianLossParams(width: width, height: height, lambda: Self.lambda, decoupled: usesISP, weight: weight, masked: mask)
         encoder.dispatch(clear, threads: 4, [.buffer(sums), .u32(4)])
         encoder.dispatch(clear, threads: 40, [.buffer(ppispGrad), .u32(40)])
         let ispImage: MTLBuffer
         if let ppisp { encodeISP(encoder, raw: raw, output: isp, ppisp: ppisp); ispImage = isp } else { ispImage = raw }
         encoder.dispatch(forward, groups: groups, size: (16, 16),
                          [.buffer(ispImage), .buffer(raw), .buffer(target), .buffer(partials), .buffer(errorMap),
-                          .buffer(sums), .value(params)])
+                          .buffer(sums), .value(params), .buffer(blockDifference)])
         encoder.dispatch(backward, groups: groups, size: (16, 16),
                          [.buffer(partials), .buffer(ispImage), .buffer(raw), .buffer(target), .buffer(ispGrad),
-                          .buffer(rawGrad), .value(params)])
+                          .buffer(rawGrad), .value(params), .buffer(blockWeight)])
         if let ppisp {
             encoder.dispatch(ppispBackward, groups: groups, size: (16, 16),
                              [.buffer(raw), .buffer(ispGrad), .buffer(rawGrad), .buffer(ppispGrad), .value(ppisp),

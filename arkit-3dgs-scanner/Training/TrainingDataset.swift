@@ -141,7 +141,8 @@ nonisolated struct TrainingDataset: Sendable {
     static func prepare(scan directory: URL, longEdge: Int, holdOutEvery: Int, maxPoints: Int,
                         depthSeedLimit: (_ cloudPoints: Int) -> Int = { _ in 0 }, holdOutSegment: Double = 0,
                         frameSelection: FrameSelection = .stored, holdOutIDs: Set<Int>? = nil, scaledSeedCells: Bool = true,
-                        selectionCache: URL? = nil, isCancelled: () -> Bool = { false }) throws -> TrainingDataset {
+                        selectionCache: URL? = nil, extraTrainingIDs: Set<Int> = [],
+                        isCancelled: () -> Bool = { false }) throws -> TrainingDataset {
         let (saved, _) = ScanLibrary.savedRecords(in: directory)
         let workingDistance = TrainingFrameSelector.workingDistance(records: saved, directory: directory)
         let (records, usable, selected) = selection(scan: directory, saved: saved, workingDistance: workingDistance,
@@ -149,7 +150,10 @@ nonisolated struct TrainingDataset: Sendable {
         let valid = records.filter(isValid)
         guard !usable.isEmpty else { throw PreparationError.noFrames }
         let scale = TrainingFrameSelector.metricScale(workingDistance: workingDistance)
-        let trained = usable.filter { selected.contains($0.id) }
+        // `extraTrainingIDs` (experiments): valid photos trained whatever their verdict or selection.
+        let selectedUsable = usable.filter { selected.contains($0.id) }
+        let selectedIDs = Set(selectedUsable.map(\.id))
+        let trained = selectedUsable + valid.filter { extraTrainingIDs.contains($0.id) && !selectedIDs.contains($0.id) }
         let chosen = (holdOutIDs.map { held in valid.filter { held.contains($0.id) } + trained.filter { !held.contains($0.id) } }
                       ?? trained).sorted { $0.id < $1.id }
         guard !chosen.isEmpty else { throw PreparationError.noFrames }
@@ -189,7 +193,7 @@ nonisolated struct TrainingDataset: Sendable {
         }
         let seedLimit = depthSeedLimit(points.count)
         if seedLimit > 0 {
-            let training = Set(frames.filter { !$0.isValidation }.map(\.id))
+            let training = Set(frames.filter { !$0.isValidation }.map(\.id)).subtracting(extraTrainingIDs)
             let cells = scaledSeedCells ? scale : 1
             points += depthSeeds(records: chosen.filter { training.contains($0.id) }, directory: directory, existing: points,
                                  limit: seedLimit, voxel: 0.04 * cells, lowConfidenceRange: 4 * cells, isCancelled: isCancelled)
