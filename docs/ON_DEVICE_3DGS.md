@@ -453,15 +453,59 @@ Measured on the Mac with Standard settings. Every run used the same 30 held-out 
   - With `footprint` sampled every 20 s, the GPU buffers stayed at 824 MB, and only CPU allocations (15–51 MB of large blocks) varied.
   - The cause of the larger rises has not been found yet. On a phone, a memory warning freezes growth and critical pressure pauses the run with a checkpoint ([memory safety](#memory-safety)).
 
+## Large scenes with blurred photos
+
+F21171 is a room and a bathroom: 1,234 photos in 169 s, 858 of them selected, a 53.7 m camera path and a median LiDAR depth of 1.2 m. The trained model had the right shape and coverage but soft detail. The exposure lock was off, so PPISP was on, as the app chooses for a 7.8 EV exposure range, in every run below. Exposure normalisation itself was not changed.
+
+**Protocol.** On the Mac (M1 Pro) with `tools/train_gaussians.swift`:
+- 26,000 iterations (the app's Standard count for 858 photos), 960 px, a 600,000 cap and a 2,600 MB plan;
+- the same 143 held-out photos in every run: 101 every 8th photo, and 42 in six stretches of seven, about 15 cm from the nearest training camera;
+- scored after 30 steps of test-time alignment at the photos' 1,920 × 1,440 (`--view-metrics`), as paired per-view differences with bootstrap 95% intervals;
+- besides PSNR: PSNR on the photo's strongest 10% of edges, GMSD, the band-pass detail kept in textured blocks, and colour-aligned PSNR, which first fits a gain and offset per channel so that a global brightness or colour offset does not count as lost detail;
+- "sharp photos": the 69 held-out views whose photo has no clearly sharper photo of its surface. A blurred held-out photo penalises a sharper render, so whole-image PSNR alone misreads a change in detail.
+
+Two runs with the same settings differ by up to 0.06 dB. With another seed, a group of views can differ by 0.3 dB, so each change was compared with a baseline of its own seed.
+
+| Change (against the baseline) | PSNR, all views | Colour-aligned, all views | Colour-aligned edges, sharp photos | Kept |
+| --- | --- | --- | --- | --- |
+| The same settings again | −0.06 | −0.03 | −0.01 | — |
+| 52,000 iterations | −1.14 | **+0.64** (+0.51 to +0.78) | **+0.50** (+0.37 to +0.64) | not the default yet |
+| Sharpness weights, seeds 1 and 2 | +0.06 / +0.11 | −0.04 / −0.01 | +0.04 / +0.06 | off |
+| Stronger sharpness weights | +0.10 | −0.03 | +0.07 | off |
+| Sharpness weights on the whole loss | +0.02 | — | — | off |
+| Photos the blur review dropped, trained anyway | +0.08 (−0.08 to +0.24) | — | — | off |
+| Pose smoothing between neighbouring photos | +0.00 | — | — | off |
+| Transient masks, two versions | −0.49 / −0.11 | — | — | off |
+
+All values are in dB. The first five rows re-score the saved (SOG) models, all compressed alike; the others are the runs' own uncompressed scores, without colour alignment. The baseline scored 24.05 dB, and 26.84 dB colour-aligned. Runs at 1,440 px and with a 1,000,000 cap were stopped before they finished and are not reported.
+
+- **Training is too short (confirmed).** Twice the iterations gave +0.64 dB colour-aligned, +0.44 dB on edges over all views, 1.5× the band-pass detail, SSIM 0.850 → 0.856, and 8.2% instead of 13.4% empty held-out pixels.
+  - Whole-image PSNR still fell by 1.1 dB, even at a quarter of the resolution. The renders are about 8% darker than the photos (a fitted gain of 1.08, against 1.03 at 26,000 iterations).
+  - The longer the run, the further the per-photo PPISP exposures and the model's own colours drift together. Novel views and the saved model use neutral exposure, so they show the drift.
+  - The High preset already gives this scan 52,000 iterations. The drift needs a fix (anchoring the neutral appearance) before the Standard count rises; that is not part of this change. The iPhone time of a longer run is not measured.
+- **The photos are blurred (confirmed).**
+  - 732 of the 858 training photos were exposed for 1/60 s while the camera turned at a median 23°/s. The worst-scored photos are visibly motion-blurred.
+  - 97 selected photos are clearly softer than another photo of the same surface, and 100 of the photos the blur review dropped are as sharp as theirs ([dataset refinement](ON_DEVICE_TRAINING_QUALITY.md#large-scenes-motion-estimate-and-measured-sharpness)).
+  - Capture settings are analysed in [device operation](DEVICE_NOTES.md#shutter-iso-and-detail-on-a-large-scan).
+- **Measured sharpness (`CovisibleSharpness`).**
+  - Each photo becomes a 640 × 480 grey thumbnail with 40 × 30 cells of 16 px. A cell's energy is its gradient energy minus the noise variance (Immerkær's estimate), divided by its mean brightness squared, because auto exposure shows one surface brighter or darker in different photos. Clipped and nearly black cells are skipped.
+  - Each cell with LiDAR depth is carried into up to 16 photos within 1 m and 30° that look the same way. It counts when that photo's LiDAR agrees within 5% (no occlusion) and the surface's image scale within 1.25×, with the scale difference taken out. A pair needs 15% of the photo's usable cells.
+  - A photo's deficit is the 80th percentile over its peers of ln(peer energy / own energy), and 0 when no photo of its surface is sharper or it has no peers.
+  - It reads one thumbnail and one depth map at a time and keeps 9.6 KB per photo; 858 photos took 11 s on the Mac. `tools/measure_view_sharpness.swift` writes it for every photo of a scan.
+- **Sharpness weights (experiment, off).** A photo with deficit d trains with weight w = max(0.25, e^−d): its L1 + D-SSIM gradient is scaled by w, and (1 − w) of it goes to an L1 between the window means of render and photo, so a blurred photo still teaches colour and coverage. Scaling the whole loss (the first version) thinned regions seen mostly by blurred photos: empty held-out pixels rose to 16.4%, and views whose own photo is blurred lost 0.28 dB. With the low-pass term, whole-image PSNR rises by 0.06–0.11 dB on both seeds, but colour alignment removes it. Only the edges of sharp photos keep +0.04 to +0.07 dB, the edges of blurred photos lose up to 0.13 dB, and GMSD is slightly worse. `--sharpness-weights 1 --sharpness-floor 0.25` runs it.
+- **Transient masks (experiment, off).** 16 × 16 blocks whose mean colour the model misses by far more than the rest of the photo are left out of that photo's gradients at its next visit. The first version (4× the photo's median, at least 0.08) masked the moving person in a TV reflection, but also far walls the model had not learnt yet: 618 of 715 photos got masks, and they never learnt those walls (−0.49 dB). The second requires the render to cover the block, 6× and 0.12, and two visits in a row; it masked 0.45% of blocks and still lost 0.11 dB. `--transient-mask` runs the second version.
+- **Pose smoothing (experiment, off).** A prior pulls each pose correction towards the mean of the neighbouring photos' corrections, at 3× the weight of the anchor to the ARKit pose. The largest correction fell from 1.13° to 0.69°, with no change in PSNR (`--pose-smoothing 3`). The offline bundle adjustment and its photometric validation are unchanged.
+
 ## Validation
 
 Measured on the Mac GPU with the same Metal source:
 
 - **`tools/test_gaussian_raster.swift`:** forward against a double-precision reference, with parameter and pose gradients checked by finite differences. It covers the Mip filter on and off, with and without capture motion and the LiDAR depth loss, and shows that the banded backward pass matches the single pass (20 checks).
-- **`tools/test_gaussian_loss.swift`:** loss, image and PPISP gradients.
-- **`tools/test_gaussian_training.swift`:** 77 end-to-end checks.
+- **`tools/test_gaussian_loss.swift`:** loss, image and PPISP gradients; a view weight with its low-pass term, block differences and block weights (10 checks).
+- **`tools/test_gaussian_training.swift`:** 79 end-to-end checks.
   - Memory-plan fitting and overflow checks; resolution tiers, the full-resolution plan, tile bands, and the held-out segment.
   - The seed budget, depth seeds spreading over a long capture, seed cells scaled at close range, and the automatic iteration count.
+  - Measured sharpness on a synthetic wall: a motion-blurred photo scores a deficit, while brightness, noise and a photo without peers do not; the weights keep their floor.
   - MRNF units, the growth ramp and its ceiling, relocation (evidence, rate, taper, no receivers), region quotas (allotment, shares, growth by quota, reclaiming only at the cap, checkpoint), PLY export frame, and convergence.
   - SOG: lossless WebP texels through ImageIO, stored ZIP archives against `unzip` and `zip`, palette and texture sizes, and a trained SH 3 model written and read back (positions within 0.04 mm, rotations 0.6°, rendering within 0.1 dB). The write's progress runs from 0 to 1 through its steps in order.
   - PPISP exposure recovery, pose refinement, and capture motion.

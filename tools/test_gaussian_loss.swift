@@ -59,11 +59,12 @@ enum CPU {
         return out
     }
 
-    /// Loss with decoupled SSIM (luminance on ISP output, contrast-structure on raw).
-    static func loss(raw: [SIMD3<Double>], gt: [SIMD3<Double>], W: Int, H: Int, model: PPISPModel?, frame: Int) -> Double {
+    /// Loss with decoupled SSIM (luminance on ISP output, contrast-structure on raw). A view
+    /// weight below 1 scales it and adds (1 - weight) of the L1 between the window means.
+    static func loss(raw: [SIMD3<Double>], gt: [SIMD3<Double>], W: Int, H: Int, model: PPISPModel?, frame: Int, weight: Double = 1) -> Double {
         let ispImg = model.map { m in raw.indices.map { isp(raw[$0], x: $0 % W, y: $0 / W, W: W, H: H, model: m, frame: frame) } } ?? raw
         let border = 5, lambda = 0.2
-        var l1 = 0.0, ssim = 0.0, n = 0.0
+        var l1 = 0.0, ssim = 0.0, n = 0.0, lowPass = 0.0
         for c in 0..<3 {
             let i = ispImg.map { $0[c] }, r = raw.map { $0[c] }, g = gt.map { $0[c] }
             let mi = blur(i, W: W, H: H), mr = blur(r, W: W, H: H), mg = blur(g, W: W, H: H)
@@ -73,10 +74,10 @@ enum CPU {
                 let p = y * W + x
                 let l = (2 * mi[p] * mg[p] + 1e-4) / (mi[p] * mi[p] + mg[p] * mg[p] + 1e-4)
                 let cs = (2 * (rg[p] - mr[p] * mg[p]) + 9e-4) / ((rr[p] - mr[p] * mr[p]) + (gg[p] - mg[p] * mg[p]) + 9e-4)
-                ssim += l * cs; l1 += abs(i[p] - g[p]); if c == 0 { n += 1 }
+                ssim += l * cs; l1 += abs(i[p] - g[p]); lowPass += abs(mi[p] - mg[p]); if c == 0 { n += 1 }
             } }
         }
-        return (1 - lambda) * l1 / (3 * n) + lambda * (1 - ssim / (3 * n))
+        return weight * ((1 - lambda) * l1 / (3 * n) + lambda * (1 - ssim / (3 * n))) + (1 - weight) * (1 - lambda) * lowPass / (3 * n)
     }
 }
 
@@ -159,6 +160,49 @@ enum CPU {
                 check(pworst < 0.03, "PPISP parameter gradients match finite differences")
             }
         }
+        // A view's weight scales its gradients, not its loss value; block weights scale the
+        // gradients of their 16 × 16 block; block differences are the blocks' mean-colour L1.
+        func run(weight: Float, mask: Bool) -> (Double, [SIMD4<Float>]) {
+            let cb = metal.queue.makeCommandBuffer()!, e = cb.makeComputeCommandEncoder()!
+            evaluator.encode(e, raw: rawBuf, target: gtBuf, ppisp: nil, weight: weight, mask: mask)
+            e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+            return (evaluator.values.loss, Array(UnsafeBufferPointer(start: evaluator.rawGrad.contents().bindMemory(to: SIMD4<Float>.self, capacity: W * H), count: W * H)))
+        }
+        let (fullLoss, full) = run(weight: 1, mask: false)
+        let (weightedLoss, weighted) = run(weight: 0.4, mask: false)
+        var weightWorst = 0.0
+        for p in stride(from: 3, to: W * H, by: 37) { for c in 0..<3 where abs(raw[p][c] - gt[p][c]) >= 1e-4 {
+            var plus = raw, minus = raw
+            plus[p][c] += 1e-5; minus[p][c] -= 1e-5
+            let numeric = (CPU.loss(raw: plus, gt: gt, W: W, H: H, model: nil, frame: frame, weight: 0.4)
+                           - CPU.loss(raw: minus, gt: gt, W: W, H: H, model: nil, frame: frame, weight: 0.4)) / 2e-5
+            let analytic = Double(weighted[p][c])
+            weightWorst = max(weightWorst, abs(numeric - analytic) / max(abs(numeric), abs(analytic), 1e-4))
+        } }
+        check(abs(weightedLoss - fullLoss) < 1e-7 && weightWorst < 0.03,
+              "a view weight of 0.4: gradients of the weighted loss plus its low-pass L1 match finite differences (\(weightWorst)); the reported loss stays unweighted")
+        let (columns, rows) = evaluator.blocks
+        let differences = Array(UnsafeBufferPointer(start: evaluator.blockDifference.contents().bindMemory(to: Float.self, capacity: columns * rows), count: columns * rows))
+        var blockWorst = 0.0
+        for b in 0..<(columns * rows) {
+            var sum = SIMD3<Double>(), n = 0.0
+            for y in (b / columns * 16)..<min(H, b / columns * 16 + 16) { for x in (b % columns * 16)..<min(W, b % columns * 16 + 16) {
+                sum += simd_clamp(raw[y * W + x], .zero, SIMD3(repeating: 1)) - gt[y * W + x]; n += 1
+            } }
+            blockWorst = max(blockWorst, abs(simd_reduce_add(simd_abs(sum / n)) / 3 - Double(differences[b])))
+        }
+        check(columns * rows == 6 && blockWorst < 1e-5, "block mean-colour differences match the CPU reference (\(blockWorst))")
+        let blockWeights: [Float] = [1, 0, 1, 1, 0.5, 1]
+        let weights = evaluator.blockWeight.contents().bindMemory(to: Float.self, capacity: 6)
+        for i in 0..<6 { weights[i] = blockWeights[i] }
+        let (_, masked) = run(weight: 1, mask: true)
+        var maskWorst: Float = 0
+        for p in 0..<(W * H) {
+            let m = blockWeights[(p / W / 16) * columns + (p % W) / 16]
+            maskWorst = max(maskWorst, simd_reduce_max(simd_abs(full[p] * m - masked[p])))
+        }
+        for i in 0..<6 { weights[i] = 1 }
+        check(maskWorst < 1e-7, "block weights scale the gradients of their block only (\(maskWorst))")
         // Identity ISP is exactly the identity.
         let identity = PPISPModel(frames: 1)
         let u = identity.uniforms(frame: 0)

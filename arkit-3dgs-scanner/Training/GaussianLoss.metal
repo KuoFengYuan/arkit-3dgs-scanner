@@ -4,7 +4,9 @@
 //
 // Loss: (1 - lambda) * L1(isp, gt) + lambda * (1 - SSIM) with an 11x11 Gaussian window
 // (sigma 1.5), averaged over the image interior (5-pixel border excluded, as in LichtFeld
-// Studio). With PPISP enabled, SSIM is decoupled like upstream: its luminance term compares the
+// Studio). A view weight w < 1 scales that loss and adds (1 - w) * (1 - lambda) * L1 of the
+// window means G*isp and G*gt (the low frequencies), so a blurred photo keeps teaching colour
+// and coverage. With PPISP enabled, SSIM is decoupled like upstream: its luminance term compares the
 // ISP output with the target, and contrast-structure compares the raw render with the target.
 // The per-pixel error map for MRNF densification is max(0, 1 - mean_c cs_c).
 //
@@ -22,7 +24,7 @@ constant float kC2 = 0.0009f;   // (0.03)^2
 /// Mirrors `GaussianLossParams` in Swift.
 struct LossParams {
     uint width, height, border, decoupled;   // decoupled: PPISP active
-    float lambda, invInterior, unused0, unused1;
+    float lambda, invInterior, weight, masked;   // weight: the view's gradient weight; masked: apply block weights
 };
 
 /// Per-frame ISP parameters, activated on the CPU. Mirrors `PPISPUniforms` in Swift.
@@ -230,6 +232,7 @@ kernel void ssim_forward(device const float4* isp [[buffer(0)]],
                          device float* errorMap [[buffer(4)]],
                          device atomic_float* sums [[buffer(5)]],
                          constant LossParams& lp [[buffer(6)]],
+                         device float* blockDifference [[buffer(7)]],
                          uint2 group [[threadgroup_position_in_grid]],
                          uint2 local [[thread_position_in_threadgroup]],
                          uint tid [[thread_index_in_threadgroup]],
@@ -238,13 +241,14 @@ kernel void ssim_forward(device const float4* isp [[buffer(0)]],
     threadgroup float sI[kSpan * kSpan], sR[kSpan * kSpan], sG[kSpan * kSpan];
     threadgroup float sH[6][kSpan * 16];
     threadgroup float sSums[8][4];
+    threadgroup float sBlock[8][8];
     const int2 origin = int2(group * 16) - kApron;
     const int2 q = int2(group * 16 + local);
     const bool valid = inImage(q, lp);
     const uint P = lp.width * lp.height;
     const uint p = valid ? uint(q.y) * lp.width + uint(q.x) : 0;
     const bool inside = valid && interior(uint2(q), lp);
-    const float dS = inside ? -lp.lambda * lp.invInterior / 3.0f : 0.0f;
+    const float dS = inside ? -lp.lambda * lp.invInterior * lp.weight / 3.0f : 0.0f;
     float ssim = 0, csMean = 0;
     for (uint c = 0; c < 3; ++c) {
         for (uint k = tid; k < uint(kSpan * kSpan); k += 256) {
@@ -281,7 +285,11 @@ kernel void ssim_forward(device const float4* isp [[buffer(0)]],
         csMean += cs / 3.0f;
         if (inside) ssim += l * cs;
         if (valid) {
-            partials[(0 + c) * P + p] = dS * cs * 2.0f * (mg - l * mi) / B1;
+            // A view weight below 1 keeps (1 - weight) of the L1 on the window means (its low
+            // frequencies): a blurred photo still teaches colour and coverage, not detail.
+            const float lowPass = inside && lp.weight < 1.0f
+                ? (1.0f - lp.weight) * (1.0f - lp.lambda) * lp.invInterior / 3.0f * sign(mi - mg) : 0.0f;
+            partials[(0 + c) * P + p] = dS * cs * 2.0f * (mg - l * mi) / B1 + lowPass;
             partials[(3 + c) * P + p] = dS * l * (-2.0f * mg + 2.0f * cs * mr) / B2;
             partials[(6 + c) * P + p] = dS * l * (-cs / B2);
             partials[(9 + c) * P + p] = dS * l * (2.0f / B2);
@@ -300,7 +308,22 @@ kernel void ssim_forward(device const float4* isp [[buffer(0)]],
     }
     const float4 v = float4(simd_sum(l1), simd_sum(ssim), simd_sum(err), simd_sum(sq));
     if (lane == 0) { sSums[simd][0] = v.x; sSums[simd][1] = v.y; sSums[simd][2] = v.z; sSums[simd][3] = v.w; }
+    // Mean colours of this 16 x 16 block, for the transient mask (block = threadgroup).
+    const float3 bi = valid ? clamp(isp[p].xyz, 0.0f, 1.0f) : float3(0), bg = valid ? rgbOf(gt, p) : float3(0);
+    const float bs[8] = {bi.x, bi.y, bi.z, bg.x, bg.y, bg.z, valid ? 1.0f : 0.0f, valid ? raw[p].w : 0.0f};
+    for (uint k = 0; k < 8; ++k) {
+        const float t = simd_sum(bs[k]);
+        if (lane == 0) sBlock[simd][k] = t;
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float b[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        for (uint s = 0; s < 8; ++s) for (uint k = 0; k < 8; ++k) b[k] += sBlock[s][k];
+        const float n = max(b[6], 1.0f);
+        // -1: the render barely covers the block (mean transmittance above 0.3), no evidence.
+        blockDifference[group.y * ((lp.width + 15) / 16) + group.x] = b[7] / n > 0.3f ? -1.0f
+            : (fabs(b[0] - b[3]) + fabs(b[1] - b[4]) + fabs(b[2] - b[5])) / (3.0f * n);
+    }
     if (tid < 4) {
         float total = 0;
         for (uint s = 0; s < 8; ++s) total += sSums[s][tid];
@@ -318,6 +341,7 @@ kernel void ssim_backward(device const float* partials [[buffer(0)]],
                           device float4* ispGrad [[buffer(4)]],
                           device float4* rawGrad [[buffer(5)]],
                           constant LossParams& lp [[buffer(6)]],
+                          device const float* blockWeight [[buffer(7)]],
                           uint2 group [[threadgroup_position_in_grid]],
                           uint2 local [[thread_position_in_threadgroup]],
                           uint tid [[thread_index_in_threadgroup]]) {
@@ -358,7 +382,11 @@ kernel void ssim_backward(device const float* partials [[buffer(0)]],
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     if (!valid) return;
-    if (interior(uint2(q), lp)) gi += (1.0f - lp.lambda) * lp.invInterior / 3.0f * sign(isp[p].xyz - g);
+    if (interior(uint2(q), lp)) gi += (1.0f - lp.lambda) * lp.invInterior * lp.weight / 3.0f * sign(isp[p].xyz - g);
+    if (lp.masked > 0.5f) {
+        const float m = blockWeight[group.y * ((lp.width + 15) / 16) + group.x];
+        gi *= m; gr *= m;
+    }
     if (lp.decoupled != 0) { ispGrad[p] = float4(gi, 0); rawGrad[p] = float4(gr, 0); }
     else { ispGrad[p] = float4(0); rawGrad[p] = float4(gi + gr, 0); }
 }

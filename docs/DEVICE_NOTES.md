@@ -34,6 +34,35 @@ The quality monitor estimates motion in pixels from focal length, rotation, tran
 
 Use better light to permit shorter exposure, move/turn more slowly, and include lateral baseline without abrupt rotation. Excessively strict risk thresholds can stop ordinary walking capture without proving improved geometry. Post-fusion RGB selection only presents an actionable recapture banner for weak measured detail; motion-only and unknown evidence remain optional information.
 
+### Shutter, ISO and detail on a large scan
+
+F21171 is a room and a bathroom: 1,234 photos in 169 s, taken with the exposure and white-balance lock off. Auto exposure therefore ran under the 1/60 s cap:
+- 732 of the 858 training photos used 1/60 s;
+- ISO ran from 54 to 5,011 (338 training photos above 400, 98 above 1,600);
+- PPISP compensates the brightness differences between photos during training.
+
+To separate blur from noise, 20,418 pairs of photos of the same surface were compared with the sharpness measure of the training experiments (see [large scenes](ON_DEVICE_3DGS.md#large-scenes-with-blurred-photos)). A robust regression of each pair's detail difference gives:
+
+| Term | Detail lost (ln of gradient energy) | 95% interval |
+| --- | --- | --- |
+| 1 px of exposure blur (estimate at 1,920 px) | 0.044 | 0.032–0.054 |
+| 1 ISO stop | 0.26 | 0.14–0.38 |
+| 1 ISO stop at or below ISO 400 (no denoising by the app) | 0.26 | 0.14–0.42 |
+| 1 ISO stop above ISO 400 (the app denoises) | 0.28 | −0.08–0.52 |
+
+- **A shorter shutter cap roughly breaks even on this scan.**
+  - At the median exposure blur (14.9 px), 1/120 s instead of 1/60 s would recover about 0.32.
+  - The doubled ISO would cost about 0.26, a net gain of only 0.06.
+  - It would help only fast turns, or bright areas with ISO to spare. The cap stays at 1/60 s.
+- **Turning more slowly is the lever with no cost.** The blur term scales with angular speed (median 23°/s here). Halving it recovers the full 0.32 without raising ISO.
+- **The app's denoising above ISO 400 adds no measurable loss** at the 640 px scale of this measure: the ISO cost is the same below ISO 400, where no denoising runs. Finer detail at 1,920 px was not measured.
+- **The exposure lock does not reduce blur.** It keeps brightness constant between photos. With a 6.5 EV difference between the room and the bathroom, it would over- or underexpose one of them.
+- **The motion estimate agrees only loosely with measured sharpness** (rank correlation 0.28); see [dataset refinement](ON_DEVICE_TRAINING_QUALITY.md#large-scenes-motion-estimate-and-measured-sharpness).
+
+Not yet tried; both need device captures:
+- taking the steadiest frame within the shutter interval (ARKit delivers 60 frames per second, and the photo is currently the first frame that passes the gates);
+- a shutter cap that follows the ISO in use.
+
 ## Camera controls and other details
 
 The HUD offers exposure/white-balance lock plus advanced exposure compensation, shutter, ISO, white balance, and focus controls where the capture device supports them. Automatic focus remains available; export stores per-frame intrinsics rather than relying on a single locked calibration. Manual shutter/ISO choices can trade blur against brightness and noise. Locked exposure can under-/overexpose transitions between windows and dark areas.

@@ -52,6 +52,17 @@ Since report v4 (`TrainingFrameSelector.policyVersion`):
 
 `training-selection.json` records decisions, replacement frames, reasons, timestamps, and category IDs. All original photos remain in `images/`. **Use `sparse/0/images.bin` as the training-image list.** A trainer that rescans the entire images folder must also respect `selectedIDs`.
 
+### Large scenes: motion estimate and measured sharpness
+
+On F21171, 1,234 photos of a room and a bathroom, the blur review dropped 370 photos. That is exactly its 30% cap, and every one was a `drop` (motion estimate above 25 px). No photo was demoted, because the drops used up the cap before any demotion applied.
+
+The sharpness measure of the training experiments compares each photo with other photos of the same surface ([large scenes](ON_DEVICE_3DGS.md#large-scenes-with-blurred-photos)). By that measure:
+- 100 of the 370 dropped photos are as sharp as their peers (deficit below 0.15);
+- 97 of the 858 selected photos are clearly softer than a peer (deficit above 0.7);
+- its rank correlation with the motion estimate is 0.28.
+
+The review and its cap stay as they are. A drop also keeps the photo's depth out of fusion, and for geometry the motion estimate (rolling shutter included) remains the relevant risk. Training the 100 sharp dropped photos anyway, RGB only and with their depth kept out of the seeds, gave no stable gain: +0.08 dB on all held-out views (95% interval −0.08 to +0.24), with GMSD and kept detail slightly worse. Weighting the selected photos by measured sharpness during training was tested as well; it is an experiment and stays off ([large scenes](ON_DEVICE_3DGS.md#large-scenes-with-blurred-photos)).
+
 ## Pose refinement after capture
 
 `OfflinePoseRefinement` reads all non-dropped depth frames from disk, filling gaps left by the best-effort live worker. Features are extracted from 960-pixel thumbnails and mapped back to original pixels with original intrinsics. LiDAR supplies metric feature positions. Matching checks ZNCC, the second-best ratio, reverse matching, depth consistency, and per-frame track uniqueness.

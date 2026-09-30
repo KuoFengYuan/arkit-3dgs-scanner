@@ -192,6 +192,16 @@ import simd
 
     // MARK: Helpers
 
+    /// Deterministic Gaussian noise for synthetic photos.
+    struct LCGNoise {
+        var state: UInt64
+        mutating func uniform() -> Double {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            return max(1e-12, Double(state >> 11) / Double(1 << 53))
+        }
+        mutating func gaussian() -> Double { (-2 * log(uniform())).squareRoot() * cos(2 * .pi * uniform()) }
+    }
+
     static func config(iterations: Int, ppisp: Bool = false, pose: Bool = false, maxGaussians: Int = 40_000,
                        holdOut: Int = 0, sh: Int = 1) -> GaussianTrainingConfiguration {
         var c = GaussianTrainingConfiguration.preset(.quick)
@@ -248,6 +258,7 @@ import simd
             ("exportFrame", exportFrame),
             ("sogFormat", sogFormat),
             ("depthSeeding", depthSeeding),
+            ("covisibleSharpness", covisibleSharpness),
             ("holeFilling", holeFilling),
             ("convergence", convergence),
             ("enhancement", enhancement),
@@ -786,6 +797,55 @@ import simd
     /// The left wall has no seeds: splitting neighbours reaches it slowly and blurrily; hole
     /// filling grows Gaussians there from the empty, erroring pixels (depth from covered pixels
     /// nearby, as without LiDAR).
+    /// Five photos of a textured wall 2 m away, 5 cm apart: one motion-blurred, one 1.4× brighter,
+    /// one with sensor noise; a sixth photo sees another wall alone. Only the blurred photo has a
+    /// clearly sharper peer; brightness and noise are not read as detail; a photo without peers
+    /// keeps weight 1.
+    static func covisibleSharpness() throws {
+        let dir = temp.appendingPathComponent("scan_sharpness")
+        try? FileManager.default.removeItem(at: dir)
+        for sub in ["images", "depth"] { try FileManager.default.createDirectory(at: dir.appendingPathComponent(sub), withIntermediateDirectories: true) }
+        let W = 640, H = 480, dw = 256, dh = 192
+        let k = CameraIntrinsics(fx: 500, fy: 500, cx: 320, cy: 240, width: W, height: H)
+        func texture(_ x: Double, _ y: Double) -> Double {
+            0.45 + 0.12 * sin(x * 230) * cos(y * 190) + 0.1 * sin(x * 510 + y * 80) + 0.08 * cos(y * 640 - x * 150) + 0.05 * sin(x * 1300) * sin(y * 1100)
+        }
+        var rng = LCGNoise(state: 7)
+        try [Float](repeating: 2, count: dw * dh).withUnsafeBytes { try Data($0).write(to: dir.appendingPathComponent("depth/d.bin")) }
+        var frames: [TrainingFrame] = []
+        for i in 0..<6 {
+            let eye = i == 5 ? SIMD3<Double>(20, 0, 0) : SIMD3(Double(i) * 0.05, 0, 0)
+            var grey = [Double](repeating: 0, count: W * H)
+            for y in 0..<H { for x in 0..<W {
+                grey[y * W + x] = texture(eye.x + (Double(x) + 0.5 - 320) / 500 * 2, -(Double(y) + 0.5 - 240) / 500 * 2)
+            } }
+            if i == 2 {
+                // 9 px horizontal motion blur.
+                let sharp = grey
+                for p in 0..<(W * H) {
+                    let row = p / W * W, x = p % W
+                    var sum = 0.0
+                    for dx in -4...4 { sum += sharp[row + min(W - 1, max(0, x + dx))] }
+                    grey[p] = sum / 9
+                }
+            }
+            if i == 3 { grey = grey.map { $0 * 1.4 } }
+            if i == 4 { grey = grey.map { $0 + 0.02 * rng.gaussian() } }
+            let rgba = grey.flatMap { v -> [UInt8] in let c = UInt8(max(0, min(255, (v * 255).rounded()))); return [c, c, c, 255] }
+            try writeJPEG(rgba, width: W, height: H, to: dir.appendingPathComponent("images/f\(i).jpg"))
+            frames.append(TrainingFrame(id: i, imageFile: "f\(i).jpg", intrinsics: k, transform: arkitPose(eye: eye, target: eye + SIMD3(0, 0, -1)),
+                                        captureEV: nil, isValidation: false, depthFile: "d.bin", depthWidth: dw, depthHeight: dh))
+        }
+        let scores = CovisibleSharpness.scores(frames: frames, directory: dir)
+        let d = (0..<6).map { scores[$0]?.deficit ?? -1 }
+        print("  deficits " + d.map { String(format: "%.2f", $0) }.joined(separator: " ") + ", peers \((0..<6).map { scores[$0]?.peers ?? -1 })")
+        check(d[2] > 0.5 && [0, 1, 3, 4].allSatisfy { d[$0] < 0.15 } && d[5] == 0 && scores[5]?.peers == 0,
+              "the blurred photo alone has a sharper photo of its surface; brightness, noise and a photo without peers do not count")
+        let weights = CovisibleSharpness.weights(scores, count: 7, strength: 1, floor: 0.25)
+        check(weights[2] < 0.7 && weights[2] >= 0.25 && weights[5] == 1 && weights[6] == 1 && weights[0] > 0.85,
+              "sharpness weights lower the blurred photo within the floor and keep unscored photos at 1")
+    }
+
     static func holeFilling() throws {
         let scan = try writeScan(name: "holes", frames: 36, seed: 17)
         let ply = scan.directory.appendingPathComponent("review.ply")
