@@ -344,7 +344,8 @@ nonisolated struct MRNFStrategy: Codable, Equatable {
                 || s < MRNFConstants.minLogScale || !s.isFinite
             if !remove && bounds.valid {
                 let d = simd_abs(SIMD3(p[means + 3 * i], p[means + 3 * i + 1], p[means + 3 * i + 2]) - bounds.center)
-                remove = s > maxLogScale || d.max() > 100 * bounds.maxExtent || !d.max().isFinite
+                let far = Swift.max(d.x, Swift.max(d.y, d.z))    // d.max(), without its generic reduction
+                remove = s > maxLogScale || far > 100 * bounds.maxExtent || !far.isFinite
             }
             if remove { pruned.append(i) }
         }
@@ -612,13 +613,7 @@ nonisolated struct MRNFStrategy: Codable, Equatable {
     /// Weighted sampling without replacement: the k largest Gumbel keys ln w - ln(-ln u).
     static func gumbelTopK(_ weights: [Float], k: Int, rng: inout SplitMix64, excluding: [Bool]) -> [Int] {
         guard k > 0 else { return [] }
-        var keyed: [(Float, Int)] = []
-        keyed.reserveCapacity(weights.count)
-        for (i, w) in weights.enumerated() {
-            let u = min(max(rng.nextFloat(), 1e-10), 1 - 1e-7)   // one draw per row keeps sequences aligned
-            guard w > 0, w.isFinite, !excluding[i] else { continue }
-            keyed.append((log(w) - log(-log(u)), i))
-        }
+        let keyed = gumbelKeys(weights, rng: &rng, excluding: excluding)
         guard !keyed.isEmpty else { return [] }
         let take = min(k, keyed.count)
         if take < keyed.count {
@@ -632,15 +627,31 @@ nonisolated struct MRNFStrategy: Codable, Equatable {
         return keyed.map(\.1).sorted()
     }
 
-    /// The Gumbel keys `gumbelTopK` ranks, for rows with a positive weight (one draw per row).
+    /// The Gumbel keys `gumbelTopK` ranks, for rows with a positive weight, in row order. Every
+    /// row takes one draw, so the sequence stays aligned whatever the weights; the draw of row i
+    /// is the generator's (i + 1)-th from here, so chunks of rows are keyed in parallel with
+    /// exactly the values of one sequential pass.
     static func gumbelKeys(_ weights: [Float], rng: inout SplitMix64, excluding: [Bool]) -> [(Float, Int)] {
-        var keyed: [(Float, Int)] = []
-        for (i, w) in weights.enumerated() {
-            let u = min(max(rng.nextFloat(), 1e-10), 1 - 1e-7)
-            guard w > 0, w.isFinite, !excluding[i] else { continue }
-            keyed.append((log(w) - log(-log(u)), i))
+        let n = weights.count, chunk = 32_768
+        let chunks = (n + chunk - 1) / chunk
+        var parts = [[(Float, Int)]](repeating: [], count: chunks)
+        let start = rng
+        parts.withUnsafeMutableBufferPointer { out in
+            DispatchQueue.concurrentPerform(iterations: chunks) { c in
+                var local = start
+                local.advance(by: c * chunk)
+                var keyed: [(Float, Int)] = []
+                for i in (c * chunk)..<min(n, (c + 1) * chunk) {
+                    let u = min(max(local.nextFloat(), 1e-10), 1 - 1e-7)
+                    let w = weights[i]
+                    guard w > 0, w.isFinite, !excluding[i] else { continue }
+                    keyed.append((log(w) - log(-log(u)), i))
+                }
+                out[c] = keyed
+            }
         }
-        return keyed
+        rng.advance(by: n)
+        return Array(parts.joined())
     }
 
     /// Hoare-partition quickselect: afterwards v[k] is the k-th smallest.
@@ -671,4 +682,6 @@ nonisolated struct SplitMix64: RandomNumberGenerator {
         return z ^ (z >> 31)
     }
     mutating func nextFloat() -> Float { Float(next() >> 40) / Float(1 << 24) }
+    /// Skips `n` draws (the state is a counter).
+    mutating func advance(by n: Int) { state &+= 0x9E3779B97F4A7C15 &* UInt64(n) }
 }

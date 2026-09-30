@@ -254,6 +254,7 @@ import simd
             ("memoryPlan", memoryPlan),
             ("resolutionAndHoldOut", resolutionAndHoldOut),
             ("strategyUnits", strategyUnits),
+            ("optimizerKernels", optimizerKernels),
             ("regionQuotas", regionQuotas),
             ("exportFrame", exportFrame),
             ("sogFormat", sogFormat),
@@ -315,6 +316,107 @@ import simd
         let large = TrainingMemoryPlan.automaticBudget(available: 6_000 << 20, physical: 8 << 30)
         check(small <= 900 << 20 && small < Int(Double(1_500 << 20) * 0.55) && large == 2_600 << 20,
               "automatic budget keeps headroom and a device-tier ceiling")
+    }
+
+    /// The single-dispatch Adam against a CPU reference, and the parallel Gumbel keys against a
+    /// sequential pass.
+    static func optimizerKernels() throws {
+        // Gumbel keys: chunks keyed in parallel give the sequential pass's keys and generator state.
+        var weightRNG = SplitMix64(seed: 21)
+        let weights: [Float] = (0..<100_003).map { i in
+            let u = weightRNG.nextFloat()
+            return i % 97 == 0 ? .nan : i % 89 == 0 ? .infinity : u < 0.2 ? 0 : u
+        }
+        let excluded = (0..<weights.count).map { $0 % 13 == 0 }
+        var parallel = SplitMix64(seed: 5), sequential = SplitMix64(seed: 5)
+        let keys = MRNFStrategy.gumbelKeys(weights, rng: &parallel, excluding: excluded)
+        var reference: [(Float, Int)] = []
+        for (i, w) in weights.enumerated() {
+            let u = min(max(sequential.nextFloat(), 1e-10), 1 - 1e-7)
+            guard w > 0, w.isFinite, !excluded[i] else { continue }
+            reference.append((log(w) - log(-log(u)), i))
+        }
+        check(keys.count == reference.count && zip(keys, reference).allSatisfy { $0.0 == $1.0 && $0.1 == $1.1 }
+              && parallel.state == sequential.state,
+              "parallel Gumbel keys equal a sequential pass, in row order and with the same generator state")
+
+        // Adam: random parameters, moments, gradients and statistics; rows the view did not reach
+        // hold garbage gradients, which must count as zero.
+        let scan = try writeScan(name: "adam", frames: 4)
+        let t = try trainer(scan.directory, config(iterations: 1_000, sh: 2))
+        let model = t.model, n = model.count, layout = model.layout
+        var rng = SplitMix64(seed: 77)
+        func random(_ a: Float, _ b: Float) -> Float { a + (b - a) * rng.nextFloat() }
+        let p = model.floats(model.params), g = model.floats(model.grads), m = model.floats(model.adamM), v = model.floats(model.adamV)
+        let tiles = t.raster.tiles.contents().bindMemory(to: UInt32.self, capacity: model.capacity)
+        let active = model.stat(GaussianStats.active), share = model.stat(GaussianStats.shareNow)
+        for row in 0..<n {
+            tiles[row] = row % 3 == 0 ? 0 : UInt32(1 + row % 5)
+            active[row] = row % 17 == 0 ? 0 : 1
+            share[row] = row % 4 == 0 ? random(0.2, 0.9) : random(0, 0.05)
+        }
+        for (offset, width) in layout.groups {
+            for row in 0..<n {
+                for k in 0..<width {
+                    let i = offset + row * width + k
+                    p[i] = random(-2, 2); m[i] = random(-0.1, 0.1); v[i] = random(0, 0.01)
+                    g[i] = tiles[row] == 0 ? 1_000 : random(-0.5, 0.5)
+                }
+            }
+        }
+        func runAdam(iteration: Int, sparse: Bool) throws -> (before: [Float], after: [Float], m: [Float], v: [Float]) {
+            let before = Array(UnsafeBufferPointer<Float>(start: p, count: layout.totalFloats))
+            t.sparseAdam = sparse
+            model.adamStep = 7
+            let buffer = metal.queue.makeCommandBuffer()!, e = buffer.makeComputeCommandEncoder()!
+            t.encodeAdam(e, iteration: iteration, count: n)
+            e.endEncoding(); buffer.commit(); buffer.waitUntilCompleted()
+            return (before, Array(UnsafeBufferPointer<Float>(start: p, count: layout.totalFloats)),
+                    Array(UnsafeBufferPointer<Float>(start: m, count: layout.totalFloats)), Array(UnsafeBufferPointer<Float>(start: v, count: layout.totalFloats)))
+        }
+        for (iteration, sparse) in [(t.strategy.schedule.shWarmup + 10, false), (1, false), (t.strategy.schedule.shWarmup + 10, true)] {
+            let mBefore = Array(UnsafeBufferPointer<Float>(start: m, count: layout.totalFloats))
+            let vBefore = Array(UnsafeBufferPointer<Float>(start: v, count: layout.totalFloats))
+            let gpu = try runAdam(iteration: iteration, sparse: sparse)
+            let refining = iteration < t.strategy.schedule.stopRefine
+            let lrs: [Float] = [t.strategy.meansLR(at: iteration), t.strategy.scalesLR(at: iteration), Float(MRNFConstants.rotationLR),
+                                Float(MRNFConstants.opacityLR), Float(MRNFConstants.sh0LR), Float(MRNFConstants.shNLR)]
+            let bc1 = Float(1 - pow(0.9, 7.0)), bc2 = Float(1 - pow(0.999, 7.0))
+            let reg = MRNFConstants.opacityRegularizer / Float(max(1, model.activeCount))
+            var worst: Float = 0, untouchedOK = true
+            for (group, (offset, width)) in layout.groups.enumerated() {
+                let skipped = group == 5 && iteration <= t.strategy.schedule.shWarmup
+                for row in 0..<n {
+                    for k in 0..<width {
+                        let i = offset + row * width + k
+                        let unchanged = skipped || active[row] < 0.5 || (sparse && tiles[row] == 0)
+                        if unchanged {
+                            untouchedOK = untouchedOK && gpu.after[i] == gpu.before[i] && gpu.m[i] == mBefore[i] && gpu.v[i] == vBefore[i]
+                            continue
+                        }
+                        var grad: Float = tiles[row] == 0 ? 0 : g[i]
+                        if group == 3 { let s = 1 / (1 + exp(-gpu.before[i])); grad += reg * s * (1 - s) }
+                        if group == 1 && refining && share[row] > MRNFConstants.maxScreenShare {
+                            grad += MRNFConstants.screenSharePenalty * log2(share[row] / MRNFConstants.maxScreenShare)
+                                * (vBefore[i].squareRoot() / bc2.squareRoot() + 1e-15)
+                        }
+                        let beta1: Float = 0.9, beta2: Float = 0.999
+                        let mi = beta1 * mBefore[i] + (1 - beta1) * grad, vi = beta2 * vBefore[i] + (1 - beta2) * grad * grad
+                        let step = lrs[group] * (mi / bc1) / ((vi / bc2).squareRoot() + 1e-15)
+                        // Within 0.5% of the step (the moments' rounding), or a few ulps of the parameter.
+                        let allowed = 5e-3 * abs(step) + 4 * gpu.before[i].ulp
+                        // Moments within 1e-5 of their terms, or a few ulps of the gradient term: with
+                        // fast math the kernel may evaluate (1 - beta) x as x - beta x, as it always has.
+                        let e = max(abs(gpu.after[i] - (gpu.before[i] - step)) / allowed,
+                                    abs(gpu.m[i] - mi) / (1e-5 * (abs(beta1 * mBefore[i]) + abs((1 - beta1) * grad)) + 4 * grad.ulp),
+                                    abs(gpu.v[i] - vi) / (1e-5 * (beta2 * vBefore[i] + (1 - beta2) * grad * grad) + 4 * (grad * grad).ulp))
+                        worst = max(worst, e)
+                    }
+                }
+            }
+            check(worst <= 1 && untouchedOK,
+                  "one-dispatch Adam matches the CPU reference (iteration \(iteration)\(sparse ? ", visible rows only" : ""), worst error \(worst) of the tolerance)")
+        }
     }
 
     static func strategyUnits() throws {

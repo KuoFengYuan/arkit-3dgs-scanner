@@ -63,6 +63,33 @@ F21171 是一間房間加浴室：169 秒內拍了 1,234 張，拍攝時關閉�
 - 在快門間隔內取最穩的一幀（ARKit 每秒送出 60 幀，目前照片是第一個通過品質閘門的影格）；
 - 依當下 ISO 調整的快門上限。
 
+## 訓練速度基準測試
+
+帶 `TRAINING_BENCHMARK` 編譯條件的版本，會在手機上用 Mac 重播的協定訓練一個掃描（見[加快訓練步驟](ON_DEVICE_3DGS.zh-TW.md#加快大型掃描的訓練步驟)）：
+- 標準品質，固定迭代次數，不用自動次數；
+- 種子只取訓練照片的 LiDAR 深度；
+- 保留照片依清單固定；
+- 使用手機本身的記憶體配置。
+
+它只讀取掃描，結果寫到 App 容器裡的 `Documents/benchmark`。一般的 Release 版本不含這段程式。
+
+1. 編譯：
+
+   ```bash
+   xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner -configuration Release -destination 'generic/platform=iOS' -allowProvisioningUpdates SWIFT_ACTIVE_COMPILATION_CONDITIONS='$(inherited) TRAINING_BENCHMARK' build
+   ```
+
+2. 用 `xcrun devicectl device install app --device DEVICE PATH/arkit-3dgs-scanner.app` 安裝。這會取代已安裝的版本，App 的資料會保留。第一次要在手機上信任開發者描述檔（設定 → 一般 → VPN 與裝置管理）。
+3. 可選：用 `xcrun devicectl device copy to` 把保留照片的 ID 清單複製到 `Documents/benchmark/holdout-ids.txt`。
+4. 手機解鎖、平放在桌上、室溫下執行：
+
+   ```bash
+   xcrun devicectl device process launch --device DEVICE --console --terminate-existing arkit-3dgs-scanner --benchmark-training SCAN_FOLDER --iterations 10000 --holdout-ids holdout-ids.txt --benchmark-label NAME
+   ```
+
+   主控台每 500 步印一次進度與散熱狀態。結束時印出 JSON 結果，然後 App 自行結束。結果包含總時間與每步毫秒數、峰值記憶體、散熱取樣、各階段時間，以及保留照片的 PSNR 與 SSIM。
+5. 不同版本要接連比較，中間讓手機冷卻，並記下散熱狀態。進入 `serious` 的手機會降低 GPU 速度。
+
 ## 相機控制與其他細節
 
 HUD 提供曝光／白平衡鎖定，支援的裝置另有曝光補償、快門、ISO、白平衡及對焦控制。自動對焦仍可使用；匯出保存逐幀內參，不依賴單一鎖焦校準。手動快門／ISO 須取捨亮度、雜訊與模糊；曝光鎖定在窗邊與暗角切換時可能過曝或欠曝。

@@ -21,8 +21,8 @@
 //   edge PSNR, GMSD, band-pass detail, empty share, colour-aligned PSNR), --dump-views DIR --dump-ids A,B.
 // Large-scene experiments (off unless given): --sharpness-weights S [--sharpness-floor F],
 //   --transient-mask, --pose-smoothing W, --add-ids FILE (train these photos too).
-// Speed: --profile-stages N times each stage of a step on N training photos at the end (GPU ms
-//   per command buffer; run it apart from timing runs). --strict-seeds seeds from the training
+// Speed: --profile-stages N [--profile-iteration T] times each stage of a step on N training
+//   photos at the end (GPU ms per command buffer, at the schedule of iteration T). --strict-seeds seeds from the training
 //   photos' LiDAR depth only (the saved cloud also fused the held-out photos' depth).
 //   --iterations is always the fixed count (the app's automatic count is only printed).
 import Foundation
@@ -58,7 +58,7 @@ import CoreGraphics
         var viewMetrics: URL?, dumpViews: URL?, dumpIDs: Set<Int> = []
         var extraIDs: Set<Int> = []
         var sharpnessStrength: Float = 0, sharpnessFloor: Float = 0.25, transientMask = false, poseSmoothing = 0.0
-        var profileStages = 0, savedCloud = true
+        var profileStages = 0, profileIteration: Int?, savedCloud = true
         while !args.isEmpty {
             let a = args.removeFirst()
             switch a {
@@ -122,6 +122,7 @@ import CoreGraphics
             case "--write-holdout-ids": writeHoldOutIDs = URL(fileURLWithPath: args.removeFirst())
             case "--transient-mask": transientMask = true
             case "--profile-stages": profileStages = Int(args.removeFirst())!
+            case "--profile-iteration": profileIteration = Int(args.removeFirst())!
             case "--strict-seeds": savedCloud = false
             case "--add-ids":
                 // Experiment: also train these photos (e.g. dropped by the blur review), held out or not by the usual rule.
@@ -310,7 +311,7 @@ import CoreGraphics
             }
             print(String(format: "saved model in %.2f s (+ %.2f s validation): %@", Date().timeIntervalSince(saveStart), evalSeconds, saveModel.path))
         }
-        if profileStages > 0 { try reportStages(trainer, photos: profileStages) }
+        if profileStages > 0 { try reportStages(trainer, photos: profileStages, iteration: profileIteration) }
     }
 
     /// Experiment inputs: poses from another pose file of the scan (same frame selection), and a
@@ -490,11 +491,11 @@ import CoreGraphics
     }
 
     /// Stage times of a training step on `photos` training photos spread over the capture.
-    static func reportStages(_ trainer: GaussianTrainer, photos: Int) throws {
+    static func reportStages(_ trainer: GaussianTrainer, photos: Int, iteration: Int?) throws {
         let train = trainer.dataset.trainFrames
         let frames = Swift.stride(from: 0, to: train.count, by: max(1, train.count / max(1, photos))).prefix(photos).map { train[$0] }
-        let stages = try trainer.profileStages(frames: frames)
-        print("stage profile at iteration \(trainer.iteration), \(trainer.model.activeCount) Gaussians, \(frames.count) photos (ms; median, mean):")
+        let stages = try trainer.profileStages(frames: frames, iteration: iteration)
+        print("stage profile at iteration \(iteration ?? trainer.iteration), \(trainer.model.activeCount) Gaussians, \(frames.count) photos (ms; median, mean):")
         var gpu = 0.0
         for (stage, ms) in stages {
             let sorted = ms.sorted(), mean = ms.reduce(0, +) / Double(max(1, ms.count))

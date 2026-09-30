@@ -72,15 +72,27 @@ nonisolated final class GaussianLossEvaluator: @unchecked Sendable {
     /// scales each block's gradients by `blockWeight`.
     func encode(_ encoder: MTLComputeCommandEncoder, raw: MTLBuffer, target: MTLBuffer, ppisp: PPISPUniforms?,
                 weight: Float = 1, mask: Bool = false) {
-        let usesISP = ppisp != nil
-        let params = GaussianLossParams(width: width, height: height, lambda: Self.lambda, decoupled: usesISP, weight: weight, masked: mask)
+        encodeForward(encoder, raw: raw, target: target, ppisp: ppisp, weight: weight, mask: mask)
+        encodeBackward(encoder, raw: raw, target: target, ppisp: ppisp, weight: weight, mask: mask)
+    }
+
+    /// The two halves of `encode` (`GaussianTrainer.profileStages` times them apart): the ISP,
+    /// the loss terms and the SSIM partial derivatives, then the image and ISP gradients.
+    func encodeForward(_ encoder: MTLComputeCommandEncoder, raw: MTLBuffer, target: MTLBuffer, ppisp: PPISPUniforms?,
+                       weight: Float = 1, mask: Bool = false) {
+        let params = GaussianLossParams(width: width, height: height, lambda: Self.lambda, decoupled: ppisp != nil, weight: weight, masked: mask)
         encoder.dispatch(clear, threads: 4, [.buffer(sums), .u32(4)])
         encoder.dispatch(clear, threads: 40, [.buffer(ppispGrad), .u32(40)])
-        let ispImage: MTLBuffer
-        if let ppisp { encodeISP(encoder, raw: raw, output: isp, ppisp: ppisp); ispImage = isp } else { ispImage = raw }
+        if let ppisp { encodeISP(encoder, raw: raw, output: isp, ppisp: ppisp) }
         encoder.dispatch(forward, groups: groups, size: (16, 16),
-                         [.buffer(ispImage), .buffer(raw), .buffer(target), .buffer(partials), .buffer(errorMap),
+                         [.buffer(ppisp != nil ? isp : raw), .buffer(raw), .buffer(target), .buffer(partials), .buffer(errorMap),
                           .buffer(sums), .value(params), .buffer(blockDifference)])
+    }
+
+    func encodeBackward(_ encoder: MTLComputeCommandEncoder, raw: MTLBuffer, target: MTLBuffer, ppisp: PPISPUniforms?,
+                        weight: Float = 1, mask: Bool = false) {
+        let params = GaussianLossParams(width: width, height: height, lambda: Self.lambda, decoupled: ppisp != nil, weight: weight, masked: mask)
+        let ispImage = ppisp != nil ? isp : raw
         encoder.dispatch(backward, groups: groups, size: (16, 16),
                          [.buffer(partials), .buffer(ispImage), .buffer(raw), .buffer(target), .buffer(ispGrad),
                           .buffer(rawGrad), .value(params), .buffer(blockWeight)])

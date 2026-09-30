@@ -31,6 +31,11 @@ nonisolated final class GaussianModel: @unchecked Sendable {
     /// Global Adam step (one bias-correction counter for all groups, as upstream).
     var adamStep = 0
     let trainable: Bool
+    /// The shared buffers' contents (stable for their lifetime) and the optimiser groups, so the
+    /// CPU row edits of a refine allocate nothing per row.
+    private let paramFloats, statFloats: UnsafeMutablePointer<Float>
+    private let stateFloats: [UnsafeMutablePointer<Float>]
+    private let groups: [(offset: Int, width: Int)]
 
     /// Bytes per Gaussian of capacity: parameters, gradients and two Adam moments, plus statistics.
     static func bytesPerGaussian(shDegree: Int) -> Int {
@@ -56,13 +61,18 @@ nonisolated final class GaussianModel: @unchecked Sendable {
         self.trainable = trainable
         stats = try metal.buffer(capacity * GaussianStats.planes * 4, label: "gs-stats")
         for buffer in [params, grads, adamM, adamV, stats] { memset(buffer.contents(), 0, buffer.length) }
+        func floats(_ buffer: MTLBuffer) -> UnsafeMutablePointer<Float> { buffer.contents().bindMemory(to: Float.self, capacity: buffer.length / 4) }
+        paramFloats = floats(params)
+        statFloats = floats(stats)
+        stateFloats = trainable ? [floats(adamM), floats(adamV), floats(grads)] : []
+        groups = layout.groups
     }
 
     func floats(_ buffer: MTLBuffer) -> UnsafeMutablePointer<Float> {
         buffer.contents().bindMemory(to: Float.self, capacity: buffer.length / 4)
     }
 
-    func stat(_ plane: Int) -> UnsafeMutablePointer<Float> { floats(stats) + plane * capacity }
+    func stat(_ plane: Int) -> UnsafeMutablePointer<Float> { statFloats + plane * capacity }
 
     var shRest: Int { Int(layout.shRest) }
 
@@ -156,19 +166,19 @@ nonisolated final class GaussianModel: @unchecked Sendable {
             clearState(row: row, clearParameters: true)
             active[row] = 0
             // A freed slot keeps no statistics for whichever Gaussian refills it.
-            for plane in 0..<GaussianStats.planes where plane != GaussianStats.active { stat(plane)[row] = 0 }
+            for plane in 0..<GaussianStats.planes where plane != GaussianStats.active { statFloats[plane * capacity + row] = 0 }
         }
         freeRows = Array(Set(freeRows).union(rows)).sorted()
     }
 
     /// Zero Adam moments and gradients of one row (optionally its parameters too).
     func clearState(row: Int, clearParameters: Bool = false) {
-        var buffers = trainable ? [adamM, adamV, grads] : []
-        if clearParameters { buffers.append(params) }
-        for buffer in buffers {
-            let f = floats(buffer)
-            for (offset, width) in layout.groups { for k in 0..<width { f[offset + row * width + k] = 0 } }
-        }
+        for f in stateFloats { clear(row: row, in: f) }
+        if clearParameters { clear(row: row, in: paramFloats) }
+    }
+
+    private func clear(row: Int, in f: UnsafeMutablePointer<Float>) {
+        for (offset, width) in groups { (f + offset + row * width).update(repeating: 0, count: width) }
     }
 
     /// Rows for `n` new Gaussians: free slots first (lowest index first), then appended rows.
@@ -199,8 +209,8 @@ nonisolated final class GaussianModel: @unchecked Sendable {
 
     /// Copies all parameters of `source` into `destination` (moments and gradients zeroed).
     func copyRow(_ source: Int, to destination: Int) {
-        let p = floats(params)
-        for (offset, width) in layout.groups { for k in 0..<width { p[offset + destination * width + k] = p[offset + source * width + k] } }
+        let p = paramFloats
+        for (offset, width) in groups { for k in 0..<width { p[offset + destination * width + k] = p[offset + source * width + k] } }
         clearState(row: destination)
     }
 

@@ -25,6 +25,15 @@ struct ARKit3DGSScannerApp: App {
     }
 
     @ViewBuilder private var content: some View {
+        #if DEBUG || TRAINING_BENCHMARK
+        // Training speed benchmark (docs/DEVICE_NOTES.md) instead of the app.
+        if let request = TrainingBenchmark.request { TrainingBenchmarkView(request: request) } else { app }
+        #else
+        app
+        #endif
+    }
+
+    @ViewBuilder private var app: some View {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--preview-fusion") {
             FusionProcessingView(progress: 0.67, stage: .fusing,

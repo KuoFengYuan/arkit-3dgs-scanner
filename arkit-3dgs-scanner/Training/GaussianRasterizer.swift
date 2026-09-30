@@ -304,7 +304,7 @@ nonisolated final class GaussianRasterizer: @unchecked Sendable {
                              edgeMap: MTLBuffer, lossSums: MTLBuffer, depth: DepthTarget?, rows: Range<Int>) {
         guard !rows.isEmpty else { return }
         let cam = Self.bind(camera, layout: layout, count: count)
-        encoder.dispatch(backwardBlend, groups: (camera.tilesX, rows.count), size: (16, 16),
+        encoder.dispatch(backwardBlend, groups: (camera.tilesX, rows.count), size: (16, 16 / Self.backwardPixelsPerThread),
                          [.value(cam), .buffer(tileRanges), .buffer(values), .buffer(pixels), .buffer(conics),
                           .buffer(colors), .buffer(target.image), .buffer(target.lastIndex),
                           .value(SIMD4<Float>(background, 0)), .buffer(imageGrad), .buffer(grad2d),
@@ -319,6 +319,10 @@ nonisolated final class GaussianRasterizer: @unchecked Sendable {
         encoder.dispatch(projectBack, threads: count, [.value(cam), .value(layout), .buffer(model), .buffer(grad2d),
                                                        .buffer(tiles), .buffer(grads), .buffer(poseGrad)])
     }
+
+    /// Pixels each thread of the backward blend replays (threadgroups of 16 × 16/n); mirrors
+    /// `kBackwardPixels` in GaussianRaster.metal.
+    static let backwardPixelsPerThread = 4
 
     /// Tile-row bands of at most ~2,048 tiles (two bands at 960 × 720, six at 1920 × 1440).
     static func backwardBands(tilesX: Int, tilesY: Int, maxTiles: Int = 2_048) -> [Range<Int>] {
