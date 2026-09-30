@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  FloorPlanDXF.swift
 //  fable — 平面圖的 DXF 匯出（AutoCAD / BricsCAD / QCAD / Rhino 等直接開）

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 """驗收一次實機掃描：曝光上限、清晰度閘門、逐幀內參是否都如預期生效。
 
 給定 App 匯出的掃描資料夾（或解壓後的 .zip），逐項檢查採集端的品質修正，

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). On-device 3DGS training; see LICENSE and NOTICE.
 // End-to-end tests of on-device 3DGS training on synthetic scans (Mac GPU, same Metal kernels):
 // convergence, PPISP exposure recovery, pose refinement, the Gaussian cap under a small memory

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  PointCloudFloorPlan.swift
 //  fable — 由 LiDAR 點雲直接產生 2D 平面圖（不經過 RoomPlan）

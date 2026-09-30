@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  FloorPlanData.swift
 //  fable — RoomPlan 的參數化結果 → 可用的平面圖（JSON + SVG）

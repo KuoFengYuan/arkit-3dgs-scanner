@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 // swiftc -O arkit-3dgs-scanner/Capture/{Models,BlurFilter,CaptureConfig,Utils,SmartShutter,DepthSampleFilter,CameraOnlyGeometry,SparseLandmarkFilter}.swift tools/test_camera_only_accuracy.swift -o /tmp/camera-accuracy && /tmp/camera-accuracy
 import Foundation
 import simd

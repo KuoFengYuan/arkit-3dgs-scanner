@@ -57,7 +57,12 @@ python3 -m venv .venv
 
 ## License
 
-Contributions are accepted under the project's [Apache License 2.0](LICENSE). Keep [NOTICE](NOTICE) intact, and give new 3DGS source files the same `SPDX-License-Identifier` header.
+New contributions are accepted under the project's [PolyForm Noncommercial License 1.0.0](LICENSE). Keep [NOTICE](NOTICE) intact. Commercial use is not permitted under this licence; previously granted Apache 2.0 rights remain unchanged. See [licensing scope and history](docs/LICENSING.md).
+
+- **Headers:** every project source file (Swift, Metal, Python, shell) starts with `SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0` and the copyright line, after a shebang if there is one. Preserve any separately licensed third-party notices.
+- **No copied code:** write it from the paper or the format documentation. Third-party code under the GPL or a different noncommercial licence, such as LichtFeld Studio or the original 3D Gaussian Splatting release, must not be included, not even a single function.
+- **Permissive third-party code:** if it must be included, keep its copyright and licence text with it and list it in NOTICE.
+- **Media:** say in the PR where images and videos come from, including AI-generated ones.
 
 ## PR and merge
 

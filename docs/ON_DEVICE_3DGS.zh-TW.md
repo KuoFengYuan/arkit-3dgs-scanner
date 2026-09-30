@@ -568,7 +568,7 @@ F21171 是一間房間加浴室：169 秒內拍了 1,234 張，選用 858 張，
 
 ## 來源與授權
 
-訓練器是本個人研究專案的一部分，並非任何雇主或機構的產品，也未經其背書。採用 [Apache License 2.0](../LICENSE)：可以商用，複製與衍生作品須保留 [NOTICE](../NOTICE)，並註明作者為 Kuo Feng-Yuan（KuoFengYuan）。部分方法仍可能涉及第三方專利；以上不構成法律意見。
+訓練器是本個人研究專案的一部分，並非任何雇主或機構的產品，也未經其背書。採用 [PolyForm Noncommercial License 1.0.0](../LICENSE)，本授權不允許商業用途。再散布時須提供授權條款或其網址，以及 [NOTICE](../NOTICE) 中以 `Required Notice:` 開頭的作者署名。先前已授予的 Apache 2.0 權利不撤回；詳見[授權範圍與歷史](LICENSING.zh-TW.md)。部分方法仍可能涉及第三方專利，本授權未授予其權利。
 
 
 - **程式碼：** 未包含任何 LichtFeld Studio（GPL-3.0）原始碼，只遵循其公開的演算法與預設參數：MRNF、PPISP 整合與 Mip 濾波設定。
@@ -581,6 +581,11 @@ F21171 是一間房間加浴室：169 秒內拍了 1,234 張，選用 858 張，
   - 「只更新看得到的高斯」的 Adam 實驗參考 Taming 3DGS（Mallick 等人，2024）的 sparse Adam。成長漸進的精神類似 Taming 3DGS 的預算式密化，重新分配實驗則類似 3DGS-MCMC（Kheradmand 等人，2024）的重新配置。
 - **本專案在 MRNF 基底上自己加入的方法：** 依視角調整學習率的姿態微調、種子擴散、LiDAR 深度種子、補洞、LiDAR 深度損失、成長漸進、依證據重新分配、反向傳播中的轉置式 SIMD 歸約，以及較長的預設。
 - **姿態微調：** LichtFeld Studio 的文件描述了直接最佳化姿態的模式，但沒有附上對應程式碼，這裡依該描述實作。
+- **原始碼比對（2026-09-30）：** 把每個 Swift、Metal、Python 與 shell 檔，和 LichtFeld Studio、Inria gaussian-splatting（含其 CUDA 光柵化器）、gsplat 與 nv-tlabs/ppisp 比對。比對項目有三種：連續 20 個相同的程式 token、忽略識別字後連續 40 個 token，以及註解中連續 8 個相同的英文字。
+  - 訓練器中相同的片段只有標準公式，最長 46 個 token：球諧函數基底、高斯衰減、四元數轉矩陣，以及 SSIM 的累加式。
+  - 有一個工具函式，也就是 `tools/geometry.py` 的旋轉矩陣轉四元數，和 COLMAP 的 `read_write_model.py`（BSD-3-Clause）逐字相同。它已改用 Shepperd 法重新實作，並由 `tools/test_math.py` 驗證，包含 180° 的旋轉。
+  - `tools/colmap_io.py` 寫出的文字檔標頭行與 COLMAP 自己的相同，讓相容工具能辨識檔案。
+  - token 比對無法排除所有改寫過的情況，也不構成法律意見。
 
 ## 限制
 

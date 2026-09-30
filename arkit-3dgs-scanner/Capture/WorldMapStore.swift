@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  WorldMapStore.swift
 //  fable — ARWorldMap 持久化：讓「關掉 app 之後再掃的下一個房間」落在同一個座標系

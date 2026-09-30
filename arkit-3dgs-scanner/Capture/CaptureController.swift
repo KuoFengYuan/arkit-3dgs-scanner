@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  CaptureController.swift
 //  fable — ARKit session 主控：狀態監聽、智慧快門觸發、背景寫入調度、匯出

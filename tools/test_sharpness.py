@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 """清晰度閘門的離線校準與回歸測試（對應 QualityMonitor.sharpness / minSharpnessRatio）。
 
 把 Swift 那段算式逐字搬到 numpy，餵已知模糊核的合成影像，回答三個問題：

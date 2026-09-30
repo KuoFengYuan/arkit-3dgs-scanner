@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). On-device 3DGS training; see LICENSE and NOTICE.
 // Photometric loss and PPISP: GPU loss value, image gradient and ISP parameter gradients against
 // a double-precision CPU reference with central finite differences.

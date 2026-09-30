@@ -4,11 +4,13 @@
 
 [English](README.md) | **繁體中文**
 
+**本專案為個人研究專案，供非商業用途使用。[PolyForm Noncommercial License 1.0.0](LICENSE) 不允許商業用途。**
+
 <a href="docs/media/demo.mp4"><img src="docs/media/demo.gif" width="320" alt="一次掃描從擷取到完成 3DGS 模型：掃描、融合、訓練與完成的模型"></a>
 
 *20 秒循環，8 倍速。[觀看 1 分鐘影片](docs/media/demo.mp4)（2.7 倍速）：掃描桌面、優化資料，並在 iPhone 上訓練 3DGS 模型。*
 
-用 ARKit 擷取照片、相機姿態與點雲，在手機上完成優化，再用 iPhone 的 GPU 訓練 3DGS 模型，或匯出 COLMAP 資料集給電腦上的訓練器。資料不會上傳。
+本專案研究如何在 iPhone 上採集並重建 3D 場景。用 ARKit 擷取照片、相機姿態與點雲，在手機上完成優化，再用 iPhone 的 GPU 訓練 3DGS 模型，或匯出 COLMAP 資料集給電腦上的訓練器。採集、優化與手機端訓練均在裝置上執行，App 不會上傳掃描資料。
 
 ## 主要功能
 
@@ -67,16 +69,25 @@ python3 tools/check_project.py
 bash tools/test_localization.sh
 ```
 
-## 授權
+## 版權與授權
 
-Copyright 2026 Kuo Feng-Yuan（[KuoFengYuan](https://github.com/KuoFengYuan)）。本專案採用 [Apache License 2.0](LICENSE)。
+Copyright © 2026 Kuo Feng-Yuan（[KuoFengYuan](https://github.com/KuoFengYuan)）。本專案採用 [PolyForm Noncommercial License 1.0.0](LICENSE)；該授權未授予的權利均予保留。
 
 **本專案為個人研究專案**，並非任何雇主或機構的產品，未經其背書，也不代表其立場。本專案依現狀提供，不附任何擔保。
 
-- **可以商用**，包含手機端 3DGS 訓練器；也可以修改與再散布。
-- **必須標註作者**：任何複製或衍生作品都要保留 [LICENSE](LICENSE) 與 [NOTICE](NOTICE)，並註明原作者為 Kuo Feng-Yuan（KuoFengYuan）。
+- **本授權僅允許非商業用途**，包含手機端 3DGS 訓練器。可依 [LICENSE](LICENSE) 定義的允許用途使用、修改與再散布，包含非商業研究及個人學習；商業用途不在本授權範圍內。
+- **必須標註作者**：再散布時須提供授權條款或其網址，以及 [NOTICE](NOTICE) 中以 `Required Notice:` 開頭的作者署名。將 [LICENSE](LICENSE) 與 [NOTICE](NOTICE) 隨複製或衍生作品一同保留，即可提供兩者。
+- **版權涵蓋範圍**：原始碼、文件，以及 `docs/media` 中的示範錄影，均為作者本人的作品。每個原始碼檔開頭都有 `SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0` 檔頭。
+- **App 圖示**：由作者指示 AI 影像生成工具製作。這類影像在部分法域可能不受著作權保護；在作者享有權利的範圍內，以相同條款授權。
 - 3DGS 訓練器是以 Swift 與 Metal 獨立實作。其中不含原版 3D Gaussian Splatting（Inria／MPII）與 Mip-Splatting 的程式碼，這兩者只允許非商用；也不含 LichtFeld Studio（GPL-3.0）的程式碼。參考的論文與專案列在 [NOTICE](NOTICE)。
-- 部分方法仍可能涉及第三方專利；以上不構成法律意見，商用前請自行確認。
+- **檔案格式**：COLMAP 匯出與 SOG 模型檔依照 COLMAP 與 PlayCanvas 文件所定義的格式。兩者的程式碼都未包含在內，讀寫程式是本專案自行撰寫。
+- **第三方軟體**：App 只使用 Apple 的系統框架。Python 工具需要另外安裝的套件（`tools/requirements.txt`），各自依其授權；本 repo 未包含任何第三方套件。
+- **商標**：Apple、iPhone、ARKit 與 Metal 是 Apple Inc. 的商標。其他產品與專案名稱屬於各自的所有者，僅用於說明相容性，不代表任何背書。
+- 部分方法仍可能涉及第三方專利；本授權未授予第三方專利的權利。
+
+**先前發布內容：** 截至 commit `d5d8e31` 以 Apache 2.0 發布的內容，仍保有原授權的權利，包含商業使用；本次變更不撤回已授予的權利。詳見[授權範圍與歷史](docs/LICENSING.zh-TW.md)及[歷史 Apache 2.0 條款](licenses/Apache-2.0.txt)。
+
+原始碼已與參考實作比對過，見[來源與授權](docs/ON_DEVICE_3DGS.zh-TW.md#來源與授權)。
 
 ## 文件索引
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  ExportManager.swift
 //  fable — COLMAP binary sparse model 匯出（LichtFeld-Studio / Inria 3DGS 直讀）

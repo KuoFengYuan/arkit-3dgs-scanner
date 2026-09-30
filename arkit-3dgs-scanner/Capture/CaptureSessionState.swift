@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 import Foundation
 
 /// 相機／追蹤狀態與資料處理階段分開，UI 與快門共用同一份開拍條件。

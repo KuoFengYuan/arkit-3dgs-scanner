@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  PointCloudFusion.swift
 //  fable — 錨點相對的空間磚化加權融合格（防漂移殘影核心）

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  test_pointcloud_plan.swift
 //  fable — 點雲 → 2D 平面圖的離線驗證（不需要 iPhone）

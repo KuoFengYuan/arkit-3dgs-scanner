@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  RefusionEngine.swift
 //  fable — 掃描後點雲重融合（Scaniverse 式「Processing」階段）

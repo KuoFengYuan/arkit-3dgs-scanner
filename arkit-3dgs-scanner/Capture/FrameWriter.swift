@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  FrameWriter.swift
 //  fable — 非同步關鍵幀寫入（actor：JPEG 編碼 / 深度 raw / poses.jsonl）

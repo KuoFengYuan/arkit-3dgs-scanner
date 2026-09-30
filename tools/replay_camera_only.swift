@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 // Desktop replay of the camera-only (LiDAR off) pipeline on a LiDAR scan, scored against
 // LiDAR-backed references. Reads the scan; never writes into it. Everything goes to WORK_DIR.
 //

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 // Desktop replay of on-device pose refinement and its photometric validation. Reads a scan
 // directory; never writes into it.
 //

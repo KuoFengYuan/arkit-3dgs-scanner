@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 """極簡 PLY 讀寫：支援 ascii / binary_little_endian、x y z (+ red green blue)。"""
 
 from __future__ import annotations

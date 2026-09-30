@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  Utils.swift
 //  fable — simd 矩陣工具與 CVPixelBuffer 零依賴複製 / 取樣

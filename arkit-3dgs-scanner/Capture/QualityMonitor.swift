@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  QualityMonitor.swift
 //  fable — 即時品質監控：角速度 / 動態模糊估計 / 光線 / 距離 / 追蹤狀態

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  FloorPlanCapture.swift
 //  fable — 與 3DGS 採集共用同一個 ARSession 的 RoomPlan 平面圖擷取

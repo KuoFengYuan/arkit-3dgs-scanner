@@ -526,7 +526,7 @@ Measured on the Mac GPU with the same Metal source:
 
 ## Provenance and licences
 
-The trainer is part of this personal research project, which is not a product of or endorsed by any employer or organisation. It is licensed under the [Apache License 2.0](../LICENSE): it may be used commercially, and copies and derivative works must keep [NOTICE](../NOTICE) and credit Kuo Feng-Yuan (KuoFengYuan) as the author. Third-party patents may cover some methods; this is not legal advice.
+The trainer is part of this personal research project, which is not a product of or endorsed by any employer or organisation. It is licensed under the [PolyForm Noncommercial License 1.0.0](../LICENSE): commercial use is not permitted under this licence. Redistribution must provide the licence terms or their URL and the `Required Notice:` author attribution in [NOTICE](../NOTICE). Previously granted Apache 2.0 permissions are not revoked; see [licensing scope and history](LICENSING.md). Third-party patents may cover some methods; this licence does not grant rights to them.
 
 
 - **Code:** no LichtFeld Studio (GPL-3.0) source code is included. Only its published algorithms and default parameters were followed: MRNF, the PPISP integration, and the Mip filter settings.
@@ -539,6 +539,11 @@ The trainer is part of this personal research project, which is not a product of
   - the visible-only Adam experiment after the sparse Adam of Taming 3DGS (Mallick et al., 2024). The growth ramp is similar in spirit to Taming 3DGS's budgeted densification, and the relocation experiment to the relocation of 3DGS-MCMC (Kheradmand et al., 2024).
 - **This project's own additions to the MRNF base:** pose refinement with a per-view rate, seed spread, LiDAR depth seeds, hole filling, the LiDAR depth loss, the growth ramp, evidence-based relocation, the transposed SIMD reduction in the backward pass, and the longer presets.
 - **Pose refinement:** LichtFeld Studio documents a direct pose-optimisation mode without shipping code for it, so the mode here was implemented from that description.
+- **Source check (2026-09-30):** every Swift, Metal, Python and shell file was compared with LichtFeld Studio, the Inria gaussian-splatting release (with its CUDA rasterizer), gsplat and nv-tlabs/ppisp. The comparison looked for runs of 20 identical code tokens, runs of 40 tokens with identifiers ignored, and runs of 8 identical comment words.
+  - In the trainer, the only shared runs are standard formulas of at most 46 tokens: the spherical-harmonics basis, the Gaussian falloff, quaternion to matrix, and the SSIM sums.
+  - One tool function, the rotation-to-quaternion conversion in `tools/geometry.py`, matched COLMAP's `read_write_model.py` (BSD-3-Clause) word for word. It was rewritten from Shepperd's method, and `tools/test_math.py` checks it, including 180° turns.
+  - `tools/colmap_io.py` writes COLMAP's own text-file header lines, so that compatible tools recognise the files.
+  - A token comparison cannot rule out every paraphrase, and it is not legal advice.
 
 ## Limits
 
