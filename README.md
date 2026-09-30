@@ -1,19 +1,113 @@
 # ARKit 3DGS Scanner
 
-**Scan with an iPhone, then train 3D Gaussian Splatting on the phone or export a dataset.**
+**Scan with an iPhone, train 3D Gaussian Splatting on the phone, or export a dataset.**
 
 **English** | [繁體中文](README.zh-TW.md)
 
-**A personal research project for noncommercial use. Commercial use is not permitted under the [PolyForm Noncommercial License 1.0.0](LICENSE).**
+[Quick start](#quick-start) · [Pipeline](#pipeline-and-features) · [Development](#development) · [Training](#train-3dgs-on-the-iphone) · [Benchmarks](#training-benchmarks) · [Guides](#documentation) · [License](#copyright-and-license)
 
-## Training highlights
+**Personal research project · Noncommercial use only under [PolyForm Noncommercial 1.0.0](LICENSE).**
+
+Capture photos, camera poses and point clouds with ARKit, refine the scan, then train a 3DGS model with Swift and Metal on the iPhone GPU. You can also export a COLMAP dataset for a desktop trainer. Capture, refinement and on-device training run locally; the app does not upload scans.
 
 > [!IMPORTANT]
-> **Optimised model training: 1.39× faster on iPhone 17 Pro and up to 1.45× faster on Mac (M1 Pro).** Training time and PSNR at the same workload are compared together below.
+> **Measured training speed-up: 1.39× on iPhone 17 Pro and up to 1.45× on Mac (M1 Pro).** [See the combined speed and PSNR comparison](#training-benchmarks) on the author's F21171 scan.
+
+<a href="docs/media/demo.mp4"><img src="docs/media/demo.gif" width="360" alt="One scan from capture to a trained 3DGS model: scanning, fusion, training, and the finished model"></a>
+
+*20-second demo loop at 8× speed. [Watch the 1-minute video](docs/media/demo.mp4) (2.7× speed): scan a desk, refine the data, and train a 3DGS model on the iPhone.*
+
+## Quick start
+
+| Requirement | Supported setup |
+| --- | --- |
+| Build | Xcode 26+ |
+| Run | iPhone or iPad with iOS 17+; on-device training needs A14 or newer |
+| Capture | LiDAR is optional; depth capture needs a LiDAR device |
+
+Use a physical device for AR capture. The Simulator is for UI checks.
+
+```sh
+git clone https://github.com/KuoFengYuan/arkit-3dgs-scanner.git
+cd arkit-3dgs-scanner
+open arkit-3dgs-scanner.xcodeproj
+```
+
+1. Select the **arkit-3dgs-scanner** scheme, your signing team and a physical device, then Run. This scheme uses an optimised Release build.
+2. Tap **Start scanning** and move so each surface is seen from several positions.
+3. Stop, wait for processing and review the point cloud. Continue scanning to fill gaps.
+4. Tap **Train 3DGS** to build a model on the phone, or **Export 3DGS dataset** to share a COLMAP ZIP for a desktop trainer.
+
+## Pipeline and features
+
+```mermaid
+flowchart TB
+    Capture["Capture · ARKit"] --> Refine["Refine photos, poses and depth"]
+    Refine --> Review["Review point cloud, route and scale"]
+    Review --> Train["Train on the iPhone · Metal"]
+    Review --> Export["Export COLMAP dataset · ZIP"]
+    Train --> Model["View and share · SOG model"]
+    Export --> Desktop["External 3DGS trainer"]
+```
+
+| Stage | What the app does | Guide |
+| --- | --- | --- |
+| Capture | LiDAR or camera-only scanning, keyframes chosen by movement and image quality, and revisit guidance in large scenes | [Capture architecture](docs/CAPTURE_ARCHITECTURE.md) |
+| Refine | Sharp-photo selection, camera corrections applied only when photo alignment improves, and multi-view depth fusion | [Pose refinement](docs/POSE_REFINEMENT.md) |
+| Review | Point-cloud and photo/path playback, metric measurements, scale calibration, and continued scanning | [Fusion review](docs/FUSION_REVIEW.md) |
+| Train | Swift/Metal 3DGS, a live preview you can orbit, pause/resume, saved checkpoints and SOG model sharing | [On-device training](docs/ON_DEVICE_3DGS.md) |
+| Export | Original photos, `sparse/0`, depth and poses in a COLMAP ZIP | [Dataset export](docs/HISTORY_TRAINING_EXPORT.md) |
+
+Every stopped scan is saved in **Scan history**, where you can preview, train, refine a copy, export or delete it. The app defaults to **Traditional Chinese**, with a persistent **English** option on the home screen.
+
+## Development
+
+### Where to start in the source
+
+| Area | Responsibilities | Entry points |
+| --- | --- | --- |
+| Capture | AR session, keyframes, pose refinement, fusion and dataset export | [CaptureController.swift](arkit-3dgs-scanner/Capture/CaptureController.swift), [ExportManager.swift](arkit-3dgs-scanner/Capture/ExportManager.swift) |
+| History | Scan storage, review, refinement and deletion | [ScanLibrary.swift](arkit-3dgs-scanner/History/ScanLibrary.swift) |
+| Training | App lifecycle, run state, memory, checkpoints and training iterations | [TrainingCenter.swift](arkit-3dgs-scanner/Training/UI/TrainingCenter.swift), [GaussianTrainingSession.swift](arkit-3dgs-scanner/Training/GaussianTrainingSession.swift), [GaussianTrainer.swift](arkit-3dgs-scanner/Training/GaussianTrainer.swift) |
+| Metal kernels | Projection, sorting, blending, loss and optimiser | [Training/](arkit-3dgs-scanner/Training/) (`GaussianRaster`, `GaussianSort`, `GaussianLoss`, `GaussianOptim`) |
+| App UI | Home screen and shared visual components | [ContentView.swift](arkit-3dgs-scanner/ContentView.swift), [DesignSystem.swift](arkit-3dgs-scanner/Design/DesignSystem.swift) |
+| Tools | Dataset conversion, replay, quality analysis and regression checks | [tools/](tools/), [train_gaussians.swift](tools/train_gaussians.swift) |
+
+Read [capture architecture](docs/CAPTURE_ARCHITECTURE.md) or [training architecture](docs/ON_DEVICE_3DGS_ARCHITECTURE.md) alongside the source. The trainer is an independent Swift/Metal implementation based on MRNF, with pose refinement, LiDAR depth seeds/loss and per-image exposure/colour correction (PPISP). Capture and dataset preparation can be used independently of the trainer.
+
+### Checks and contribution workflow
+
+Run from the repository root:
+
+```sh
+python3 tools/check_project.py
+bash tools/test_localization.sh
+```
+
+For trainer changes, also run `bash tools/test_gaussian_training.sh`; it runs the app's Metal kernels on the Mac GPU. It does not establish iPhone speed, memory use or heat. Use **arkit-3dgs-scanner-Debug** for source-level debugging; use the Release scheme for normal capture and training.
+
+Follow [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md): start an updated-main task branch (`Feature/`, `Bugfix/`, `Enhance/`), validate, open a PR, merge after required checks/reviews, then clean up the branch. The contribution guide includes device/Simulator build commands and optional Python tools. The asset catalog includes a 1024 × 1024 app icon for archived builds and TestFlight.
+
+## Train 3DGS on the iPhone
+
+| Quality | Base iterations | Gaussian cap |
+| --- | --- | --- |
+| Quick preview | 4,000 | 300,000 |
+| Standard (recommended) | 10,000 | 600,000 |
+| High quality | 20,000 | 1,000,000 |
+
+- **Resolution:** 960 px by default, with 1,440 or full 1,920 px options.
+- **Iterations:** scans with many photos automatically get more; you can adjust the count before starting. The memory plan may lower the Gaussian cap.
+- **Pause and resume:** progress is saved when the phone is too hot, the battery is low, memory runs short or the app leaves the foreground. Supported iOS 26+ devices can continue in the background with Background GPU Access and an OS-granted task.
+- **Finish and share:** finish early, enhance a saved model later, or share a `scan_…-3dgs.zip` containing `gaussians.sog`. SuperSplat, PlayCanvas and LichtFeld Studio can open it.
+
+For setup, live previews, background requirements and model files, see [on-device 3DGS training](docs/ON_DEVICE_3DGS.md).
+
+## Training benchmarks
 
 **Dataset source:** F21171 is a room-and-bathroom scan captured by the project author. The table reports measured training results on the author's own scan.
 
-F21171, fixed **10,000 iterations**, 960 px, PPISP on, 600,000 Gaussian cap, 715 training photos and the same 143 held-out photos. The training method and settings are the same before and after this speed optimisation. PSNR is scored on held-out photos after test-time pose alignment; higher is better.
+Same workload before and after the speed optimisation: **10,000 iterations, 960 px, PPISP on and a 600,000 Gaussian cap**. PSNR measures similarity to held-out photos after test-time pose alignment; **higher is better**.
 
 | Device / metric | Training time: before → after | Speed-up | PSNR: before → after | PSNR change |
 | --- | --- | --- | --- | --- |
@@ -21,74 +115,45 @@ F21171, fixed **10,000 iterations**, 960 px, PPISP on, 600,000 Gaussian cap, 715
 | Mac, M1 Pro: colour-aligned PSNR at 1,920 px | Same Mac runs | Same speed-up | 25.329 → **25.354 dB** | +0.025 dB |
 | iPhone 17 Pro: aligned PSNR | 769.4 → **553.1 s** | **1.39×** | 23.946 → **23.907 dB** | −0.039 dB |
 
-Mac PSNR values are means of two runs per version; speed-up uses the mean time before the change. Xcode builds ran during the second after run. The phone values are one run per version, both at `serious` thermal state. Against a separate before run that started cooler (658.0 s), the phone's improvement is 1.19×.
+The aligned PSNR differences are within the baseline's measured Mac rerun spread of up to 0.10 dB. The colour-aligned metric also removes overall brightness and colour differences before scoring.
 
-PSNR differences are within the baseline's measured rerun spread of up to 0.10 dB on the Mac. Colour alignment removes overall brightness and colour differences before scoring. The Mac's empty-pixel share rose by 0.4 percentage points on average; with two runs each, that difference is unresolved.
+<details>
+<summary>Measurement setup and limits</summary>
 
-The phone used an iOS 27.0 Release benchmark build that calls the trainer directly, without live previews. Other iPhones, High quality, full-resolution training and the normal training screen were not measured. [Full speed and quality results](docs/ON_DEVICE_3DGS.md#faster-training-steps-on-a-large-scan).
+- **Dataset split:** 715 training photos and the same 143 held-out photos. The training method and settings are unchanged across the speed comparison.
+- **Mac:** PSNR is the mean of two runs per version. Speed-up uses the mean time before the change; Xcode builds ran during the second after run.
+- **Phone:** one run per version, both at `serious` thermal state. Compared with another before run that started cooler (658.0 s), the speed-up is 1.19×.
+- **Quality:** the Mac's empty-pixel share rose by 0.4 percentage points on average. With two runs each, that difference is unresolved.
+- **Scope:** the iPhone 17 Pro used an iOS 27.0 Release benchmark build that calls the trainer directly, without live previews. Other iPhones, High quality, full-resolution training and the normal training screen were not measured. Mac and Simulator results do not establish iPhone performance.
 
-<a href="docs/media/demo.mp4"><img src="docs/media/demo.gif" width="320" alt="One scan from capture to a trained 3DGS model: scanning, fusion, training, and the finished model"></a>
+[Full speed and quality results](docs/ON_DEVICE_3DGS.md#faster-training-steps-on-a-large-scan) · [Reproduce the device benchmark](docs/DEVICE_NOTES.md#training-speed-benchmark)
 
-*A 20-second loop at 8× speed. [Watch the 1-minute video](docs/media/demo.mp4) (2.7× speed): scan a desk, refine the data, and train a 3DGS model on the iPhone.*
+</details>
 
-This project explores capturing and reconstructing 3D scenes on an iPhone. Capture photos, camera poses, and point clouds with ARKit, refine them on the phone, then train a 3DGS model on the iPhone GPU or export a COLMAP dataset for a desktop trainer. Capture, refinement, and on-device training run locally; the app does not upload scans.
+## Documentation
 
-## Features
+| What you want to understand | Start here |
+| --- | --- |
+| AR capture and processing flow | [Capture architecture](docs/CAPTURE_ARCHITECTURE.md) |
+| Trainer ownership and GPU data flow | [Training architecture](docs/ON_DEVICE_3DGS_ARCHITECTURE.md) |
+| Training methods, settings and experiments | [On-device 3DGS training](docs/ON_DEVICE_3DGS.md) |
+| Dataset files and coordinate conventions | [Dataset export](docs/HISTORY_TRAINING_EXPORT.md), [Coordinates](docs/COORDINATES.md) |
+| Training on a desktop | [External training](docs/TRAINING.md) |
+| Adding translated UI text | [Localization](docs/LOCALIZATION.md) |
 
-- **Capture with or without LiDAR.** Keyframes are chosen from movement and image quality. LiDAR depth is fused across views; camera-only scans keep verified sparse points and can add image-based depth. The app asks you to revisit covered ground in large spaces, to correct drift. See [capture](docs/CAPTURE_ARCHITECTURE.md) and [camera-only reconstruction](docs/CAMERA_ONLY_ACCURACY.md).
-- **Refine on the phone.** Sharp-photo selection, camera pose refinement that applies only when a photo-alignment check improves, and multi-view depth fusion. See [pose refinement](docs/POSE_REFINEMENT.md) and [LiDAR surface consistency](docs/LIDAR_SURFACE_CONSENSUS.md).
-- **Review before you train.** Inspect the point cloud, replay the capture route, continue the scan to fill gaps, and measure or calibrate metric scale. See [fusion review](docs/FUSION_REVIEW.md) and [metric scale](docs/LOOP_CLOSURE_AND_SCALE.md).
-- **Train 3DGS on the iPhone.** A Metal trainer based on MRNF, with pose refinement, LiDAR depth seeds and loss, a live preview you can orbit, pause and resume, and a compact SOG model to share. See [on-device 3DGS training](docs/ON_DEVICE_3DGS.md).
-- **Export a COLMAP dataset.** Original photos, `sparse/0`, depth, and poses in one ZIP. See [export](docs/HISTORY_TRAINING_EXPORT.md) and [external training](docs/TRAINING.md).
-- **Scan history.** Every stopped scan is saved. You can preview, train, refine a copy, export, or delete it.
-- **Traditional Chinese (default) and English**, switchable on the home screen.
+<details>
+<summary>All guides by topic</summary>
 
-```text
-Scan → Refine → Review point cloud ─┬─ Train 3DGS on the iPhone → View / share the model
-                  │                 └─ Export COLMAP ZIP → External 3DGS training
-                  └─ Continue scanning to fill gaps
-```
+| Topic | Guides |
+| --- | --- |
+| Capture | [Capture architecture](docs/CAPTURE_ARCHITECTURE.md) · [Interface design](docs/INTERFACE_DESIGN.md) · [Live preview and quality gates](docs/LIDAR_QUALITY_AND_PREVIEW.md) · [Capture throughput](docs/CAPTURE_THROUGHPUT.md) · [Device operation](docs/DEVICE_NOTES.md) |
+| Processing | [Fusion review](docs/FUSION_REVIEW.md) · [Pose refinement](docs/POSE_REFINEMENT.md) · [Loop closure and metric scale](docs/LOOP_CLOSURE_AND_SCALE.md) · [LiDAR surface consistency](docs/LIDAR_SURFACE_CONSENSUS.md) · [Camera-only reconstruction](docs/CAMERA_ONLY_ACCURACY.md) · [Surface reconstruction](docs/SURFACE_RECONSTRUCTION.md) · [Fusion diagnostics](docs/SCAN_FUSION_DIAGNOSTICS.md) · [Large-scan memory](docs/LARGE_SCAN_MEMORY.md) |
+| 3DGS | [On-device training](docs/ON_DEVICE_3DGS.md) · [Training architecture](docs/ON_DEVICE_3DGS_ARCHITECTURE.md) · [Dataset refinement](docs/ON_DEVICE_TRAINING_QUALITY.md) · [External training](docs/TRAINING.md) |
+| Data | [Export](docs/HISTORY_TRAINING_EXPORT.md) · [Coordinate conventions](docs/COORDINATES.md) · [Language support](docs/LOCALIZATION.md) |
 
-## Quick start
+Every guide has a Traditional Chinese version linked at its top. For a reproducible issue, include the device, capture mode, build configuration, processing report, and a small scan sample when you can.
 
-**Requirements:** Xcode 26+ and an iPhone or iPad with iOS 17+. On-device training needs an A14 chip or newer. LiDAR depth needs a LiDAR device. The Simulator can check the UI, not real AR scanning.
-
-```sh
-git clone https://github.com/KuoFengYuan/arkit-3dgs-scanner.git
-open arkit-3dgs-scanner/arkit-3dgs-scanner.xcodeproj
-```
-
-1. In Xcode, select the `arkit-3dgs-scanner` scheme, your signing team, and a physical device, then Run.
-2. Tap **Start scanning** and move around the scene so each surface is seen from several positions.
-3. Stop, wait for processing, and check the point cloud. Continue scanning if something is missing.
-4. Tap **Train 3DGS** to build a model on the phone, or **Export 3DGS dataset** to share a ZIP for a desktop trainer.
-
-## Train 3DGS on the iPhone
-
-| Quality | Iterations | Gaussian cap |
-| --- | --- | --- |
-| Quick preview | 4,000 | 300,000 |
-| Standard (recommended) | 10,000 | 600,000 |
-| High quality | 20,000 | 1,000,000 |
-
-- **Resolution:** training images at 960 (default), 1,440, or the photos' full 1,920 px.
-- **Iterations:** scans with many photos get more iterations. You can adjust the count before starting.
-- **While it trains:** you can keep using the app. The run saves progress and pauses when the phone is too hot, the battery is low, memory runs short, or you switch apps. On iOS 26 it can continue in the background with the Background GPU Access capability.
-- **Finish early** at any time, then **Enhance model** later to keep training it.
-- **Share:** a `scan_…-3dgs.zip` with `gaussians.sog`, which SuperSplat, PlayCanvas, and LichtFeld Studio open directly.
-
-Training speed, memory use and thermal state have been measured on iPhone 17 Pro in the benchmark above; other devices and the training screen with live previews still need measurement. Mac and Simulator results do not establish iPhone performance. See [on-device 3DGS training](docs/ON_DEVICE_3DGS.md) for usage, the method, measured results, and file formats.
-
-## Development
-
-Follow [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md): task branches (`Feature/`, `Bugfix/`, `Enhance/`), a PR to `main`, and branch cleanup after the merge. The contribution guide lists the checks, the code layout, and the optional Python tools.
-
-The asset catalog includes a 1024 × 1024 app icon for archived iOS builds and TestFlight distribution.
-
-```sh
-python3 tools/check_project.py
-bash tools/test_localization.sh
-```
+</details>
 
 ## Copyright and license
 
@@ -109,14 +174,3 @@ Copyright © 2026 Kuo Feng-Yuan ([KuoFengYuan](https://github.com/KuoFengYuan)).
 **Earlier releases:** material published under Apache 2.0 through commit `d5d8e31` keeps its original permissions, including commercial use. This change does not revoke those grants. See [licensing scope and history](docs/LICENSING.md) and the [historical Apache 2.0 text](licenses/Apache-2.0.txt).
 
 The sources were compared with the reference implementations; see [provenance](docs/ON_DEVICE_3DGS.md#provenance-and-licences).
-
-## Documentation
-
-| Topic | Guides |
-| --- | --- |
-| Capture | [Capture architecture](docs/CAPTURE_ARCHITECTURE.md) · [Interface design](docs/INTERFACE_DESIGN.md) · [Live preview and quality gates](docs/LIDAR_QUALITY_AND_PREVIEW.md) · [Capture throughput](docs/CAPTURE_THROUGHPUT.md) · [Device operation](docs/DEVICE_NOTES.md) |
-| Processing | [Fusion review](docs/FUSION_REVIEW.md) · [Pose refinement](docs/POSE_REFINEMENT.md) · [Loop closure and metric scale](docs/LOOP_CLOSURE_AND_SCALE.md) · [LiDAR surface consistency](docs/LIDAR_SURFACE_CONSENSUS.md) · [Camera-only reconstruction](docs/CAMERA_ONLY_ACCURACY.md) · [Surface reconstruction](docs/SURFACE_RECONSTRUCTION.md) · [Fusion diagnostics](docs/SCAN_FUSION_DIAGNOSTICS.md) · [Large-scan memory](docs/LARGE_SCAN_MEMORY.md) |
-| 3DGS | [On-device training](docs/ON_DEVICE_3DGS.md) · [Training architecture](docs/ON_DEVICE_3DGS_ARCHITECTURE.md) · [Dataset refinement](docs/ON_DEVICE_TRAINING_QUALITY.md) · [External training](docs/TRAINING.md) |
-| Data | [Export](docs/HISTORY_TRAINING_EXPORT.md) · [Coordinate conventions](docs/COORDINATES.md) · [Language support](docs/LOCALIZATION.md) |
-
-Every guide has a Traditional Chinese version linked at its top. For a reproducible issue, include the device, capture mode, build configuration, processing report, and a small scan sample when you can.
