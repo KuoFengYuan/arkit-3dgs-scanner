@@ -98,6 +98,11 @@ nonisolated enum GPUArg {
     static func value<T>(_ value: T) -> GPUArg {
         withUnsafeBytes(of: value) { .bytes(Array($0)) }
     }
+
+    /// A small array of structs (setBytes, at most 4 KB).
+    static func array<T>(_ values: [T]) -> GPUArg {
+        values.withUnsafeBytes { .bytes(Array($0)) }
+    }
 }
 
 nonisolated extension MTLComputeCommandEncoder {

@@ -19,16 +19,27 @@ constant uint kGrad2DStride = 13;   // mirrors GaussianRasterizer.grad2DStride
 
 /// Mirrors `AdamParams` in Swift.
 struct AdamParams {
-    float lr, beta1, beta2, epsilon;
-    float biasCorrection1, biasCorrection2;   // 1 - beta^t
-    uint offset, width;                        // group offset (floats) and floats per row
-    uint rows, capacity, mode, skip;           // mode: 0 plain, 1 opacity reg, 2 scale hinge; skip: no update
+    float beta1, beta2, epsilon;
+    float biasCorrection1, biasCorrection2;    // 1 - beta^t
     float opacityReg, sharePenalty, shareLimit;
+    uint rows, capacity, groups;               // live rows, rows allocated, entries of `AdamGroup`
     uint visibleOnly;                          // 1: skip rows the view did not reach
+};
+
+/// One optimiser group (parameter block) of an `adam_step` dispatch; mirrors `AdamGroup`.
+struct AdamGroup {
+    uint offset, width;       // block offset (floats, capacity-strided) and floats per row
+    uint start;               // first thread of the group (groups follow each other)
+    uint mode;                // 0 plain, 1 opacity regulariser, 2 scale hinge
+    float lr;
+    float unused0, unused1, unused2;
 };
 
 inline float sigmoidf(float x) { return 1.0f / (1.0f + exp(-x)); }
 
+/// Dense Adam over every optimiser group in one dispatch: thread i updates one float of the
+/// group whose range holds i. A row the current view did not reach (tiles = 0) has a zero
+/// gradient, which `project_backward` leaves unwritten, so it is not read either.
 kernel void adam_step(device float* params [[buffer(0)]],
                       device const float* grads [[buffer(1)]],
                       device float* m [[buffer(2)]],
@@ -36,19 +47,24 @@ kernel void adam_step(device float* params [[buffer(0)]],
                       device const float* stats [[buffer(4)]],
                       constant AdamParams& a [[buffer(5)]],
                       device const uint* tiles [[buffer(6)]],
+                      constant AdamGroup* groups [[buffer(7)]],
                       uint i [[thread_position_in_grid]]) {
-    if (a.skip != 0 || i >= a.rows * a.width) return;
-    const uint row = i / a.width;
-    if (a.visibleOnly != 0 && tiles[row] == 0) return;
-    const uint index = a.offset + i;
-    float g = grads[index];
-    const bool active = stats[kStatActive * a.capacity + row] > 0.5f;
-    if (!active) return;
-    if (a.mode == 1) {
+    uint k = 0;
+    while (k + 1 < a.groups && i >= groups[k + 1].start) ++k;
+    const AdamGroup group = groups[k];
+    const uint element = i - group.start;
+    if (i < group.start || element >= a.rows * group.width) return;
+    const uint row = element / group.width;
+    const bool visible = tiles[row] > 0;
+    if (a.visibleOnly != 0 && !visible) return;
+    if (stats[kStatActive * a.capacity + row] <= 0.5f) return;
+    const uint index = group.offset + element;
+    float g = visible ? grads[index] : 0.0f;
+    if (group.mode == 1) {
         // Opacity regulariser: 0.003 * mean(sigmoid(o)), on every live row including unseen ones.
         const float s = sigmoidf(params[index]);
         g += a.opacityReg * s * (1 - s);
-    } else if (a.mode == 2) {
+    } else if (group.mode == 2) {
         // Screen-share hinge: shrink splats that cover more than `shareLimit` of the view.
         const float share = stats[kStatShareNow * a.capacity + row];
         if (share > a.shareLimit) g += a.sharePenalty * log2(share / a.shareLimit)
@@ -58,7 +74,7 @@ kernel void adam_step(device float* params [[buffer(0)]],
     const float vi = a.beta2 * v[index] + (1 - a.beta2) * g * g;
     m[index] = mi;
     v[index] = vi;
-    params[index] -= a.lr * (mi / a.biasCorrection1) / (sqrt(vi / a.biasCorrection2) + a.epsilon);
+    params[index] -= group.lr * (mi / a.biasCorrection1) / (sqrt(vi / a.biasCorrection2) + a.epsilon);
 }
 
 /// Folds one backward pass into the refine-window statistics:
@@ -77,9 +93,9 @@ kernel void mrnf_fold(device const float* grad2d [[buffer(0)]],
     if (isfinite(e)) stats[kStatEdgeSum * C + i] += e;
 }
 
-/// Relocation statistics of the backward pass that just ran, in its own command buffer (a
-/// preview render before the next step would replace `tiles`): views += 1 when the view's
-/// frustum reached the row, errorSum += sum w*E.
+/// Relocation statistics of the backward pass that just ran, in the Adam command buffer (after
+/// the backward pass succeeded, before a preview render can replace `tiles`): views += 1 when
+/// the view's frustum reached the row, errorSum += sum w*E.
 kernel void relocation_fold(device const float* grad2d [[buffer(0)]],
                             device float* stats [[buffer(1)]],
                             constant uint2& countCapacity [[buffer(2)]],

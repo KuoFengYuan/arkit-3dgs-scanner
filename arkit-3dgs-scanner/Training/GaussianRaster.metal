@@ -420,6 +420,8 @@ kernel void rasterize_forward(constant CameraParams& cam [[buffer(0)]],
 /// [dx, dy, dA, dB, dC, dOpacity, dR, dG, dB, sum w, sum w*error, sum w*edge], where w is the
 /// blending weight T*alpha. The last three drive MRNF's error- and edge-guided densification.
 constant uint kGrad2DStride = 13;   // mirrors GaussianRasterizer.grad2DStride
+/// Pixels per thread of `rasterize_backward`; mirrors `GaussianRasterizer.backwardPixelsPerThread`.
+constant uint kBackwardPixels = 4;
 
 /// One step of `simdSum16`: a lane keeps `W` of its 2W values, adding its partner's copies.
 template <uint W>
@@ -443,8 +445,31 @@ inline float simdSum16(thread float* v, uint lane) {
     return v[0] + simd_shuffle_xor(v[0], ushort(1));
 }
 
+/// Backward state of one pixel: its transmittance replayed back to front and what lies behind.
+struct BackwardPixel {
+    float T;              // transmittance in front of the current splat
+    float3 behind;        // colour of everything behind the current splat (with the background)
+    float behindE;        // depth-loss suffix sum_behind w |z - z_lidar|
+    float3 dC;            // dL/d(rgb) of the raw render
+    float error, edge;    // normalised error and edge values (MRNF statistics)
+    float depthWeight, lidarZ;
+    float2 centre;
+    uint last;            // list entries the forward pass consumed
+    bool inside;
+};
+
 /// Reverse replay of the blend. `imageGrad` holds dL/d(rgb) of the raw render; `pixelError`
 /// is the normalised per-pixel error map and `edges` the edge map of the target image.
+///
+/// Each thread replays `kPixels` pixels stacked vertically (threadgroups of 16 × 16/kPixels), so
+/// a SIMD group covers 16 × 2 kPixels pixels. Per splat, a SIMD group adds its lanes' values
+/// with `simdSum16` and makes one device atomic per value, so with four pixels per thread a small
+/// splat reaches fewer SIMD groups and each reduction covers four times the pixels. On an M1 Pro
+/// (F21171, 600,000 Gaussians) this took 18.1 ms per view with one pixel per thread, 12.7 ms
+/// with two, 10.9 ms with four and 31 ms with eight (register spills). Summing the SIMD groups in
+/// threadgroup memory first was slower (26 KB left room for one threadgroup per core; 3–13 KB
+/// with a barrier every 4–16 splats cost more than the atomics it saved); atomics are ~11% of
+/// this kernel's time. Batches of 128 splats were 1% faster than 64, and 256 were slower.
 kernel void rasterize_backward(constant CameraParams& cam [[buffer(0)]],
                                device const uint2* ranges [[buffer(1)]],
                                device const uint* ids [[buffer(2)]],
@@ -467,11 +492,9 @@ kernel void rasterize_backward(constant CameraParams& cam [[buffer(0)]],
                                uint tid [[thread_index_in_threadgroup]],
                                uint lane [[thread_index_in_simdgroup]],
                                uint simd [[simdgroup_index_in_threadgroup]]) {
-    // Batches of 64 Gaussians. Each SIMD group sums its 32 pixels' values for a Gaussian with
-    // `simdSum16` and adds them to device memory with one atomic per value. Summing the 8 SIMD
-    // groups in threadgroup memory first (26 KB) was slower: it left room for one threadgroup
-    // per GPU core. Batches of 128 or 256 were no faster.
-    constexpr uint kBatch = 64;
+    constexpr uint kPixels = kBackwardPixels;
+    constexpr uint kThreads = kTileThreads / kPixels;
+    constexpr uint kBatch = 128;
     // Large images are replayed in bands of tile rows, one command buffer each, so no single
     // command buffer runs long enough for the GPU watchdog to abort it.
     const uint2 tile = uint2(groupTile.x, groupTile.y + tileRowOffset);
@@ -480,95 +503,112 @@ kernel void rasterize_backward(constant CameraParams& cam [[buffer(0)]],
     threadgroup float4 sConic[kBatch];
     threadgroup float4 sColor[kBatch];
     threadgroup uint sId[kBatch];
-    threadgroup uint sLast[kTileThreads / 32];
+    threadgroup uint sLast[kThreads / 32];
     const uint W = cam.dims.x, H = cam.dims.y;
-    const uint2 pixel = tile * kTile + local;
-    const bool inside = pixel.x < W && pixel.y < H;
-    const float2 centre = float2(pixel) + 0.5f;
     const uint2 range = ranges[tile.y * cam.dims.z + tile.x];
-    const uint p = inside ? pixel.y * W + pixel.x : 0;
-    const float4 out = inside ? image[p] : float4(0);
-    float T = out.w;
-    const uint last = inside ? lastIndex[p] : range.x;
-    const float3 dC = inside ? imageGrad[p].xyz : float3(0);
     // Error map normalised to mean 1 (unnormalised when the mean is ~0).
     const float errorMean = lossSums[2] / float(W * H);
     const float errorScale = errorMean > 1e-6f ? 1.0f / errorMean : 1.0f;
-    const float error = inside ? pixelError[p] * errorScale : 0.0f;
-    const float edge = inside ? edges[p] : 0.0f;
-    // Colour of everything behind the current splat, including the background.
-    float3 behind = T * background.xyz;
-    // Depth loss sum_i w_i |z_i - z_lidar| / z_lidar: every contributing splat is pulled to the
-    // measured surface (floaters in front and behind do not cancel). `behindE` is its suffix.
-    float depthWeight = 0, lidarZ = 0, behindE = 0;
-    if (inside && depthLoss.w > 0.5f) {
-        const uint lw = uint(depthLoss.y), lh = uint(depthLoss.z);
-        const uint lx = min(lw - 1, uint(centre.x * float(lw) / float(W))), ly = min(lh - 1, uint(centre.y * float(lh) / float(H)));
-        lidarZ = lidar[ly * lw + lx];
-        if (lidarZ > 0) depthWeight = depthLoss.x / lidarZ;
+    BackwardPixel q[kPixels];
+    uint last = range.x;
+    for (uint k = 0; k < kPixels; ++k) {
+        const uint2 pixel = uint2(tile.x * kTile + local.x, tile.y * kTile + local.y * kPixels + k);
+        q[k].inside = pixel.x < W && pixel.y < H;
+        q[k].centre = float2(pixel) + 0.5f;
+        const uint p = q[k].inside ? pixel.y * W + pixel.x : 0;
+        q[k].T = q[k].inside ? image[p].w : 0.0f;
+        q[k].last = q[k].inside ? lastIndex[p] : range.x;
+        q[k].dC = q[k].inside ? imageGrad[p].xyz : float3(0);
+        q[k].error = q[k].inside ? pixelError[p] * errorScale : 0.0f;
+        q[k].edge = q[k].inside ? edges[p] : 0.0f;
+        q[k].behind = q[k].T * background.xyz;
+        // Depth loss sum_i w_i |z_i - z_lidar| / z_lidar: every contributing splat is pulled to
+        // the measured surface (floaters in front and behind do not cancel).
+        q[k].depthWeight = 0; q[k].lidarZ = 0; q[k].behindE = 0;
+        if (q[k].inside && depthLoss.w > 0.5f) {
+            const uint lw = uint(depthLoss.y), lh = uint(depthLoss.z);
+            const uint lx = min(lw - 1, uint(q[k].centre.x * float(lw) / float(W)));
+            const uint ly = min(lh - 1, uint(q[k].centre.y * float(lh) / float(H)));
+            q[k].lidarZ = lidar[ly * lw + lx];
+            if (q[k].lidarZ > 0) q[k].depthWeight = depthLoss.x / q[k].lidarZ;
+        }
+        last = max(last, q[k].last);
     }
     // Only replay up to the deepest entry any pixel of the tile consumed.
     const uint simdLast = simd_max(last);
     if (lane == 0) sLast[simd] = simdLast;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     uint end = range.x;
-    for (uint s = 0; s < kTileThreads / 32; ++s) end = max(end, sLast[s]);
+    for (uint s = 0; s < kThreads / 32; ++s) end = max(end, sLast[s]);
     if (end <= range.x) return;
     const uint batches = (end - range.x + kBatch - 1) / kBatch;
     for (uint b = 0; b < batches; ++b) {
         const uint batchEnd = end - b * kBatch;
         const uint batchStart = batchEnd > range.x + kBatch ? batchEnd - kBatch : range.x;
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        const uint index = batchStart + tid;
-        if (tid < kBatch && index < batchEnd) {
-            const uint g = ids[index];
-            sId[tid] = g;
-            sPixel[tid] = pixels[g];
-            sConic[tid] = conics[g];
-            sColor[tid] = colors[g];
+        for (uint slot = tid; slot < kBatch; slot += kThreads) {
+            const uint index = batchStart + slot;
+            if (index < batchEnd) {
+                const uint g = ids[index];
+                sId[slot] = g;
+                sPixel[slot] = pixels[g];
+                sConic[slot] = conics[g];
+                sColor[slot] = colors[g];
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         const int n = int(batchEnd - batchStart);
         for (int j = n - 1; j >= 0; --j) {
             const uint listIndex = batchStart + uint(j);
-            bool active = inside && listIndex < last;
-            float alpha = 0, G = 0;
-            float2 d = 0;
             const float4 co = sConic[j];
-            if (active) {
-                d = sPixel[j] - centre;
-                const float power = -0.5f * (co.x * d.x * d.x + co.z * d.y * d.y) - co.y * d.x * d.y;
-                G = exp(power);
-                alpha = min(kAlphaMax, co.w * G);
-                active = power <= 0 && alpha >= kAlphaMin;
+            const float2 mean = sPixel[j];
+            bool active[kPixels];
+            float alpha[kPixels], G[kPixels];
+            float2 d[kPixels];
+            bool any = false;
+            for (uint k = 0; k < kPixels; ++k) {
+                active[k] = q[k].inside && listIndex < q[k].last;
+                alpha[k] = 0; G[k] = 0; d[k] = 0;
+                if (active[k]) {
+                    d[k] = mean - q[k].centre;
+                    const float power = -0.5f * (co.x * d[k].x * d[k].x + co.z * d[k].y * d[k].y) - co.y * d[k].x * d[k].y;
+                    G[k] = exp(power);
+                    alpha[k] = min(kAlphaMax, co.w * G[k]);
+                    active[k] = power <= 0 && alpha[k] >= kAlphaMin;
+                }
+                any = any || active[k];
             }
-            if (!simd_any(active)) continue;
+            if (!simd_any(any)) continue;
+            const float4 color = sColor[j];
             float v[16];
             for (uint k = 0; k < 16; ++k) v[k] = 0;
-            if (active) {
-                const float Tbefore = T / (1 - alpha);
-                const float3 c = sColor[j].xyz;
-                const float w = alpha * Tbefore;
-                v[6] = w * dC.x; v[7] = w * dC.y; v[8] = w * dC.z;
-                float dAlpha = dot(dC, c * Tbefore - behind / (1 - alpha));
-                behind += c * w;
-                if (depthWeight > 0) {
-                    const float dz = sColor[j].w - lidarZ, e = fabs(dz);
-                    v[12] = depthWeight * w * sign(dz);
-                    dAlpha += depthWeight * (e * Tbefore - behindE / (1 - alpha));
-                    behindE += e * w;
+            for (uint k = 0; k < kPixels; ++k) {
+                if (!active[k]) continue;
+                thread BackwardPixel& s = q[k];
+                const float a = alpha[k];
+                const float Tbefore = s.T / (1 - a);
+                const float w = a * Tbefore;
+                v[6] += w * s.dC.x; v[7] += w * s.dC.y; v[8] += w * s.dC.z;
+                float dAlpha = dot(s.dC, color.xyz * Tbefore - s.behind / (1 - a));
+                s.behind += color.xyz * w;
+                if (s.depthWeight > 0) {
+                    const float dz = color.w - s.lidarZ, e = fabs(dz);
+                    v[12] += s.depthWeight * w * sign(dz);
+                    dAlpha += s.depthWeight * (e * Tbefore - s.behindE / (1 - a));
+                    s.behindE += e * w;
                 }
-                T = Tbefore;
-                if (co.w * G < kAlphaMax) {
-                    v[5] = G * dAlpha;
-                    const float dPower = alpha * dAlpha;
-                    v[0] = -dPower * (co.x * d.x + co.y * d.y);
-                    v[1] = -dPower * (co.y * d.x + co.z * d.y);
-                    v[2] = -0.5f * dPower * d.x * d.x;
-                    v[3] = -dPower * d.x * d.y;
-                    v[4] = -0.5f * dPower * d.y * d.y;
+                s.T = Tbefore;
+                if (co.w * G[k] < kAlphaMax) {
+                    v[5] += G[k] * dAlpha;
+                    const float dPower = a * dAlpha;
+                    const float2 dd = d[k];
+                    v[0] += -dPower * (co.x * dd.x + co.y * dd.y);
+                    v[1] += -dPower * (co.y * dd.x + co.z * dd.y);
+                    v[2] += -0.5f * dPower * dd.x * dd.x;
+                    v[3] += -dPower * dd.x * dd.y;
+                    v[4] += -0.5f * dPower * dd.y * dd.y;
                 }
-                v[9] = w; v[10] = w * error; v[11] = w * edge;
+                v[9] += w; v[10] += w * s.error; v[11] += w * s.edge;
             }
             // Lanes 2k and 2k + 1 now hold the SIMD group's total of value k.
             const float sum = simdSum16(v, lane);
@@ -582,8 +622,9 @@ kernel void rasterize_backward(constant CameraParams& cam [[buffer(0)]],
 inline float clampGrad(float g) { return clamp(g, -1e4f, 1e4f); }
 
 /// Chain rule from the per-Gaussian 2D gradients to the model parameters and the camera.
-/// Writes every row < count of `grads` (zero for culled Gaussians). `poseGrad` accumulates
-/// dL/d[R|t] of the world-to-camera transform (row-major 3x4) over all Gaussians.
+/// Writes the rows of `grads` the view reached (tiles > 0); the others have zero gradients,
+/// which `adam_step` knows without reading them. `poseGrad` accumulates dL/d[R|t] of the
+/// world-to-camera transform (row-major 3x4) over all Gaussians.
 kernel void project_backward(constant CameraParams& cam [[buffer(0)]],
                              constant ModelLayout& layout [[buffer(1)]],
                              device const float* model [[buffer(2)]],
@@ -592,19 +633,15 @@ kernel void project_backward(constant CameraParams& cam [[buffer(0)]],
                              device float* grads [[buffer(5)]],
                              device atomic_float* poseGrad [[buffer(6)]],
                              uint i [[thread_position_in_grid]],
-                             uint lane [[thread_index_in_simdgroup]]) {
+                             uint tid [[thread_index_in_threadgroup]],
+                             uint lane [[thread_index_in_simdgroup]],
+                             uint simd [[simdgroup_index_in_threadgroup]],
+                             uint simds [[simdgroups_per_threadgroup]]) {
     const uint count = cam.sh.z;
     const uint rest = cam.sh.y - 1;
     float poseLocal[12];
     for (uint k = 0; k < 12; ++k) poseLocal[k] = 0;
     bool active = i < count && tiles[i] > 0;
-    if (i < count && !active) {
-        for (uint k = 0; k < 3; ++k) { grads[layout.means + 3 * i + k] = 0; grads[layout.scales + 3 * i + k] = 0;
-                                       grads[layout.sh0 + 3 * i + k] = 0; }
-        for (uint k = 0; k < 4; ++k) grads[layout.quats + 4 * i + k] = 0;
-        grads[layout.opacities + i] = 0;
-        for (uint k = 0; k < rest * 3; ++k) grads[layout.shN + i * rest * 3 + k] = 0;
-    }
     if (active) {
         const float3 mean = load3(model + layout.means, i);
         const float3 logScale = load3(model + layout.scales, i);
@@ -743,11 +780,19 @@ kernel void project_backward(constant CameraParams& cam [[buffer(0)]],
         poseLocal[4] = dW1.x; poseLocal[5] = dW1.y; poseLocal[6] = dW1.z; poseLocal[7] = dt.y;
         poseLocal[8] = dW2.x; poseLocal[9] = dW2.y; poseLocal[10] = dW2.z; poseLocal[11] = dt.z;
     }
-    if (simd_any(active)) {
-        for (uint k = 0; k < 12; ++k) {
-            const float v = simd_sum(poseLocal[k]);
-            if (lane == 0) atomic_fetch_add_explicit(poseGrad + k, v, memory_order_relaxed);
-        }
+    // Every Gaussian adds to the same 12 values: sum the SIMD groups of the threadgroup first,
+    // so each threadgroup (not each SIMD group) makes one atomic per value.
+    threadgroup float sPose[32][12];
+    const bool any = simd_any(active);
+    for (uint k = 0; k < 12; ++k) {
+        const float v = any ? simd_sum(poseLocal[k]) : 0.0f;
+        if (lane == 0) sPose[simd][k] = v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < 12) {
+        float v = 0;
+        for (uint s = 0; s < simds; ++s) v += sPose[s][tid];
+        if (v != 0) atomic_fetch_add_explicit(poseGrad + tid, v, memory_order_relaxed);
     }
 }
 

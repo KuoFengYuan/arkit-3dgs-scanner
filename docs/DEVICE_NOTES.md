@@ -63,6 +63,35 @@ Not yet tried; both need device captures:
 - taking the steadiest frame within the shutter interval (ARKit delivers 60 frames per second, and the photo is currently the first frame that passes the gates);
 - a shutter cap that follows the ISO in use.
 
+## Training speed benchmark
+
+A build with the `TRAINING_BENCHMARK` compilation condition trains a scan on the phone with the Mac replay protocol ([faster training steps](ON_DEVICE_3DGS.md#faster-training-steps-on-a-large-scan)):
+- the Standard preset at a fixed iteration count, not the automatic one;
+- seeds from the training photos' LiDAR depth only;
+- the held-out photos of a list;
+- the phone's own memory plan.
+
+It reads the scan only. The result is printed and also written to `Documents/benchmark-results` in the app's container. A scan to measure can be copied to `Documents/benchmark`, which keeps it out of the scan history. The normal Release build does not contain it.
+
+1. Build it:
+
+   ```bash
+   xcodebuild -project arkit-3dgs-scanner.xcodeproj -scheme arkit-3dgs-scanner -configuration Release -destination 'generic/platform=iOS' -allowProvisioningUpdates SWIFT_ACTIVE_COMPILATION_CONDITIONS='$(inherited) TRAINING_BENCHMARK' build
+   ```
+
+2. Install it with `xcrun devicectl device install app --device DEVICE PATH/arkit-3dgs-scanner.app`. This replaces the installed build and keeps the app's data. The first time, trust the developer profile on the phone (Settings → General → VPN & Device Management).
+3. Optionally copy a list of held-out photo IDs to `Documents/benchmark/holdout-ids.txt` with `xcrun devicectl device copy to`.
+4. Run it with the phone unlocked, lying on a table at room temperature:
+
+   ```bash
+   xcrun devicectl device process launch --device DEVICE --console --terminate-existing arkit-3dgs-scanner --benchmark-training SCAN_FOLDER --iterations 10000 --holdout-ids holdout-ids.txt --benchmark-label NAME
+   ```
+
+   The console prints progress every 500 iterations, with the thermal state. At the end it prints the JSON result and the app exits. The result has the time and milliseconds per iteration, the peak footprint, the thermal samples, the stage split and the held-out PSNR and SSIM.
+5. Compare builds one after another, with a cool-down between them, and note the thermal state. A phone that reaches `serious` slows its GPU down.
+
+Results on an iPhone 17 Pro are under [faster training steps](ON_DEVICE_3DGS.md#faster-training-steps-on-a-large-scan). Every run there reached `serious`; the one that started cool was 17% faster than a rerun that started hot.
+
 ## Camera controls and other details
 
 The HUD offers exposure/white-balance lock plus advanced exposure compensation, shutter, ISO, white balance, and focus controls where the capture device supports them. Automatic focus remains available; export stores per-frame intrinsics rather than relying on a single locked calibration. Manual shutter/ISO choices can trade blur against brightness and noise. Locked exposure can under-/overexpose transitions between windows and dark areas.

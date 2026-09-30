@@ -228,15 +228,19 @@ enum Reference {
         let rot = simd_double3x3(simd_quatd(angle: yaw, axis: SIMD3(0, 1, 0)) * simd_quatd(angle: pitch, axis: SIMD3(1, 0, 0)))
         let w2c = simd_double4x4(columns: (SIMD4(rot[0], 0), SIMD4(rot[1], 0), SIMD4(rot[2], 0), SIMD4(0.05, -0.03, 0.1, 1)))
         let background = SIMD3<Double>(0.1, 0.2, 0.3)
-        for (mip, moving, depthTerm) in [(true, false, false), (false, false, false), (true, true, false), (false, true, false), (true, false, true)] {
+        // The dense case has hundreds of faint splats per tile, so the backward pass replays each
+        // tile in several batches.
+        for (mip, moving, depthTerm, dense) in [(true, false, false, false), (false, false, false, false), (true, true, false, false),
+                                                (false, true, false, false), (true, false, true, false), (true, false, false, true)] {
             var cam = RefCamera(w2c: w2c, fx: 48, fy: 47, cx: 28.3, cy: 21.7, width: W, height: H, mip: mip)
             if moving {
                 // ~2 px of exposure blur and ~1 px rolling-shutter shift at this size.
                 cam.omega = SIMD3(0.3, -0.5, 0.2); cam.velocity = SIMD3(0.2, 0.1, -0.15)
                 cam.exposure = 0.08; cam.readout = 0.1
             }
-            let label = depthTerm ? "mip \(mip), LiDAR depth loss" : moving ? "mip \(mip), capture motion" : "mip \(mip)"
-            var gs = scene(count: 40, degree: degree, seed: mip ? 7 : 11)
+            let label = dense ? "mip \(mip), dense" : depthTerm ? "mip \(mip), LiDAR depth loss" : moving ? "mip \(mip), capture motion" : "mip \(mip)"
+            var gs = scene(count: dense ? 360 : 40, degree: degree, seed: mip ? 7 : 11)
+            if dense { for i in gs.indices { gs[i].logit = -3.2 + 0.4 * Double(i % 5) / 4 } }
             let capacity = 1024
             let layout = GaussianLayout(capacity: capacity, shDegree: degree)
             let model = try metal.buffer(layout.totalFloats * 4)
@@ -276,6 +280,17 @@ enum Reference {
             var maxDiff = 0.0
             for i in 0..<(W * H) { maxDiff = max(maxDiff, simd_reduce_max(simd_abs(SIMD3<Double>(Double(gpu[i].x), Double(gpu[i].y), Double(gpu[i].z)) - ref[i]))) }
             print("\(label): intersections \(m), forward max |GPU - CPU| = \(maxDiff)")
+            if dense {
+                // Deepest replay of any tile: list entries its pixels consumed.
+                let ranges = raster.debugRanges.contents().bindMemory(to: SIMD2<UInt32>.self, capacity: camera.tilesX * camera.tilesY)
+                let last = target.lastIndex.contents().bindMemory(to: UInt32.self, capacity: W * H)
+                var deepest = 0
+                for y in 0..<H { for x in 0..<W {
+                    let r = ranges[(y / 16) * camera.tilesX + x / 16]
+                    deepest = max(deepest, Int(last[y * W + x]) - Int(r.x))
+                } }
+                check(deepest > 256, "the dense scene replays more than two backward batches in a tile (\(deepest) entries)")
+            }
             check(maxDiff < 2e-3, "forward render matches the CPU reference (\(label))")
             // Gradients treat the capture-motion shift and blur as constants.
             if moving { gs = Reference.freezeMotion(gs, cam) }

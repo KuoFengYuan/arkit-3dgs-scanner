@@ -634,6 +634,9 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
         var exposureRangeEV: [Double]?
         var growthFrozen: Bool
         var createdAt: Date
+        /// Milliseconds per step of the last run segment by stage (`GaussianTrainer.profile`); nil
+        /// in reports written before it.
+        var stageMilliseconds: [String: Double]?
     }
 
     /// Writes the model folder atomically (staged next to it, then swapped in). `progress` is
@@ -710,7 +713,8 @@ nonisolated final class GaussianTrainingSession: @unchecked Sendable {
                             poseCorrectionMaxDegrees: config.poseOptimization ? rotations.last : nil,
                             poseCorrectionMaxMillimetres: config.poseOptimization ? translations.last : nil,
                             exposureRangeEV: config.ppisp ? [evs.min() ?? 0, evs.max() ?? 0] : nil,
-                            growthFrozen: trainer.growthFrozen, createdAt: Date())
+                            growthFrozen: trainer.growthFrozen, createdAt: Date(),
+                            stageMilliseconds: trainer.stageMillisecondsPerStep)
         try JSONEncoder.training.encode(report).write(to: staging.appendingPathComponent(GaussianExport.reportName))
         // Cover image: the orbit start view with the camera ISP.
         if let first = trainer.dataset.trainFrames.first.map({ trainer.dataset.frames[$0] }) {

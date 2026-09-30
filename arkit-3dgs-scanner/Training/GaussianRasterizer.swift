@@ -203,13 +203,28 @@ nonisolated final class GaussianRasterizer: @unchecked Sendable {
 
     func encodeProjection(_ encoder: MTLComputeCommandEncoder, camera: GaussianCamera, layout: GaussianLayout,
                           model: MTLBuffer, count: Int) throws {
+        encodeProject(encoder, camera: camera, layout: layout, model: model, count: count)
+        try encodeDepthOrder(encoder, count: count)
+        try encodeTileOffsets(encoder, count: count)
+    }
+
+    // The stages of `encodeProjection` and `encodeRaster`, in order (`GaussianTrainer.profileStages`
+    // times them one by one).
+    func encodeProject(_ encoder: MTLComputeCommandEncoder, camera: GaussianCamera, layout: GaussianLayout,
+                       model: MTLBuffer, count: Int) {
         let cam = Self.bind(camera, layout: layout, count: count)
         encoder.dispatch(project, threads: count, [.value(cam), .value(layout), .buffer(model), .buffer(pixels),
                                                    .buffer(conics), .buffer(colors), .buffer(tiles), .buffer(rects),
                                                    .buffer(depthKeys)])
+    }
+
+    func encodeDepthOrder(_ encoder: MTLComputeCommandEncoder, count: Int) throws {
         encoder.dispatch(iota, threads: count, [.buffer(order), .u32(UInt32(count))])
         try sorter.sortPairs(encoder, keys: depthKeys, values: order, scratchKeys: depthScratch,
                              scratchValues: orderScratch, count: count, bits: 32)
+    }
+
+    func encodeTileOffsets(_ encoder: MTLComputeCommandEncoder, count: Int) throws {
         encoder.dispatch(gather, threads: count, [.buffer(tiles), .buffer(order), .buffer(orderedTiles), .u32(UInt32(count))])
         try sorter.exclusiveScan(encoder, input: orderedTiles, output: offsets, count: count, total: total)
     }
@@ -222,6 +237,12 @@ nonisolated final class GaussianRasterizer: @unchecked Sendable {
     /// Stage 2: bin, sort by tile and blend. `intersections` comes from stage 1.
     func encodeRaster(_ encoder: MTLComputeCommandEncoder, camera: GaussianCamera, count: Int, intersections: Int,
                       target: GaussianRenderTarget, background: SIMD3<Float>) throws {
+        try encodeEmit(encoder, camera: camera, count: count, intersections: intersections)
+        try encodeTileSort(encoder, intersections: intersections)
+        encodeBlend(encoder, camera: camera, count: count, target: target, background: background)
+    }
+
+    func encodeEmit(_ encoder: MTLComputeCommandEncoder, camera: GaussianCamera, count: Int, intersections: Int) throws {
         guard intersections <= intersectionCapacity else {
             throw RenderError.intersectionOverflow(needed: intersections, capacity: intersectionCapacity)
         }
@@ -229,16 +250,23 @@ nonisolated final class GaussianRasterizer: @unchecked Sendable {
         // Tile keys are 16 bits and 0xFFFF marks unused entries (`kUnusedTile`).
         precondition(tileCount < 65_535 && tileRanges.length >= tileCount * 8, "tile grid exceeds the rasterizer limits")
         encoder.dispatch(clearU2, threads: tileCount, [.buffer(tileRanges), .u32(UInt32(tileCount))])
-        if intersections > 0 {
-            encoder.dispatch(emit, threads: count, [.buffer(order), .buffer(offsets), .buffer(rects), .buffer(tiles),
-                                                    .buffer(keys), .buffer(values),
-                                                    .value(SIMD4<UInt32>(UInt32(count), UInt32(camera.tilesX),
-                                                                         UInt32(intersectionCapacity), 0)),
-                                                    .buffer(pixels), .buffer(conics)])
-            try sorter.sortPairs(encoder, keys: keys, values: values, scratchKeys: keysScratch,
-                                 scratchValues: valuesScratch, count: intersections, bits: 16)
-            encoder.dispatch(ranges, threads: intersections, [.buffer(keys), .buffer(tileRanges), .u32(UInt32(intersections))])
-        }
+        guard intersections > 0 else { return }
+        encoder.dispatch(emit, threads: count, [.buffer(order), .buffer(offsets), .buffer(rects), .buffer(tiles),
+                                                .buffer(keys), .buffer(values),
+                                                .value(SIMD4<UInt32>(UInt32(count), UInt32(camera.tilesX),
+                                                                     UInt32(intersectionCapacity), 0)),
+                                                .buffer(pixels), .buffer(conics)])
+    }
+
+    func encodeTileSort(_ encoder: MTLComputeCommandEncoder, intersections: Int) throws {
+        guard intersections > 0 else { return }
+        try sorter.sortPairs(encoder, keys: keys, values: values, scratchKeys: keysScratch,
+                             scratchValues: valuesScratch, count: intersections, bits: 16)
+        encoder.dispatch(ranges, threads: intersections, [.buffer(keys), .buffer(tileRanges), .u32(UInt32(intersections))])
+    }
+
+    func encodeBlend(_ encoder: MTLComputeCommandEncoder, camera: GaussianCamera, count: Int,
+                     target: GaussianRenderTarget, background: SIMD3<Float>) {
         var cam = camera
         cam.sh.z = UInt32(count)
         encoder.dispatch(forwardBlend, groups: (camera.tilesX, camera.tilesY), size: (16, 16),
@@ -276,7 +304,7 @@ nonisolated final class GaussianRasterizer: @unchecked Sendable {
                              edgeMap: MTLBuffer, lossSums: MTLBuffer, depth: DepthTarget?, rows: Range<Int>) {
         guard !rows.isEmpty else { return }
         let cam = Self.bind(camera, layout: layout, count: count)
-        encoder.dispatch(backwardBlend, groups: (camera.tilesX, rows.count), size: (16, 16),
+        encoder.dispatch(backwardBlend, groups: (camera.tilesX, rows.count), size: (16, 16 / Self.backwardPixelsPerThread),
                          [.value(cam), .buffer(tileRanges), .buffer(values), .buffer(pixels), .buffer(conics),
                           .buffer(colors), .buffer(target.image), .buffer(target.lastIndex),
                           .value(SIMD4<Float>(background, 0)), .buffer(imageGrad), .buffer(grad2d),
@@ -291,6 +319,10 @@ nonisolated final class GaussianRasterizer: @unchecked Sendable {
         encoder.dispatch(projectBack, threads: count, [.value(cam), .value(layout), .buffer(model), .buffer(grad2d),
                                                        .buffer(tiles), .buffer(grads), .buffer(poseGrad)])
     }
+
+    /// Pixels each thread of the backward blend replays (threadgroups of 16 × 16/n); mirrors
+    /// `kBackwardPixels` in GaussianRaster.metal.
+    static let backwardPixelsPerThread = 4
 
     /// Tile-row bands of at most ~2,048 tiles (two bands at 960 × 720, six at 1920 × 1440).
     static func backwardBands(tilesX: Int, tilesY: Int, maxTiles: Int = 2_048) -> [Range<Int>] {
