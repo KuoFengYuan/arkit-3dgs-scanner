@@ -549,7 +549,26 @@ Over a whole run before the change, the GPU was busy 33.7 of the 37.3 ms of a st
 - **Quality:** the two runs before the change already differ by up to 0.10 dB (PSNR −0.09, colour-aligned −0.08, edge −0.10). Every metric of the optimised runs is within that spread. Mean aligned PSNR is 23.859 against 23.861, and colour-aligned PSNR 25.354 against 25.329. The empty share is 0.4 points higher on average, while the runs before the change differ by 0.25. With two runs each, that difference is not resolved.
 - **Memory:** the peak footprint fell by about 90 MB, because the gradient rows of Gaussians outside every view are never written. The plan (1,036 MB), the capacity and the buffers are unchanged.
 
-IPHONE_RESULTS_EN
+**iPhone 17 Pro** (iOS 27.0, Release build with `TRAINING_BENCHMARK`, see [device notes](DEVICE_NOTES.md#training-speed-benchmark)). The same protocol ran with the phone's own memory plan (the same 1,036 MB plan), one run after the other, with the phone lying on a table. The benchmark calls the trainer directly, without the app's live previews:
+
+| Run | Thermal state | Time | Held-out, aligned (PSNR / SSIM) | Peak footprint (sampled / lifetime) |
+| --- | --- | --- | --- | --- |
+| Before, run 1 | nominal, `serious` from 5,500 iterations | 658.0 s | not saved | 889 MB / – |
+| After | `serious` throughout | 553.1 s | 23.907 / 0.8327 | 898 / 916 MB |
+| Before, run 2 | `serious` throughout | 769.4 s | 23.946 / 0.8329 | 887 / 906 MB |
+
+- **Speed:** 1.39× faster than the run before the change at the same thermal state, and 1.19× faster than the first run, which started cool. The phone throttled in every run: at the cap a step took 70–76 ms after the change and 87–95 ms before it. The app keeps training at `serious` and pauses only at `critical`.
+- **Stages** (GPU ms per step on 20 photos after each run, both throttled):
+  - backward blend 34.3 → 19.1;
+  - projection backward 4.8 → 2.4;
+  - Adam 17.8 → 15.6;
+  - forward blend 11.4 → 10.6;
+  - loss 6.4 → 5.9;
+  - all stages 80.7 → 58.9.
+- **Adam is the phone's next limit.** At 26% of the GPU time it takes a far larger share than on the Mac, because it is bound by memory bandwidth (about 57 GB/s here). A shorter Adam would need a different optimiser or lower-precision moments.
+- **Quality:** held-out aligned PSNR 23.907 against 23.946 dB, within the spread of the Mac reruns.
+- **Memory:** the peak footprint was the same within 10 MB and stayed under the plan. Unlike on the Mac, it did not fall.
+- **Not measured:** other iPhones, the High preset, and the app's own training screen with its live previews.
 
 ## Validation
 
@@ -578,7 +597,9 @@ Measured on the Mac GPU with the same Metal source:
   - Finish and save model from a running resume; Enhance model setup at High (original), its start from the saved iteration, and stopping it with *delete*, which left the saved model unchanged.
   - The Simulator reports no background GPU, so only the pause fallback of background training ran.
 
-**Not yet measured on an iPhone:** training speed, peak memory, and thermal behaviour. Mac and Simulator numbers say nothing about phone memory safety or timing.
+- **iPhone 17 Pro (Release benchmark build):** F21171 at 10,000 Standard iterations took 553 s after the speed change and 658–769 s before it. The peak footprint was about 0.9 GB against a 1.04 GB plan, and the phone ran at `serious` thermal state; see [faster training steps](#faster-training-steps-on-a-large-scan).
+
+**Not yet measured on an iPhone:** other models than the iPhone 17 Pro, the High preset and full-resolution training, and the app's training screen with live previews. Mac and Simulator numbers say nothing about phone memory safety or timing.
 
 ## Provenance and licences
 

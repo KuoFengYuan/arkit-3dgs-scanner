@@ -71,7 +71,7 @@ A build with the `TRAINING_BENCHMARK` compilation condition trains a scan on the
 - the held-out photos of a list;
 - the phone's own memory plan.
 
-It reads the scan only and writes its result to `Documents/benchmark` in the app's container. The normal Release build does not contain it.
+It reads the scan only. The result is printed and also written to `Documents/benchmark-results` in the app's container. A scan to measure can be copied to `Documents/benchmark`, which keeps it out of the scan history. The normal Release build does not contain it.
 
 1. Build it:
 
@@ -89,6 +89,8 @@ It reads the scan only and writes its result to `Documents/benchmark` in the app
 
    The console prints progress every 500 iterations, with the thermal state. At the end it prints the JSON result and the app exits. The result has the time and milliseconds per iteration, the peak footprint, the thermal samples, the stage split and the held-out PSNR and SSIM.
 5. Compare builds one after another, with a cool-down between them, and note the thermal state. A phone that reaches `serious` slows its GPU down.
+
+Results on an iPhone 17 Pro are under [faster training steps](ON_DEVICE_3DGS.md#faster-training-steps-on-a-large-scan). Every run there reached `serious`; the one that started cool was 17% faster than a rerun that started hot.
 
 ## Camera controls and other details
 

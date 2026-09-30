@@ -13,8 +13,10 @@ import SwiftUI
 ///
 /// `--benchmark-training SCAN [--iterations N] [--holdout-ids FILE] [--benchmark-label NAME]`:
 /// SCAN is a folder in Documents/benchmark (a copied scan stays out of the scan history) or else
-/// in Documents/scans, and FILE is in Documents/benchmark. Reads the scan only and writes
-/// Documents/benchmark/SCAN-NAME-TIME.json; progress is printed (devicectl --console).
+/// in Documents/scans, and FILE is in Documents/benchmark. Reads the scan only; progress and the
+/// result are printed (devicectl --console) and the result is also written to
+/// Documents/benchmark-results/SCAN-NAME-TIME.json (files copied in by devicectl can leave
+/// Documents/benchmark read-only for the app).
 nonisolated enum TrainingBenchmark {
     struct Request { var scan: String; var iterations: Int; var holdOutIDs: String?; var label: String }
 
@@ -45,6 +47,9 @@ nonisolated enum TrainingBenchmark {
 
     static var directory: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("benchmark", isDirectory: true)
+    }
+    static var results: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("benchmark-results", isDirectory: true)
     }
 
     static var deviceModel: String {
@@ -146,11 +151,10 @@ struct TrainingBenchmarkView: View {
                         let encoder = JSONEncoder()
                         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                         let data = try encoder.encode(result)
-                        try FileManager.default.createDirectory(at: TrainingBenchmark.directory, withIntermediateDirectories: true)
                         let name = "\(request.scan)-\(request.label)-\(Int(Date().timeIntervalSince1970)).json"
-                        try data.write(to: TrainingBenchmark.directory.appendingPathComponent(name))
-                        let json = String(decoding: data, as: UTF8.self)
-                        log("BENCHMARK RESULT \(name)\n\(json)")
+                        log("BENCHMARK RESULT \(name)\n\(String(decoding: data, as: UTF8.self))")
+                        try FileManager.default.createDirectory(at: TrainingBenchmark.results, withIntermediateDirectories: true)
+                        try data.write(to: TrainingBenchmark.results.appendingPathComponent(name))
                         return "done"
                     } catch {
                         log("BENCHMARK FAILED: \(error.localizedDescription)")
