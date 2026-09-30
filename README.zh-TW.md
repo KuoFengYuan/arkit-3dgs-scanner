@@ -4,16 +4,110 @@
 
 [English](README.md) | **繁體中文**
 
-**本專案為個人研究專案，供非商業用途使用。[PolyForm Noncommercial License 1.0.0](LICENSE) 不允許商業用途。**
+[快速開始](#快速開始) · [流程](#流程與功能) · [開發入口](#開發入口) · [訓練設定](#在-iphone-上訓練-3dgs) · [實測比較](#訓練實測) · [文件](#文件導覽) · [授權](#版權與授權)
 
-## 訓練優化亮點
+**個人研究專案 · [PolyForm Noncommercial 1.0.0](LICENSE) 僅允許非商業用途。**
+
+以 ARKit 擷取照片、相機姿態與點雲，優化掃描資料，再用 Swift 與 Metal 在 iPhone GPU 上訓練 3DGS 模型，也可以匯出 COLMAP 資料集給電腦上的訓練器。採集、優化與手機端訓練均在裝置上執行，App 不會上傳掃描資料。
 
 > [!IMPORTANT]
-> **模型訓練已加速：iPhone 17 Pro 快 1.39 倍，Mac（M1 Pro）最高快 1.45 倍。** 相同工作量下的訓練耗時與 PSNR 統整比較如下。
+> **實測訓練加速：iPhone 17 Pro 快 1.39 倍，Mac（M1 Pro）最高快 1.45 倍。** [查看速度與 PSNR 的統整比較](#訓練實測)，使用作者自行拍攝的 F21171 資料。
+
+<a href="docs/media/demo.mp4"><img src="docs/media/demo.gif" width="360" alt="一次掃描從擷取到完成 3DGS 模型：掃描、融合、訓練與完成的模型"></a>
+
+*20 秒示範循環，8 倍速。[觀看 1 分鐘影片](docs/media/demo.mp4)（2.7 倍速）：掃描桌面、優化資料，並在 iPhone 上訓練 3DGS 模型。*
+
+## 快速開始
+
+| 需求 | 支援條件 |
+| --- | --- |
+| 編譯 | Xcode 26 以上 |
+| 執行 | iOS 17 以上的 iPhone 或 iPad；手機端訓練需要 A14 或更新晶片 |
+| 掃描 | LiDAR 為可選；深度擷取需要有 LiDAR 的裝置 |
+
+AR 掃描需要實體裝置；Simulator 用於介面檢查。
+
+```sh
+git clone https://github.com/KuoFengYuan/arkit-3dgs-scanner.git
+cd arkit-3dgs-scanner
+open arkit-3dgs-scanner.xcodeproj
+```
+
+1. 選擇 **arkit-3dgs-scanner** scheme、自己的簽章 Team 與實體裝置，再執行。這個 scheme 使用優化過的 Release 版本。
+2. 按「開始掃描」，讓每個表面都從幾個不同位置被拍到。
+3. 停止後等待處理，檢查點雲；有缺漏就續掃補拍。
+4. 按「訓練 3DGS」在手機上建立模型，或按「匯出 3DGS 訓練資料」分享 COLMAP ZIP 給電腦上的訓練器。
+
+## 流程與功能
+
+```mermaid
+flowchart TB
+    Capture["掃描 · ARKit"] --> Refine["優化照片、姿態與深度"]
+    Refine --> Review["檢查點雲、路線與尺度"]
+    Review --> Train["手機端訓練 · Metal"]
+    Review --> Export["匯出 COLMAP 資料集 · ZIP"]
+    Train --> Model["檢視與分享 · SOG 模型"]
+    Export --> Desktop["外部 3DGS 訓練器"]
+```
+
+| 階段 | App 的工作 | 文件 |
+| --- | --- | --- |
+| 掃描 | LiDAR 或純相機掃描，依移動與畫質選關鍵影格，大場景提供回訪提示 | [掃描架構](docs/CAPTURE_ARCHITECTURE.zh-TW.md) |
+| 優化 | 選清晰照片，只有照片對齊改善才套用姿態修正，多視角深度融合 | [姿態精修](docs/POSE_REFINEMENT.zh-TW.md) |
+| 檢查 | 點雲與照片／路線回放、公尺量測、尺度校正與續掃補拍 | [融合預覽](docs/FUSION_REVIEW.zh-TW.md) |
+| 訓練 | Swift／Metal 3DGS，可旋轉的即時預覽、暫停續訓、檢查點與 SOG 模型分享 | [手機端訓練](docs/ON_DEVICE_3DGS.zh-TW.md) |
+| 匯出 | 原始照片、`sparse/0`、深度與姿態打包成 COLMAP ZIP | [資料集匯出](docs/HISTORY_TRAINING_EXPORT.zh-TW.md) |
+
+停止後的掃描會存入「**掃描紀錄**」，可預覽、訓練、另存優化版本、匯出或刪除。App 預設為**繁體中文**，首頁可切換**英文**並保存偏好。
+
+## 開發入口
+
+### 從哪些程式開始讀
+
+| 區域 | 職責 | 程式入口 |
+| --- | --- | --- |
+| 掃描 | AR session、關鍵影格、姿態精修、融合與資料集匯出 | [CaptureController.swift](arkit-3dgs-scanner/Capture/CaptureController.swift)、[ExportManager.swift](arkit-3dgs-scanner/Capture/ExportManager.swift) |
+| 紀錄 | 掃描儲存、預覽、優化與刪除 | [ScanLibrary.swift](arkit-3dgs-scanner/History/ScanLibrary.swift) |
+| 訓練 | App 生命週期、執行狀態、記憶體、檢查點與訓練迭代 | [TrainingCenter.swift](arkit-3dgs-scanner/Training/UI/TrainingCenter.swift)、[GaussianTrainingSession.swift](arkit-3dgs-scanner/Training/GaussianTrainingSession.swift)、[GaussianTrainer.swift](arkit-3dgs-scanner/Training/GaussianTrainer.swift) |
+| Metal 核心 | 投影、排序、混合、損失與最佳化器 | [Training/](arkit-3dgs-scanner/Training/)（`GaussianRaster`、`GaussianSort`、`GaussianLoss`、`GaussianOptim`） |
+| App 介面 | 首頁與共用視覺元件 | [ContentView.swift](arkit-3dgs-scanner/ContentView.swift)、[DesignSystem.swift](arkit-3dgs-scanner/Design/DesignSystem.swift) |
+| 工具 | 資料轉換、重播、品質分析與回歸檢查 | [tools/](tools/)、[train_gaussians.swift](tools/train_gaussians.swift) |
+
+閱讀程式時可搭配[掃描架構](docs/CAPTURE_ARCHITECTURE.zh-TW.md)或[訓練架構](docs/ON_DEVICE_3DGS_ARCHITECTURE.zh-TW.md)。訓練器是以 MRNF 為基礎的獨立 Swift／Metal 實作，加入姿態精修、LiDAR 深度種子／損失與逐張照片的曝光／色彩補償（PPISP）。掃描與資料準備也可獨立於訓練器使用。
+
+### 檢查與貢獻流程
+
+在 repository 根目錄執行：
+
+```sh
+python3 tools/check_project.py
+bash tools/test_localization.sh
+```
+
+修改訓練器時，另執行 `bash tools/test_gaussian_training.sh`，以 Mac GPU 跑 App 的 Metal 核心；這不能證明 iPhone 的速度、記憶體或發熱。逐步除錯使用 **arkit-3dgs-scanner-Debug**；正常掃描與訓練使用 Release scheme。
+
+遵循[貢獻流程](CONTRIBUTING.zh-TW.md)與[工作規範](AGENTS.zh-TW.md)：從更新的 `main` 建立任務分支（`Feature/`、`Bugfix/`、`Enhance/`），驗證、開 PR，必要檢查／審核通過後合併並清理分支。貢獻流程包含裝置／Simulator 建置指令與可選的 Python 工具。素材目錄已有 1024 × 1024 的 App 圖示，可用於封存版本與 TestFlight。
+
+## 在 iPhone 上訓練 3DGS
+
+| 品質 | 基本迭代次數 | Gaussian 上限 |
+| --- | --- | --- |
+| 快速預覽 | 4,000 | 300,000 |
+| 標準（建議） | 10,000 | 600,000 |
+| 高品質 | 20,000 | 1,000,000 |
+
+- **解析度：** 預設 960 px，可選 1,440 或原始 1,920 px。
+- **迭代次數：** 照片較多時自動增加，開始前可自行調整；記憶體配置可能降低高斯上限。
+- **暫停續訓：** 手機過熱、電量不足、記憶體吃緊或離開前景時先存檔。支援的 iOS 26 以上裝置，在具備 Background GPU Access 且取得系統核准的背景任務後可繼續訓練。
+- **完成與分享：** 可提前完成、之後加強已存模型，或分享包含 `gaussians.sog` 的 `scan_…-3dgs.zip`。SuperSplat、PlayCanvas 與 LichtFeld Studio 可開啟。
+
+設定、即時預覽、背景執行條件與模型檔案詳見[手機端 3DGS 訓練](docs/ON_DEVICE_3DGS.zh-TW.md)。
+
+## 訓練實測
 
 **資料來源：** F21171 為專案作者自行拍攝的房間與浴室掃描資料，表格數據來自這組資料的訓練實測。
 
-F21171，固定 **10,000 次迭代**、960 px、開啟 PPISP、高斯上限 600,000，使用 715 張訓練照片與同一批 143 張保留照片。這次速度優化前後的訓練方法與設定相同。PSNR 以保留照片經測試時姿態對齊後評分，越高越好。
+速度優化前後使用相同工作量：**10,000 次迭代、960 px、開啟 PPISP、高斯上限 600,000**。PSNR 比較模型與保留照片在測試時姿態對齊後的相似程度，**越高越好**。
 
 | 裝置／指標 | 訓練時間：優化前 → 後 | 加速倍數 | PSNR：優化前 → 後 | PSNR 差異 |
 | --- | --- | --- | --- | --- |
@@ -21,74 +115,45 @@ F21171，固定 **10,000 次迭代**、960 px、開啟 PPISP、高斯上限 600,
 | Mac，M1 Pro：1,920 px 排除色差後 PSNR | 同一組 Mac 測試 | 同上 | 25.329 → **25.354 dB** | +0.025 dB |
 | iPhone 17 Pro：對齊後 PSNR | 769.4 → **553.1 s** | **1.39 倍** | 23.946 → **23.907 dB** | −0.039 dB |
 
-Mac 的 PSNR 為每個版本兩次執行的平均；加速倍數以優化前的平均時間計算。優化後第 2 次同時在編譯 Xcode 專案。手機數值為每個版本一次、前後均為 `serious` 散熱狀態的結果；若改與另一個起始較涼的優化前測試（658.0 s）比較，則快 1.19 倍。
+對齊後 PSNR 的差異落在 Mac 基準重跑最高約 0.10 dB 的波動範圍內；排除色差的指標另會先校正整體亮度與色彩差異。
 
-PSNR 差異落在 Mac 基準重跑最高約 0.10 dB 的波動範圍內。排除色差的評分會先校正整體亮度與色彩差異。Mac 的空像素比例平均增加 0.4 個百分點；前後各只有兩次，尚無法判定這項差異。
+<details>
+<summary>量測方式與限制</summary>
 
-手機使用 iOS 27.0 的 Release 基準測試版本，直接呼叫訓練器，不含即時預覽。其他 iPhone、高品質、全解析度訓練與一般訓練畫面尚未量測。詳見[完整速度與品質結果](docs/ON_DEVICE_3DGS.zh-TW.md#加快大型掃描的訓練步驟)。
+- **資料切分：** 715 張訓練照片與同一批 143 張保留照片；速度比較前後的訓練方法與設定相同。
+- **Mac：** PSNR 為每個版本兩次執行的平均。加速倍數以優化前的平均時間計算；優化後第 2 次同時在編譯 Xcode 專案。
+- **手機：** 每個版本一次，前後均為 `serious` 散熱狀態。若改與起始較涼的另一次優化前測試（658.0 s）比較，則快 1.19 倍。
+- **品質：** Mac 的空像素比例平均增加 0.4 個百分點，前後各只有兩次，尚無法判定差異。
+- **範圍：** iPhone 17 Pro 使用 iOS 27.0 的 Release 基準測試版本，直接呼叫訓練器，不含即時預覽。其他 iPhone、高品質、全解析度訓練與一般訓練畫面尚未量測。Mac 與 Simulator 結果不能推定 iPhone 效能。
 
-<a href="docs/media/demo.mp4"><img src="docs/media/demo.gif" width="320" alt="一次掃描從擷取到完成 3DGS 模型：掃描、融合、訓練與完成的模型"></a>
+[完整速度與品質結果](docs/ON_DEVICE_3DGS.zh-TW.md#加快大型掃描的訓練步驟) · [重現實機基準測試](docs/DEVICE_NOTES.zh-TW.md#訓練速度基準測試)
 
-*20 秒循環，8 倍速。[觀看 1 分鐘影片](docs/media/demo.mp4)（2.7 倍速）：掃描桌面、優化資料，並在 iPhone 上訓練 3DGS 模型。*
+</details>
 
-本專案研究如何在 iPhone 上採集並重建 3D 場景。用 ARKit 擷取照片、相機姿態與點雲，在手機上完成優化，再用 iPhone 的 GPU 訓練 3DGS 模型，或匯出 COLMAP 資料集給電腦上的訓練器。採集、優化與手機端訓練均在裝置上執行，App 不會上傳掃描資料。
+## 文件導覽
 
-## 主要功能
+| 想了解的內容 | 建議先讀 |
+| --- | --- |
+| AR 掃描與處理流程 | [掃描架構](docs/CAPTURE_ARCHITECTURE.zh-TW.md) |
+| 訓練器執行權責與 GPU 資料流 | [訓練架構](docs/ON_DEVICE_3DGS_ARCHITECTURE.zh-TW.md) |
+| 訓練方法、設定與實驗 | [手機端 3DGS 訓練](docs/ON_DEVICE_3DGS.zh-TW.md) |
+| 資料集檔案與座標慣例 | [資料集匯出](docs/HISTORY_TRAINING_EXPORT.zh-TW.md)、[座標慣例](docs/COORDINATES.zh-TW.md) |
+| 電腦端訓練 | [外部訓練](docs/TRAINING.zh-TW.md) |
+| 新增介面翻譯 | [語系說明](docs/LOCALIZATION.zh-TW.md) |
 
-- **有沒有 LiDAR 都能掃。** 依移動量與畫質自動挑選關鍵影格。LiDAR 深度會跨視角融合；純相機掃描保留驗證過的稀疏點，也可以再用影像估計深度。大空間裡 App 會提示回到拍過的區域，用來修正漂移。詳見[掃描架構](docs/CAPTURE_ARCHITECTURE.zh-TW.md)與[無 LiDAR 重建](docs/CAMERA_ONLY_ACCURACY.zh-TW.md)。
-- **在手機上優化資料。** 挑選清晰照片；相機姿態精修只有在照片對齊檢查變好時才套用；多視角深度融合。詳見[姿態精修](docs/POSE_REFINEMENT.zh-TW.md)與 [LiDAR 多視角共識](docs/LIDAR_SURFACE_CONSENSUS.zh-TW.md)。
-- **訓練前先檢查。** 查看點雲、回放拍攝路線、續掃補拍，並可量測或校正公尺尺度。詳見[融合進度與預覽](docs/FUSION_REVIEW.zh-TW.md)與[公尺尺度](docs/LOOP_CLOSURE_AND_SCALE.zh-TW.md)。
-- **在 iPhone 上訓練 3DGS。** 以 MRNF 為基礎的 Metal 訓練器，加上姿態精修、LiDAR 深度種子與深度損失；訓練中可旋轉查看即時預覽、暫停與續訓，完成後輸出體積小的 SOG 模型分享。詳見[手機端 3DGS 訓練](docs/ON_DEVICE_3DGS.zh-TW.md)。
-- **匯出 COLMAP 資料集。** 原始照片、`sparse/0`、深度與姿態打包成一個 ZIP。詳見[匯出](docs/HISTORY_TRAINING_EXPORT.zh-TW.md)與[外部訓練](docs/TRAINING.zh-TW.md)。
-- **掃描紀錄。** 停止掃描後自動保存，可以預覽、訓練、另存優化版本、匯出或刪除。
-- **繁體中文（預設）與英文**，在首頁切換。
+<details>
+<summary>依主題查看所有文件</summary>
 
-```text
-掃描 → 資料優化 → 檢查點雲 ─┬─ 在 iPhone 上訓練 3DGS → 檢視／分享模型
-                 │          └─ 匯出 COLMAP ZIP → 外部 3DGS 訓練
-                 └─ 續掃補拍
-```
+| 主題 | 文件 |
+| --- | --- |
+| 掃描 | [掃描架構](docs/CAPTURE_ARCHITECTURE.zh-TW.md) · [介面設計](docs/INTERFACE_DESIGN.zh-TW.md) · [即時預覽與品質閘門](docs/LIDAR_QUALITY_AND_PREVIEW.zh-TW.md) · [拍攝吞吐量](docs/CAPTURE_THROUGHPUT.zh-TW.md) · [裝置操作](docs/DEVICE_NOTES.zh-TW.md) |
+| 處理 | [融合進度與預覽](docs/FUSION_REVIEW.zh-TW.md) · [姿態精修](docs/POSE_REFINEMENT.zh-TW.md) · [閉環修正與公尺尺度](docs/LOOP_CLOSURE_AND_SCALE.zh-TW.md) · [LiDAR 多視角共識](docs/LIDAR_SURFACE_CONSENSUS.zh-TW.md) · [無 LiDAR 重建](docs/CAMERA_ONLY_ACCURACY.zh-TW.md) · [表面重建](docs/SURFACE_RECONSTRUCTION.zh-TW.md) · [融合診斷](docs/SCAN_FUSION_DIAGNOSTICS.zh-TW.md) · [大場景記憶體](docs/LARGE_SCAN_MEMORY.zh-TW.md) |
+| 3DGS | [手機端訓練](docs/ON_DEVICE_3DGS.zh-TW.md) · [訓練架構](docs/ON_DEVICE_3DGS_ARCHITECTURE.zh-TW.md) · [手機端資料優化](docs/ON_DEVICE_TRAINING_QUALITY.zh-TW.md) · [外部訓練](docs/TRAINING.zh-TW.md) |
+| 資料 | [匯出](docs/HISTORY_TRAINING_EXPORT.zh-TW.md) · [座標慣例](docs/COORDINATES.zh-TW.md) · [語系說明](docs/LOCALIZATION.zh-TW.md) |
 
-## 快速開始
+每份文件開頭都有英文版連結。回報可重現的問題時，請附上裝置、掃描模式、建置設定、處理報告，可以的話再附一小份掃描樣本。
 
-**需求：** Xcode 26 以上，以及 iOS 17 以上的 iPhone 或 iPad。手機端訓練需要 A14 或更新的晶片；LiDAR 深度需要有 LiDAR 的裝置。Simulator 只能檢查介面，不能真的進行 AR 掃描。
-
-```sh
-git clone https://github.com/KuoFengYuan/arkit-3dgs-scanner.git
-open arkit-3dgs-scanner/arkit-3dgs-scanner.xcodeproj
-```
-
-1. 在 Xcode 選 `arkit-3dgs-scanner` scheme、自己的簽章 Team 與實體裝置，然後執行。
-2. 按「開始掃描」，在場景中移動，讓每個表面都從幾個不同位置被拍到。
-3. 停止後等待處理完成，檢查點雲；有缺漏就續掃。
-4. 按「訓練 3DGS」在手機上建立模型，或按「匯出 3DGS 訓練資料」分享 ZIP 給電腦上的訓練器。
-
-## 在 iPhone 上訓練 3DGS
-
-| 品質 | 迭代次數 | Gaussian 上限 |
-| --- | --- | --- |
-| 快速預覽 | 4,000 | 300,000 |
-| 標準（建議） | 10,000 | 600,000 |
-| 高品質 | 20,000 | 1,000,000 |
-
-- **解析度：** 訓練影像可選 960（預設）、1,440，或照片原始的 1,920 px。
-- **迭代次數：** 照片多的掃描會自動增加次數；開始前可以自行調整。
-- **訓練中：** 可以繼續使用 App 的其他功能。手機過熱、電量不足、記憶體吃緊或切到其他 App 時，會先存檔再暫停。iOS 26 加上 Background GPU Access 權限後，可以在背景繼續訓練。
-- **隨時提前完成**，之後可以用「加強模型」繼續訓練。
-- **分享：** `scan_…-3dgs.zip` 內含 `gaussians.sog`，SuperSplat、PlayCanvas 與 LichtFeld Studio 可以直接開啟。
-
-以上述基準測試實測過 iPhone 17 Pro 的訓練速度、記憶體用量與散熱狀態；其他裝置與含即時預覽的訓練畫面仍待量測。Mac 與 Simulator 結果不能用來推定 iPhone 效能。操作方式、方法、實測結果與檔案格式詳見[手機端 3DGS 訓練](docs/ON_DEVICE_3DGS.zh-TW.md)。
-
-## 開發
-
-遵循 [貢獻流程](CONTRIBUTING.zh-TW.md) 與 [工作規範](AGENTS.zh-TW.md)：使用任務分支（`Feature/`、`Bugfix/`、`Enhance/`），開 PR 到 `main`，合併後刪除分支。貢獻流程裡列出檢查指令、程式結構與可選的 Python 工具。
-
-素材目錄已包含 1024 × 1024 的 App 圖示，可用於 iOS 封存版本與 TestFlight 發佈。
-
-```sh
-python3 tools/check_project.py
-bash tools/test_localization.sh
-```
+</details>
 
 ## 版權與授權
 
@@ -109,14 +174,3 @@ Copyright © 2026 Kuo Feng-Yuan（[KuoFengYuan](https://github.com/KuoFengYuan)�
 **先前發布內容：** 截至 commit `d5d8e31` 以 Apache 2.0 發布的內容，仍保有原授權的權利，包含商業使用；本次變更不撤回已授予的權利。詳見[授權範圍與歷史](docs/LICENSING.zh-TW.md)及[歷史 Apache 2.0 條款](licenses/Apache-2.0.txt)。
 
 原始碼已與參考實作比對過，見[來源與授權](docs/ON_DEVICE_3DGS.zh-TW.md#來源與授權)。
-
-## 文件索引
-
-| 主題 | 文件 |
-| --- | --- |
-| 掃描 | [掃描架構](docs/CAPTURE_ARCHITECTURE.zh-TW.md) · [介面設計](docs/INTERFACE_DESIGN.zh-TW.md) · [即時預覽與品質閘門](docs/LIDAR_QUALITY_AND_PREVIEW.zh-TW.md) · [拍攝吞吐量](docs/CAPTURE_THROUGHPUT.zh-TW.md) · [裝置操作](docs/DEVICE_NOTES.zh-TW.md) |
-| 處理 | [融合進度與預覽](docs/FUSION_REVIEW.zh-TW.md) · [姿態精修](docs/POSE_REFINEMENT.zh-TW.md) · [閉環修正與公尺尺度](docs/LOOP_CLOSURE_AND_SCALE.zh-TW.md) · [LiDAR 多視角共識](docs/LIDAR_SURFACE_CONSENSUS.zh-TW.md) · [無 LiDAR 重建](docs/CAMERA_ONLY_ACCURACY.zh-TW.md) · [表面重建](docs/SURFACE_RECONSTRUCTION.zh-TW.md) · [融合診斷](docs/SCAN_FUSION_DIAGNOSTICS.zh-TW.md) · [大場景記憶體](docs/LARGE_SCAN_MEMORY.zh-TW.md) |
-| 3DGS | [手機端訓練](docs/ON_DEVICE_3DGS.zh-TW.md) · [訓練架構](docs/ON_DEVICE_3DGS_ARCHITECTURE.zh-TW.md) · [手機端資料優化](docs/ON_DEVICE_TRAINING_QUALITY.zh-TW.md) · [外部訓練](docs/TRAINING.zh-TW.md) |
-| 資料 | [匯出](docs/HISTORY_TRAINING_EXPORT.zh-TW.md) · [座標慣例](docs/COORDINATES.zh-TW.md) · [語系說明](docs/LOCALIZATION.zh-TW.md) |
-
-每份文件開頭都有英文版連結。回報可重現的問題時，請附上裝置、掃描模式、建置設定、處理報告，可以的話再附一小份掃描樣本。
