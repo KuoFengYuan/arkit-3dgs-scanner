@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  FeatureTracker.swift
 //  fable — 掃描時同步抽取特徵並建立跨幀對應（給 BundleAdjuster 用）

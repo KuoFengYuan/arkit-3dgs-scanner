@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 // Pure metrics for the camera-only replay (tools/replay_camera_only.swift) and its synthetic
 // tests (tools/test_camera_only_replay.swift). No top-level code; nothing here reads files.
 //

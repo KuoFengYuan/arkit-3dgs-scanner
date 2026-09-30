@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  ReviewView.swift
 //  fable — 掃描後的點雲驗收檢視器（單指旋轉 / 雙指縮放平移）

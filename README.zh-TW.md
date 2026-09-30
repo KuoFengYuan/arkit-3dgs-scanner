@@ -67,16 +67,23 @@ python3 tools/check_project.py
 bash tools/test_localization.sh
 ```
 
-## 授權
+## 版權與授權
 
-Copyright 2026 Kuo Feng-Yuan（[KuoFengYuan](https://github.com/KuoFengYuan)）。本專案採用 [Apache License 2.0](LICENSE)。
+Copyright © 2026 Kuo Feng-Yuan（[KuoFengYuan](https://github.com/KuoFengYuan)）。本專案採用 [Apache License 2.0](LICENSE)；該授權未授予的權利均予保留。
 
 **本專案為個人研究專案**，並非任何雇主或機構的產品，未經其背書，也不代表其立場。本專案依現狀提供，不附任何擔保。
 
 - **可以商用**，包含手機端 3DGS 訓練器；也可以修改與再散布。
 - **必須標註作者**：任何複製或衍生作品都要保留 [LICENSE](LICENSE) 與 [NOTICE](NOTICE)，並註明原作者為 Kuo Feng-Yuan（KuoFengYuan）。
+- **版權涵蓋範圍**：原始碼、文件，以及 `docs/media` 中的示範錄影，均為作者本人的作品。每個原始碼檔開頭都有 `SPDX-License-Identifier: Apache-2.0` 檔頭。
+- **App 圖示**：由作者指示 AI 影像生成工具製作。這類影像在部分法域可能不受著作權保護；在作者享有權利的範圍內，以相同條款授權。
 - 3DGS 訓練器是以 Swift 與 Metal 獨立實作。其中不含原版 3D Gaussian Splatting（Inria／MPII）與 Mip-Splatting 的程式碼，這兩者只允許非商用；也不含 LichtFeld Studio（GPL-3.0）的程式碼。參考的論文與專案列在 [NOTICE](NOTICE)。
+- **檔案格式**：COLMAP 匯出與 SOG 模型檔依照 COLMAP 與 PlayCanvas 文件所定義的格式。兩者的程式碼都未包含在內，讀寫程式是本專案自行撰寫。
+- **第三方軟體**：App 只使用 Apple 的系統框架。Python 工具需要另外安裝的套件（`tools/requirements.txt`），各自依其授權；本 repo 未包含任何第三方套件。
+- **商標**：Apple、iPhone、ARKit 與 Metal 是 Apple Inc. 的商標。其他產品與專案名稱屬於各自的所有者，僅用於說明相容性，不代表任何背書。
 - 部分方法仍可能涉及第三方專利；以上不構成法律意見，商用前請自行確認。
+
+原始碼已與參考實作比對過，見[來源與授權](docs/ON_DEVICE_3DGS.zh-TW.md#來源與授權)。
 
 ## 文件索引
 

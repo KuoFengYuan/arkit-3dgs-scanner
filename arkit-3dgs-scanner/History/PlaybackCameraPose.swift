@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 import simd
 
 /// 第一人稱回放：使用拍攝位置及前向，依重力保持畫面水平。

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  CaptureView.swift
 //  fable — AR 掃描主畫面（ARSCNView + HUD 疊層）

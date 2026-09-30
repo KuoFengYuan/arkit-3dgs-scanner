@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 //
 //  HUDStyle.swift
 //  fable — 疊在相機畫面上的 HUD 視覺語言
