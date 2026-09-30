@@ -558,8 +558,10 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
             if growthFrozen { strategy.maxGaussians = min(strategy.maxGaussians, model.activeCount) }
             let seeds = configuration.usesHoleFilling && !growthFrozen && t < schedule.growUntil && t >= 3 * schedule.refineEvery
                 ? lastRendered.map { holeSeeds(frame: $0) } ?? [] : []
+            let refineStarted = Date()
             refineReport = strategy.refine(model, iteration: t, seeds: seeds, replaceByError: replaceByError, relocate: relocation,
                                            regionMode: regionMode)
+            profile["refine.cpu", default: 0] += Date().timeIntervalSince(refineStarted)
             holeSeedsAdded += refineReport?.holes ?? 0
         }
         iteration = t
@@ -596,9 +598,6 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
         let usesISP = configuration.ppisp
         let uniforms = usesISP ? ppisp.uniforms(frame: frame) : nil
         model.adamStep += 1
-        let adamT = Double(model.adamStep)
-        let bc1 = Float(1 - pow(0.9, adamT)), bc2 = Float(1 - pow(0.999, adamT))
-        let live = max(1, model.activeCount)
         let pixels = dataset.width * dataset.height
         profile["intersections", default: 0] += Double(intersections)
         let masking = transientMasking && Double(t) >= Self.transientStart * Double(configuration.iterations)
@@ -616,7 +615,9 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
                                         background: .zero)
                 loss.encode(e, raw: target.image, target: targetImage, ppisp: uniforms, weight: viewWeights[frame], mask: mask != nil)
             }
+            let lidarStarted = Date()
             let depthTarget = try lidarTarget(frame: frame, iteration: t)
+            profile["lidar.cpu", default: 0] += Date().timeIntervalSince(lidarStarted)
             try wait(forward, "forward")
             if masking { transientMasks[frame] = transientMask(frame) }
             for (band, rows) in GaussianRasterizer.backwardBands(tilesX: cam.tilesX, tilesY: cam.tilesY).enumerated() {
@@ -644,24 +645,11 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
                                       seconds: Date().timeIntervalSince(started), skipped: true, refine: refineReport)
         }
         gpuSkipStreak = 0
-        try run("adam") { e in
-            let lrs: [Float] = [strategy.meansLR(at: t), strategy.scalesLR(at: t), Float(MRNFConstants.rotationLR),
-                                Float(MRNFConstants.opacityLR), Float(MRNFConstants.sh0LR), Float(MRNFConstants.shNLR)]
-            for (g, group) in model.layout.groups.enumerated() {
-                let mode: UInt32 = g == 3 ? 1 : (g == 1 && refining ? 2 : 0)
-                let skip = g == 5 && (t <= schedule.shWarmup || group.width == 0)
-                guard !skip else { continue }
-                let params = AdamParams(lr: lrs[g], beta1: 0.9, beta2: 0.999, epsilon: 1e-15,
-                                        biasCorrection1: bc1, biasCorrection2: bc2,
-                                        offset: UInt32(group.offset), width: UInt32(group.width), rows: UInt32(count),
-                                        capacity: UInt32(model.capacity), mode: mode, skip: 0,
-                                        opacityReg: MRNFConstants.opacityRegularizer / Float(live),
-                                        sharePenalty: MRNFConstants.screenSharePenalty, shareLimit: MRNFConstants.maxScreenShare,
-                                        visibleOnly: sparseAdam ? 1 : 0)
-                e.dispatch(adam, threads: count * group.width,
-                           [.buffer(model.params), .buffer(model.grads), .buffer(model.adamM), .buffer(model.adamV),
-                            .buffer(model.stats), .value(params), .buffer(raster.tiles)])
-            }
+        try run("adam") { e in encodeAdam(e, iteration: t, count: count) }
+        let postStarted = Date()
+        defer {
+            profile["post.cpu", default: 0] += Date().timeIntervalSince(postStarted)
+            profile["step", default: 0] += Date().timeIntervalSince(started)
         }
         let values = loss.values
         lastPSNR = values.psnr
@@ -690,6 +678,32 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
         return TrainingStepReport(iteration: t, frame: frame, loss: values.loss, psnr: values.psnr,
                                   gaussians: model.activeCount, seconds: Date().timeIntervalSince(started),
                                   refine: refineReport)
+    }
+
+    /// Dense Adam on every optimiser group at step `model.adamStep` (MRNF's regularisers).
+    private func encodeAdam(_ e: MTLComputeCommandEncoder, iteration t: Int, count: Int) {
+        let schedule = strategy.schedule
+        let refining = t < schedule.stopRefine
+        let adamT = Double(model.adamStep)
+        let bc1 = Float(1 - pow(0.9, adamT)), bc2 = Float(1 - pow(0.999, adamT))
+        let live = max(1, model.activeCount)
+        let lrs: [Float] = [strategy.meansLR(at: t), strategy.scalesLR(at: t), Float(MRNFConstants.rotationLR),
+                            Float(MRNFConstants.opacityLR), Float(MRNFConstants.sh0LR), Float(MRNFConstants.shNLR)]
+        for (g, group) in model.layout.groups.enumerated() {
+            let mode: UInt32 = g == 3 ? 1 : (g == 1 && refining ? 2 : 0)
+            let skip = g == 5 && (t <= schedule.shWarmup || group.width == 0)
+            guard !skip else { continue }
+            let params = AdamParams(lr: lrs[g], beta1: 0.9, beta2: 0.999, epsilon: 1e-15,
+                                    biasCorrection1: bc1, biasCorrection2: bc2,
+                                    offset: UInt32(group.offset), width: UInt32(group.width), rows: UInt32(count),
+                                    capacity: UInt32(model.capacity), mode: mode, skip: 0,
+                                    opacityReg: MRNFConstants.opacityRegularizer / Float(live),
+                                    sharePenalty: MRNFConstants.screenSharePenalty, shareLimit: MRNFConstants.maxScreenShare,
+                                    visibleOnly: sparseAdam ? 1 : 0)
+            e.dispatch(adam, threads: count * group.width,
+                       [.buffer(model.params), .buffer(model.grads), .buffer(model.adamM), .buffer(model.adamV),
+                        .buffer(model.stats), .value(params), .buffer(raster.tiles)])
+        }
     }
 
     /// Mean correction of the nearest training photos before and after `frame` in capture order
@@ -896,9 +910,11 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
     /// the photos' own resolution (detail the training resolution cannot hold). `aligned` reuses
     /// the test-time pose corrections of the last aligned evaluation. Larger renders get their
     /// own rasterizer (evaluation tools only; the training plan does not include it).
-    /// `inspect` receives each view's final image (after the ISP, as scored) and the photo.
+    /// `inspect` receives each view's final image (after the ISP, as scored), the photo and the
+    /// view's SSIM.
     func evaluate(scale: Double, frames: [Int]? = nil, aligned: Bool = false,
-                  inspect: ((_ index: Int, _ image: UnsafePointer<SIMD4<Float>>, _ photo: UnsafePointer<UInt8>, _ width: Int, _ height: Int) -> Void)? = nil)
+                  inspect: ((_ index: Int, _ image: UnsafePointer<SIMD4<Float>>, _ photo: UnsafePointer<UInt8>, _ width: Int, _ height: Int,
+                             _ ssim: Double) -> Void)? = nil)
         throws -> (psnr: Double, ssim: Double, count: Int) {
         let list = frames ?? dataset.validationFrames
         guard !list.isEmpty, model.count > 0 else { return (0, 0, 0) }
@@ -933,14 +949,91 @@ nonisolated final class GaussianTrainer: @unchecked Sendable {
                 try raster.encodeRaster(e, camera: cam, count: model.count, intersections: m, target: scaledTarget, background: .zero)
                 scaledLoss.encode(e, raw: scaledTarget.image, target: photo, ppisp: isp)
             }
+            let v = scaledLoss.values
             if let inspect {
                 let image = (isp != nil ? scaledLoss.isp : scaledTarget.image).contents().bindMemory(to: SIMD4<Float>.self, capacity: w * h)
-                inspect(index, image, photo.contents().bindMemory(to: UInt8.self, capacity: w * h * 4), w, h)
+                inspect(index, image, photo.contents().bindMemory(to: UInt8.self, capacity: w * h * 4), w, h, v.ssim)
             }
-            let v = scaledLoss.values
             psnr += v.psnr; ssim += v.ssim; n += 1
         }
         return n > 0 ? (psnr / Double(n), ssim / Double(n), n) : (0, 0, 0)
+    }
+
+    // MARK: Profiling
+
+    /// Milliseconds of each stage of a training step on `frames` (tools): the step's kernels in
+    /// its order with one command buffer per stage (GPU time), and its CPU stages. `profile`
+    /// holds a run's split by command buffer. These steps run Adam and the MRNF kernels, so the
+    /// model does not stay as it was: call this after the run's evaluation and saving.
+    func profileStages(frames: [Int]) throws -> [(stage: String, milliseconds: [Double])] {
+        var stages: [(stage: String, milliseconds: [Double])] = []
+        func record(_ stage: String, _ ms: Double) {
+            if let i = stages.firstIndex(where: { $0.stage == stage }) { stages[i].milliseconds.append(ms) }
+            else { stages.append((stage, [ms])) }
+        }
+        func gpu(_ body: (MTLComputeCommandEncoder) throws -> Void) throws -> Double {
+            let buffer = try submit(body).buffer
+            buffer.waitUntilCompleted()
+            if let error = buffer.error { throw TrainingError.gpuFailure(error.localizedDescription) }
+            return (buffer.gpuEndTime - buffer.gpuStartTime) * 1000
+        }
+        func timed(_ stage: String, _ body: (MTLComputeCommandEncoder) throws -> Void) throws { record(stage, try gpu(body)) }
+        let t = max(1, iteration), count = model.count, pixels = dataset.width * dataset.height
+        let refining = t < strategy.schedule.stopRefine
+        for frame in frames {
+            let decodeStarted = Date()
+            guard let photo = TrainingImageLoader.decode(dataset.imageURL(frame), width: dataset.width, height: dataset.height) else { continue }
+            record("image decode (CPU)", Date().timeIntervalSince(decodeStarted) * 1000)
+            photo.withUnsafeBytes { targetImage.contents().copyMemory(from: $0.baseAddress!, byteCount: pixels * 4) }
+            let cam = camera(frame: frame, activeDegree: activeDegree)
+            pendingFold = 1
+            try timed("MRNF fold + noise") { e in encodePostBackward(e, iteration: t) }
+            pendingFold = nil
+            try timed("edge map") { e in encodeEdges(e) }
+            try timed("project") { e in
+                raster.encodeProject(e, camera: cam, layout: model.layout, model: model.params, count: count)
+                e.dispatch(share, threads: count, [.buffer(model.params), .buffer(model.stats), .buffer(raster.tiles),
+                                                   .value(SIMD4<UInt32>(UInt32(count), UInt32(model.capacity), model.layout.scales, model.layout.opacities)),
+                                                   .value(cam.center)])
+            }
+            try timed("depth sort") { e in try raster.encodeDepthOrder(e, count: count) }
+            raster.resetTotal()
+            try timed("tile offsets") { e in try raster.encodeTileOffsets(e, count: count) }
+            let intersections = raster.intersectionCount
+            guard intersections <= raster.intersectionCapacity else { continue }
+            try timed("emit pairs") { e in try raster.encodeEmit(e, camera: cam, count: count, intersections: intersections) }
+            try timed("tile sort") { e in try raster.encodeTileSort(e, intersections: intersections) }
+            let median = edgeMedian(frame)
+            try timed("blend forward") { e in
+                e.dispatch(scale, threads: pixels, [.buffer(edgeMap), .value(SIMD2<Float>(median > 0 ? 1 / median : 0, Float(pixels)))])
+                raster.encodeBlend(e, camera: cam, count: count, target: target, background: .zero)
+            }
+            let uniforms = configuration.ppisp ? ppisp.uniforms(frame: frame) : nil
+            try timed("loss (PPISP, L1 + SSIM)") { e in loss.encode(e, raw: target.image, target: targetImage, ppisp: uniforms) }
+            let lidarStarted = Date()
+            let depth = try lidarTarget(frame: frame, iteration: t)
+            record("LiDAR target (CPU)", Date().timeIntervalSince(lidarStarted) * 1000)
+            var backward = 0.0
+            for (band, rows) in GaussianRasterizer.backwardBands(tilesX: cam.tilesX, tilesY: cam.tilesY).enumerated() {
+                backward += try gpu { e in
+                    if band == 0 { raster.encodeBackwardClear(e, count: count) }
+                    raster.encodeBackwardBlend(e, camera: cam, layout: model.layout, count: count, target: target, background: .zero,
+                                               imageGrad: loss.rawGrad, errorMap: loss.errorMap, edgeMap: edgeMap, lossSums: loss.sums,
+                                               depth: depth, rows: rows)
+                }
+            }
+            record("blend backward", backward)
+            try timed("project backward") { e in
+                raster.encodeProjectBackward(e, camera: cam, layout: model.layout, model: model.params, grads: model.grads, count: count)
+                if refining {
+                    e.dispatch(relocationFold, threads: count, [.buffer(raster.grad2d), .buffer(model.stats),
+                                                                .value(SIMD2<UInt32>(UInt32(count), UInt32(model.capacity))), .buffer(raster.tiles)])
+                }
+            }
+            try timed("adam") { e in encodeAdam(e, iteration: t, count: count) }
+            record("intersections (thousands)", Double(intersections) / 1000)
+        }
+        return stages
     }
 
     /// Drops cached images and freezes growth (memory pressure).

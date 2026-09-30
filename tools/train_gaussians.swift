@@ -21,6 +21,10 @@
 //   edge PSNR, GMSD, band-pass detail, empty share, colour-aligned PSNR), --dump-views DIR --dump-ids A,B.
 // Large-scene experiments (off unless given): --sharpness-weights S [--sharpness-floor F],
 //   --transient-mask, --pose-smoothing W, --add-ids FILE (train these photos too).
+// Speed: --profile-stages N times each stage of a step on N training photos at the end (GPU ms
+//   per command buffer; run it apart from timing runs). --strict-seeds seeds from the training
+//   photos' LiDAR depth only (the saved cloud also fused the held-out photos' depth).
+//   --iterations is always the fixed count (the app's automatic count is only printed).
 import Foundation
 import Metal
 import simd
@@ -54,6 +58,7 @@ import CoreGraphics
         var viewMetrics: URL?, dumpViews: URL?, dumpIDs: Set<Int> = []
         var extraIDs: Set<Int> = []
         var sharpnessStrength: Float = 0, sharpnessFloor: Float = 0.25, transientMask = false, poseSmoothing = 0.0
+        var profileStages = 0, savedCloud = true
         while !args.isEmpty {
             let a = args.removeFirst()
             switch a {
@@ -116,6 +121,8 @@ import CoreGraphics
                 holdOutIDs = Set(text.split(whereSeparator: { $0 == "," || $0.isNewline }).compactMap { Int($0.trimmingCharacters(in: .whitespaces)) })
             case "--write-holdout-ids": writeHoldOutIDs = URL(fileURLWithPath: args.removeFirst())
             case "--transient-mask": transientMask = true
+            case "--profile-stages": profileStages = Int(args.removeFirst())!
+            case "--strict-seeds": savedCloud = false
             case "--add-ids":
                 // Experiment: also train these photos (e.g. dropped by the blur review), held out or not by the usual rule.
                 let text = try String(contentsOf: URL(fileURLWithPath: args.removeFirst()), encoding: .utf8)
@@ -145,7 +152,7 @@ import CoreGraphics
         var dataset = try TrainingDataset.prepare(scan: scan, longEdge: config.longEdge, holdOutEvery: config.holdOutEvery,
                                                   maxPoints: config.seedBudget, depthSeedLimit: config.depthSeedLimit(cloudPoints:), holdOutSegment: holdOutSegment,
                                                   frameSelection: frameSelection, holdOutIDs: holdOutIDs, scaledSeedCells: scaledSeedCells,
-                                                  extraTrainingIDs: extraIDs)
+                                                  extraTrainingIDs: extraIDs, savedCloud: savedCloud)
         let scale = scaledSeedCells ? TrainingFrameSelector.metricScale(workingDistance: dataset.workingDistance) : 1
         print(String(format: "seeds: %d points (depth seeds %@, seed budget %d, working distance %.2f m, seed cell %.1f mm) in %.1f s",
                      dataset.points.count, config.usesDepthSeeds ? "on" : "off", config.seedBudget, dataset.workingDistance ?? 0,
@@ -161,6 +168,9 @@ import CoreGraphics
             print("excluded \(dataset.frames.count - frames.count) training photos: \(excludeIDs.sorted())")
             dataset = TrainingDataset(directory: dataset.directory, frames: frames, points: dataset.points, width: dataset.width, height: dataset.height)
         }
+        print(String(format: "iterations: %d fixed (the app's automatic %@ count for %d training photos: %d)", config.iterations,
+                     config.preset.rawValue, dataset.trainFrames.count,
+                     GaussianTrainingConfiguration.automaticIterations(config.preset, trainingPhotos: dataset.trainFrames.count)))
         print("dataset: \(dataset.frames.count) frames (\(dataset.validationFrames.count) validation), \(dataset.points.count) points, \(dataset.width)x\(dataset.height), prepared in \(String(format: "%.1f", Date().timeIntervalSince(t0))) s")
         let budget = (config.memoryBudgetMB.map { $0 << 20 }) ?? TrainingMemoryPlan.automaticBudget()
         let plan = try TrainingMemoryPlan.fit(width: dataset.width, height: dataset.height, shDegree: config.shDegree,
@@ -195,7 +205,7 @@ import CoreGraphics
         if enhanceFrom != nil {
             print(String(format: "enhancement start: validation PSNR %.3f (unaligned)", try trainer.evaluate().psnr))
         }
-        print("initial Gaussians \(trainer.model.activeCount), scene extent (10–90%) \(trainer.strategy.bounds.medianSize) m, footprint \(TrainingMemoryPlan.footprintBytes >> 20) MB")
+        print("initial Gaussians \(trainer.model.activeCount), scene extent (10–90%) \(trainer.strategy.bounds.medianSize) m, footprint \(TrainingMemoryPlan.footprintBytes >> 20) MB, lifetime peak so far \(lifetimeFootprintPeak() >> 20) MB")
         let start = Date()
         var window: [Double] = [], psnrWindow: [Double] = [], peak = 0, skipped = 0, pairsPeak = 0.0, pairsSeen = 0.0
         while trainer.iteration < config.iterations {
@@ -223,6 +233,7 @@ import CoreGraphics
             }
         }
         let seconds = Date().timeIntervalSince(start)
+        print("peak physical footprint: sampled \(peak >> 20) MB, lifetime \(lifetimeFootprintPeak() >> 20) MB (lifetime includes preparation)")
         for (k, v) in trainer.profile.sorted(by: { $0.key < $1.key }) {
             let n = Double(max(1, config.runIterations))
             print(String(format: "  profile %@: %.2f per iteration", k, k == "intersections" ? v / n : v / n * 1000))
@@ -299,6 +310,7 @@ import CoreGraphics
             }
             print(String(format: "saved model in %.2f s (+ %.2f s validation): %@", Date().timeIntervalSince(saveStart), evalSeconds, saveModel.path))
         }
+        if profileStages > 0 { try reportStages(trainer, photos: profileStages) }
     }
 
     /// Experiment inputs: poses from another pose file of the scan (same frame selection), and a
@@ -446,16 +458,16 @@ import CoreGraphics
     static func reportViewMetrics(_ trainer: GaussianTrainer, csv: URL?, dump: URL?, dumpIDs: Set<Int>) throws {
         guard let f = trainer.dataset.frames.first else { return }
         let scale = Double(f.intrinsics.width) / Double(trainer.dataset.width)
-        var rows = ["id,psnr,edge_psnr,gmsd,detail_ratio,textured_blocks,empty,color_psnr,color_edge_psnr"]
+        var rows = ["id,psnr,edge_psnr,gmsd,detail_ratio,textured_blocks,empty,color_psnr,color_edge_psnr,ssim,luma_bias"]
         var sums = [Double](repeating: 0, count: 4), n = 0, colorSum = 0.0
         if let dump { try FileManager.default.createDirectory(at: dump, withIntermediateDirectories: true) }
-        _ = try trainer.evaluate(scale: scale, aligned: true) { index, image, photo, w, h in
+        _ = try trainer.evaluate(scale: scale, aligned: true) { index, image, photo, w, h, ssim in
             let id = trainer.dataset.frames[index].id
             let d = ViewDetail.measure(image: image, photo: photo, width: w, height: h)
             // Share of pixels the model leaves empty (final transmittance above 0.5).
             let empty = Double((0..<(w * h)).filter { image[$0].w > 0.5 }.count) / Double(w * h)
-            rows.append(String(format: "%d,%.4f,%.4f,%.5f,%.4f,%d,%.4f,%.4f,%.4f", id, d.psnr, d.edgePSNR, d.gmsd, d.detailRatio, d.texturedBlocks, empty,
-                               d.alignedPSNR, d.alignedEdgePSNR))
+            rows.append(String(format: "%d,%.4f,%.4f,%.5f,%.4f,%d,%.4f,%.4f,%.4f,%.5f,%.5f", id, d.psnr, d.edgePSNR, d.gmsd, d.detailRatio, d.texturedBlocks, empty,
+                               d.alignedPSNR, d.alignedEdgePSNR, ssim, d.lumaBias))
             sums[0] += d.psnr; sums[1] += d.edgePSNR; sums[2] += d.gmsd; sums[3] += log2(max(1e-6, d.detailRatio)); n += 1
             colorSum += d.alignedPSNR
             if let dump, dumpIDs.contains(id) { ViewDetail.writePNG(image, width: w, height: h, to: dump.appendingPathComponent("render_\(id).png")) }
@@ -467,6 +479,31 @@ import CoreGraphics
         if let csv { try rows.joined(separator: "\n").write(to: csv, atomically: true, encoding: .utf8) }
     }
 
+    /// Largest physical footprint of the process so far.
+    static func lifetimeFootprintPeak() -> Int {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let ok = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count) }
+        }
+        return ok == KERN_SUCCESS ? Int(info.ledger_phys_footprint_peak) : 0
+    }
+
+    /// Stage times of a training step on `photos` training photos spread over the capture.
+    static func reportStages(_ trainer: GaussianTrainer, photos: Int) throws {
+        let train = trainer.dataset.trainFrames
+        let frames = Swift.stride(from: 0, to: train.count, by: max(1, train.count / max(1, photos))).prefix(photos).map { train[$0] }
+        let stages = try trainer.profileStages(frames: frames)
+        print("stage profile at iteration \(trainer.iteration), \(trainer.model.activeCount) Gaussians, \(frames.count) photos (ms; median, mean):")
+        var gpu = 0.0
+        for (stage, ms) in stages {
+            let sorted = ms.sorted(), mean = ms.reduce(0, +) / Double(max(1, ms.count))
+            if !stage.contains("(") { gpu += mean }
+            print("  stage " + stage.padding(toLength: 28, withPad: " ", startingAt: 0) + String(format: "%9.3f %9.3f", sorted[sorted.count / 2], mean))
+        }
+        print("  stage " + "GPU total (mean)".padding(toLength: 28, withPad: " ", startingAt: 0) + String(format: "%19.3f", gpu))
+    }
+
     /// Writes the model as SOG (reusing the gradient and intersection buffers, as the app
     /// does), reads it back into the trainer, and scores the held-out views again.
     static func reportSOGRoundTrip(_ trainer: GaussianTrainer, metal: GaussianMetal, alignSteps: Int, palette: Int?, iterations: Int) throws {
@@ -474,22 +511,14 @@ import CoreGraphics
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("roundtrip-\(UUID().uuidString).sog")
         defer { try? FileManager.default.removeItem(at: url) }
         let plyBytes = trainer.model.activeCount * GaussianExport.propertyNames(shDegree: trainer.model.shDegree).count * 4
-        func footprintPeak() -> Int {
-            var info = task_vm_info_data_t()
-            var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
-            let ok = withUnsafeMutablePointer(to: &info) {
-                $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count) }
-            }
-            return ok == KERN_SUCCESS ? Int(info.ledger_phys_footprint_peak) : 0
-        }
-        let footprintBefore = TrainingMemoryPlan.footprintBytes, peakBefore = footprintPeak()
+        let footprintBefore = TrainingMemoryPlan.footprintBytes, peakBefore = lifetimeFootprintPeak()
         let report = try GaussianSOG.write(trainer.model, to: url, metal: metal,
                                            scratch: .init(points: trainer.model.grads, palette: trainer.raster.keys, labels: trainer.raster.values),
                                            iterations: iterations, paletteEntries: palette)
         print(String(format: "SOG: %d Gaussians, %d palette entries, %.1f MB (PLY %.1f MB, %.1f×), %.1f s (k-means %.1f s)",
                      report.gaussians, report.paletteEntries, Double(report.bytes) / 1e6, Double(plyBytes) / 1e6,
                      Double(plyBytes) / Double(report.bytes), report.seconds, report.kMeansSeconds))
-        print("SOG write memory: footprint \(footprintBefore >> 20) MB before, lifetime peak \(peakBefore >> 20) -> \(footprintPeak() >> 20) MB")
+        print("SOG write memory: footprint \(footprintBefore >> 20) MB before, lifetime peak \(peakBefore >> 20) -> \(lifetimeFootprintPeak() >> 20) MB")
         let readStart = Date()
         try GaussianSOG.read(url, into: trainer.model)
         let readSeconds = Date().timeIntervalSince(readStart)
@@ -524,7 +553,8 @@ import CoreGraphics
 ///   (3 × 3 minus 7 × 7 box blur) of the render over the photo's, geometric mean. Below 1 the
 ///   render is softer than the photo; a noisy photo also lowers it, so compare runs, not scans.
 enum ViewDetail {
-    struct Result { var psnr, edgePSNR, gmsd, detailRatio: Double; var texturedBlocks: Int; var alignedPSNR = 0.0, alignedEdgePSNR = 0.0 }
+    /// `lumaBias`: mean luma of the render minus the photo's (0-1; negative = darker).
+    struct Result { var psnr, edgePSNR, gmsd, detailRatio: Double; var texturedBlocks: Int; var alignedPSNR = 0.0, alignedEdgePSNR = 0.0, lumaBias = 0.0 }
 
     static func measure(image: UnsafePointer<SIMD4<Float>>, photo: UnsafePointer<UInt8>, width w: Int, height h: Int) -> Result {
         let n = w * h
@@ -598,7 +628,8 @@ enum ViewDetail {
         let detail = logs.isEmpty ? 0 : pow(2, logs.reduce(0, +) / Double(logs.count))
         func psnr(_ m: Double) -> Double { m > 0 ? -10 * log10(m) : 99 }
         return Result(psnr: psnr(mse), edgePSNR: psnr(edgeMSE), gmsd: gmsd, detailRatio: detail, texturedBlocks: logs.count,
-                      alignedPSNR: psnr(alignedMSE), alignedEdgePSNR: psnr(alignedEdgeMSE))
+                      alignedPSNR: psnr(alignedMSE), alignedEdgePSNR: psnr(alignedEdgeMSE),
+                      lumaBias: (yr.reduce(0.0) { $0 + Double($1) } - yg.reduce(0.0) { $0 + Double($1) }) / Double(n))
     }
 
     /// 3 × 3 minus 7 × 7 box blur (separable, clamped borders).

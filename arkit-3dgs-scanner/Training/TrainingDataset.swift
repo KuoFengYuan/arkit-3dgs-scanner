@@ -141,7 +141,7 @@ nonisolated struct TrainingDataset: Sendable {
     static func prepare(scan directory: URL, longEdge: Int, holdOutEvery: Int, maxPoints: Int,
                         depthSeedLimit: (_ cloudPoints: Int) -> Int = { _ in 0 }, holdOutSegment: Double = 0,
                         frameSelection: FrameSelection = .stored, holdOutIDs: Set<Int>? = nil, scaledSeedCells: Bool = true,
-                        selectionCache: URL? = nil, extraTrainingIDs: Set<Int> = [],
+                        selectionCache: URL? = nil, extraTrainingIDs: Set<Int> = [], savedCloud: Bool = true,
                         isCancelled: () -> Bool = { false }) throws -> TrainingDataset {
         let (saved, _) = ScanLibrary.savedRecords(in: directory)
         let workingDistance = TrainingFrameSelector.workingDistance(records: saved, directory: directory)
@@ -186,7 +186,9 @@ nonisolated struct TrainingDataset: Sendable {
             for i in frames.indices { frames[i].isValidation = false }
         }
         var points: [CloudPoint] = []
-        for name in ["review.ply", "points.ply"] {
+        // `savedCloud` false (strict evaluations): the saved cloud also fused the held-out photos'
+        // depth, so seeds come from the training photos' LiDAR depth only.
+        for name in ["review.ply", "points.ply"] where savedCloud {
             if let saved = try? ScanLibrary.readPLY(directory.appendingPathComponent(name), limit: maxPoints), !saved.isEmpty {
                 points = saved; break
             }
