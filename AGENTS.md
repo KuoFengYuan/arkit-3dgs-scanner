@@ -21,6 +21,7 @@ The repository owner has requested this default workflow for authorized code cha
 
 ## Languages and compatibility
 
+- Project-owned source, documentation, and media use PolyForm Noncommercial 1.0.0; commercial use is not permitted under this licence. Use `SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0` for new project source files. Preserve third-party notices and the Apache 2.0 rights already granted for earlier published material; see [licensing](docs/LICENSING.md).
 - Documentation: English primary (`README.md`, `docs/NAME.md`), complete Traditional Chinese counterpart (`README.zh-TW.md`, `docs/NAME.zh-TW.md`). Link both directions and link within the same language.
 - App UI: Traditional Chinese by default, English selectable on the home screen; persist the preference. Use `L10n` and both `en.lproj` / `zh-Hant.lproj` resources for user text, interpolated messages, accessibility, errors, and progress. Keep machine-readable identifiers independent of language.
 - Local project, scheme, repository name, and bundle ID: `arkit-3dgs-scanner`. Keep company or employer names out of identifiers, code, and documentation; this is a personal research project.

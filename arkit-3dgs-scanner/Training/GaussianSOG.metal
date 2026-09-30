@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). On-device 3DGS training; see LICENSE and NOTICE.
 // k-means assignment for the SOG model file: each Gaussian's higher-band SH vector goes to its
 // nearest palette entry (squared Euclidean distance). The update step runs on the CPU.

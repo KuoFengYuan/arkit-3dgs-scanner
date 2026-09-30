@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 """Compare local planar-patch thickness at fixed baseline locations, not absolute accuracy.
 No assumption that a detected patch is a wall; real layers/furniture can contribute thickness.

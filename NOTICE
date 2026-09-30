@@ -1,25 +1,34 @@
 ARKit 3DGS Scanner
 Copyright 2026 Kuo Feng-Yuan (KuoFengYuan)
 
+Required Notice: Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). https://github.com/KuoFengYuan
+
 This product was created by Kuo Feng-Yuan (GitHub: KuoFengYuan), including its
-on-device 3D Gaussian Splatting trainer. It is licensed under the Apache License,
-Version 2.0 (see LICENSE).
+on-device 3D Gaussian Splatting trainer. It is licensed under the PolyForm
+Noncommercial License 1.0.0 (see LICENSE). Commercial use is not permitted
+under this licence.
 
 This is a personal research project. It is not a product of, and is not
 endorsed by, any employer or organisation, and it does not represent their
-views. It is provided "as is", without warranty of any kind (Apache License
-2.0, sections 7 and 8).
+views. It is provided "as is", without warranty of any kind.
 
-Any redistribution or derivative work, including commercial use, must keep this
-NOTICE file and credit Kuo Feng-Yuan (KuoFengYuan) as the original author
-(Apache License 2.0, section 4).
+Redistribution must provide the licence terms or their URL and the plain-text
+Required Notice above. Keep LICENSE and NOTICE with copies and derivative works
+to supply the terms and author attribution.
 
 The copyright covers the source code, the documentation and the demo recording
 in docs/media, all the author's own work; every source file carries an
-SPDX-License-Identifier: Apache-2.0 header. The app icon was made with an AI
+SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 header. The app icon was made with an AI
 image generator at the author's direction. Copyright may not protect such
 images in every jurisdiction; to the extent the author holds rights in it, it
 is licensed on the same terms.
+
+Earlier published material through commit
+d5d8e313890e9a08221e92fa9623bd5ccad00ab0 was offered under Apache 2.0. The
+original text is retained in licenses/Apache-2.0.txt. This change does not revoke
+permissions already granted for that material, including commercial use; those
+rights remain subject to the original licence even where the same material
+appears in a newer revision. See docs/LICENSING.md.
 
 The 3D Gaussian Splatting trainer is an independent Swift and Metal
 implementation of published methods. It contains no source code from the
@@ -50,24 +59,31 @@ is included in this repository. Apple, iPhone, ARKit and Metal are trademarks of
 Apple Inc.; other names belong to their owners and are used only to describe
 compatibility.
 
-Third-party patents may cover some of these methods. This notice is not legal
-advice; check before commercial use.
+Third-party patents may cover some of these methods. This licence does not grant
+rights to third-party patents. The project's grant does not claim ownership of
+users' scan data or relicense third-party inputs.
 
 ---
 
 繁體中文摘要
 
-ARKit 3DGS Scanner，Copyright 2026 Kuo Feng-Yuan（KuoFengYuan），以 Apache
-License 2.0 授權（見 LICENSE）。本專案為個人研究專案，並非任何雇主或機構的產品，
+ARKit 3DGS Scanner，Copyright 2026 Kuo Feng-Yuan（KuoFengYuan），以 PolyForm
+Noncommercial License 1.0.0 授權（見 LICENSE），本授權不允許商業用途。
+本專案為個人研究專案，並非任何雇主或機構的產品，
 未經其背書，也不代表其立場；依現狀提供，不附任何擔保。
 
-任何再散布或衍生作品（包含商用）都必須保留本 NOTICE 檔，並註明原作者為
-Kuo Feng-Yuan（KuoFengYuan）（Apache License 2.0 第 4 條）。
+再散布時須提供授權條款或其網址，以及上方以 Required Notice: 開頭的純文字作者
+署名。將 LICENSE 與 NOTICE 隨複製或衍生作品一同保留，即可提供條款與署名。
 
 版權涵蓋原始碼、文件與 docs/media 中的示範錄影，均為作者本人的作品；每個原始碼檔
-都有 SPDX-License-Identifier: Apache-2.0 檔頭。App 圖示由作者指示 AI 影像生成
+都有 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 檔頭。App 圖示由作者指示 AI 影像生成
 工具製作；這類影像在部分法域可能不受著作權保護，在作者享有權利的範圍內以相同條款
 授權。
+
+截至 commit d5d8e313890e9a08221e92fa9623bd5ccad00ab0 的先前發布內容採用
+Apache 2.0，原始條款保留於 licenses/Apache-2.0.txt。本次變更不撤回已授予的權利，
+包含商業使用；即使相同內容出現在新版，先前取得的權利仍依原授權保留。
+詳見 docs/LICENSING.zh-TW.md。
 
 3DGS 訓練器是依公開方法以 Swift 與 Metal 獨立實作，不含原版 3D Gaussian
 Splatting（Inria／MPII）與 Mip-Splatting 的程式碼（兩者僅限非商用），也不含
@@ -77,5 +93,5 @@ LichtFeld Studio（GPL-3.0）的程式碼；所參考的論文與專案列於上
 
 App 只使用 Apple 的系統框架；Python 工具所需的套件需另外安裝，各自依其授權，本
 repo 未包含。Apple、iPhone、ARKit 與 Metal 是 Apple Inc. 的商標；其他名稱屬於
-各自的所有者，僅用於說明相容性。部分方法可能涉及第三方專利；本聲明不構成法律意見，
-商用前請自行確認。
+各自的所有者，僅用於說明相容性。部分方法可能涉及第三方專利，本授權未授予其權利；
+本專案不宣稱擁有使用者的掃描資料，亦不重新授權第三方輸入素材。

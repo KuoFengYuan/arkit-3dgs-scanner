@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). On-device 3DGS training; see LICENSE and NOTICE.
 // Gaussian rasterizer: GPU forward against a double-precision CPU reference, and analytic GPU
 // gradients (Gaussian parameters and camera pose) against central finite differences.

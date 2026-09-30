@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Copyright 2026 Kuo Feng-Yuan (KuoFengYuan). See LICENSE and NOTICE.
 // Camera-only pose refinement replay: simulates a LiDAR-off capture of a saved scan, removes the
 // depth, tracks features in the images alone (CameraOnlyTracker) and runs the joint bundle

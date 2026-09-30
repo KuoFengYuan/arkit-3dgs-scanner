@@ -524,7 +524,7 @@ FBDA13 完整的標準訓練，一次只跑一個，GPU 沒有其他工作：
 
 ## 來源與授權
 
-訓練器是本個人研究專案的一部分，並非任何雇主或機構的產品，也未經其背書。採用 [Apache License 2.0](../LICENSE)：可以商用，複製與衍生作品須保留 [NOTICE](../NOTICE)，並註明作者為 Kuo Feng-Yuan（KuoFengYuan）。部分方法仍可能涉及第三方專利；以上不構成法律意見。
+訓練器是本個人研究專案的一部分，並非任何雇主或機構的產品，也未經其背書。採用 [PolyForm Noncommercial License 1.0.0](../LICENSE)，本授權不允許商業用途。再散布時須提供授權條款或其網址，以及 [NOTICE](../NOTICE) 中以 `Required Notice:` 開頭的作者署名。先前已授予的 Apache 2.0 權利不撤回；詳見[授權範圍與歷史](LICENSING.zh-TW.md)。部分方法仍可能涉及第三方專利，本授權未授予其權利。
 
 
 - **程式碼：** 未包含任何 LichtFeld Studio（GPL-3.0）原始碼，只遵循其公開的演算法與預設參數：MRNF、PPISP 整合與 Mip 濾波設定。
