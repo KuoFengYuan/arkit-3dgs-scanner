@@ -23,13 +23,6 @@ image generator at the author's direction. Copyright may not protect such
 images in every jurisdiction; to the extent the author holds rights in it, it
 is licensed on the same terms.
 
-Earlier published material through commit
-d5d8e313890e9a08221e92fa9623bd5ccad00ab0 was offered under Apache 2.0. The
-original text is retained in licenses/Apache-2.0.txt. This change does not revoke
-permissions already granted for that material, including commercial use; those
-rights remain subject to the original licence even where the same material
-appears in a newer revision. See docs/LICENSING.md.
-
 The 3D Gaussian Splatting trainer is an independent Swift and Metal
 implementation of published methods. It contains no source code from the
 original 3D Gaussian Splatting (Inria/MPII) or Mip-Splatting implementations,
@@ -79,11 +72,6 @@ Noncommercial License 1.0.0 授權（見 LICENSE），本授權不允許商業�
 都有 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 檔頭。App 圖示由作者指示 AI 影像生成
 工具製作；這類影像在部分法域可能不受著作權保護，在作者享有權利的範圍內以相同條款
 授權。
-
-截至 commit d5d8e313890e9a08221e92fa9623bd5ccad00ab0 的先前發布內容採用
-Apache 2.0，原始條款保留於 licenses/Apache-2.0.txt。本次變更不撤回已授予的權利，
-包含商業使用；即使相同內容出現在新版，先前取得的權利仍依原授權保留。
-詳見 docs/LICENSING.zh-TW.md。
 
 3DGS 訓練器是依公開方法以 Swift 與 Metal 獨立實作，不含原版 3D Gaussian
 Splatting（Inria／MPII）與 Mip-Splatting 的程式碼（兩者僅限非商用），也不含

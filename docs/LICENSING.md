@@ -14,10 +14,4 @@ Redistribution must provide the licence terms or their URL and the plain-text `R
 
 The author's app icon is covered only to the extent that the author holds rights in it. This project's grant does not change independently installed third-party package licences or grant third-party patent or trademark rights. It does not claim ownership of users' scan data or relicense third-party inputs.
 
-## Earlier Apache 2.0 grants
-
-Material published through commit `d5d8e313890e9a08221e92fa9623bd5ccad00ab0` on 2026-09-30 was offered under Apache 2.0. The original text is retained in [licenses/Apache-2.0.txt](../licenses/Apache-2.0.txt).
-
-The noncommercial licence applies to this revision and later contributions that carry it. It does not revoke Apache 2.0 permissions already granted for previously published material, including commercial use. Those rights remain subject to the original terms, including attribution and notice requirements, even where the same material appears in a newer revision. Do not describe the change as a retroactive commercial-use prohibition.
-
 The [README](../README.md) describes the project, [CONTRIBUTING](../CONTRIBUTING.md) states the terms for new contributions, and the [on-device training guide](ON_DEVICE_3DGS.md#provenance-and-licences) records implementation provenance.
