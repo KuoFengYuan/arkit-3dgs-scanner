@@ -603,7 +603,7 @@ Measured on the Mac GPU with the same Metal source:
 
 ## Provenance and licences
 
-The trainer is part of this personal research project, which is not a product of or endorsed by any employer or organisation. It is licensed under the [PolyForm Noncommercial License 1.0.0](../LICENSE): commercial use is not permitted under this licence. Redistribution must provide the licence terms or their URL and the `Required Notice:` author attribution in [NOTICE](../NOTICE). Previously granted Apache 2.0 permissions are not revoked; see [licensing scope and history](LICENSING.md). Third-party patents may cover some methods; this licence does not grant rights to them.
+The trainer is part of this personal research project, which is not a product of or endorsed by any employer or organisation. It is licensed under the [PolyForm Noncommercial License 1.0.0](../LICENSE): commercial use is not permitted under this licence. Redistribution must provide the licence terms or their URL and the `Required Notice:` author attribution in [NOTICE](../NOTICE).
 
 
 - **Code:** no LichtFeld Studio (GPL-3.0) source code is included. Only its published algorithms and default parameters were followed: MRNF, the PPISP integration, and the Mip filter settings.

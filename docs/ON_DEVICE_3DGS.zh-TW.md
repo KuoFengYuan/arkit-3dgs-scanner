@@ -645,7 +645,7 @@ F21171 是一間房間加浴室：169 秒內拍了 1,234 張，選用 858 張，
 
 ## 來源與授權
 
-訓練器是本個人研究專案的一部分，並非任何雇主或機構的產品，也未經其背書。採用 [PolyForm Noncommercial License 1.0.0](../LICENSE)，本授權不允許商業用途。再散布時須提供授權條款或其網址，以及 [NOTICE](../NOTICE) 中以 `Required Notice:` 開頭的作者署名。先前已授予的 Apache 2.0 權利不撤回；詳見[授權範圍與歷史](LICENSING.zh-TW.md)。部分方法仍可能涉及第三方專利，本授權未授予其權利。
+訓練器是本個人研究專案的一部分，並非任何雇主或機構的產品，也未經其背書。採用 [PolyForm Noncommercial License 1.0.0](../LICENSE)，本授權不允許商業用途。再散布時須提供授權條款或其網址，以及 [NOTICE](../NOTICE) 中以 `Required Notice:` 開頭的作者署名。
 
 
 - **程式碼：** 未包含任何 LichtFeld Studio（GPL-3.0）原始碼，只遵循其公開的演算法與預設參數：MRNF、PPISP 整合與 Mip 濾波設定。
