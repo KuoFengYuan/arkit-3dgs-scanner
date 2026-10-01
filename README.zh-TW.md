@@ -162,6 +162,7 @@ Copyright © 2026 Kuo Feng-Yuan（[KuoFengYuan](https://github.com/KuoFengYuan)�
 **本專案為個人研究專案**，並非任何雇主或機構的產品，未經其背書，也不代表其立場。本專案依現狀提供，不附任何擔保。
 
 - **本授權僅允許非商業用途**，包含手機端 3DGS 訓練器。可依 [LICENSE](LICENSE) 定義的允許用途使用、修改與再散布，包含非商業研究及個人學習；商業用途不在本授權範圍內。
+- **先前版本**：截至 commit [`d5d8e31`](https://github.com/KuoFengYuan/arkit-3dgs-scanner/tree/apache-2.0-final)（tag `apache-2.0-final`）以 Apache 2.0 發布的內容，包含其 fork 與 clone，仍保有原本的 Apache 2.0 權利。該 commit 之後的變更僅依 PolyForm Noncommercial 1.0.0 授權。詳見[授權範圍](docs/LICENSING.zh-TW.md)。
 - **必須標註作者**：再散布時須提供授權條款或其網址，以及 [NOTICE](NOTICE) 中以 `Required Notice:` 開頭的作者署名。將 [LICENSE](LICENSE) 與 [NOTICE](NOTICE) 隨複製或衍生作品一同保留，即可提供兩者。
 - **版權涵蓋範圍**：原始碼、文件，以及 `docs/media` 中的示範錄影，均為作者本人的作品。每個原始碼檔開頭都有 `SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0` 檔頭。
 - **App 圖示**：由作者指示 AI 影像生成工具製作。這類影像在部分法域可能不受著作權保護；在作者享有權利的範圍內，以相同條款授權。
