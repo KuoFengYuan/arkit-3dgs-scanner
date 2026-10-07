@@ -10,6 +10,10 @@
 
 以 ARKit 擷取照片、相機姿態與點雲，優化掃描資料，再用 Swift 與 Metal 在 iPhone GPU 上訓練 3DGS 模型，也可以匯出 COLMAP 資料集給電腦上的訓練器。採集、優化與手機端訓練均在裝置上執行，App 不會上傳掃描資料。
 
+App 現在叫 **SplatCapture Studio**，可以透過 TestFlight 免費試用。
+
+**[加入免費 TestFlight 測試版](https://testflight.apple.com/join/hKhVdTUR)** · [Reddit 發布貼文與討論](https://www.reddit.com/r/GaussianSplatting/comments/1wyvyy9/title_update_my_iphone_3dgs_scanner_is_now/)
+
 > [!IMPORTANT]
 > **實測訓練加速：iPhone 17 Pro 快 1.39 倍，Mac（M1 Pro）最高快 1.45 倍。** [查看速度與 PSNR 的統整比較](#訓練實測)，使用作者自行拍攝的 F21171 資料。
 
@@ -21,11 +25,20 @@
 
 | 需求 | 支援條件 |
 | --- | --- |
-| 編譯 | Xcode 26 以上 |
 | 執行 | iOS 17 以上的 iPhone 或 iPad；手機端訓練需要 A14 或更新晶片 |
 | 掃描 | LiDAR 為可選；深度擷取需要有 LiDAR 的裝置 |
 
 AR 掃描需要實體裝置；Simulator 用於介面檢查。
+
+### 安裝測試版
+
+先在 iPhone 上安裝 TestFlight，再開啟[測試版連結](https://testflight.apple.com/join/hKhVdTUR)，依照畫面步驟安裝 **SplatCapture Studio**。
+
+目前實測過 **iPhone 14 Pro、16 Pro、17 Pro 與 18 Pro**。使用時遇到問題，可以透過 TestFlight 回報，或在上方的 Reddit 討論留言。
+
+### 從原始碼編譯
+
+使用 Xcode 26 或更新版本。
 
 ```sh
 git clone https://github.com/KuoFengYuan/arkit-3dgs-scanner.git
@@ -33,10 +46,13 @@ cd arkit-3dgs-scanner
 open arkit-3dgs-scanner.xcodeproj
 ```
 
-1. 選擇 **arkit-3dgs-scanner** scheme、自己的簽章 Team 與實體裝置，再執行。這個 scheme 使用優化過的 Release 版本。
-2. 按「開始掃描」，讓每個表面都從幾個不同位置被拍到。
-3. 停止後等待處理，檢查點雲；有缺漏就續掃補拍。
-4. 按「訓練 3DGS」在手機上建立模型，或按「匯出 3DGS 訓練資料」分享 COLMAP ZIP 給電腦上的訓練器。
+選擇 **arkit-3dgs-scanner** scheme、自己的簽章 Team 與實體裝置，再執行。這個 scheme 使用優化過的 Release 版本。
+
+### 掃描與訓練
+
+1. 按「開始掃描」，讓每個表面都從幾個不同位置被拍到。
+2. 停止後等待處理，檢查點雲；有缺漏就續掃補拍。
+3. 按「訓練 3DGS」在手機上建立模型，或按「匯出 3DGS 訓練資料」分享 COLMAP ZIP 給電腦上的訓練器。
 
 ## 流程與功能
 
