@@ -10,6 +10,10 @@
 
 Capture photos, camera poses and point clouds with ARKit, refine the scan, then train a 3DGS model with Swift and Metal on the iPhone GPU. You can also export a COLMAP dataset for a desktop trainer. Capture, refinement and on-device training run locally; the app does not upload scans.
 
+The app is now called **SplatCapture Studio**. You can try it for free on TestFlight.
+
+**[Join the free TestFlight beta](https://testflight.apple.com/join/hKhVdTUR)** · [Reddit announcement and discussion](https://www.reddit.com/r/GaussianSplatting/comments/1wyvyy9/title_update_my_iphone_3dgs_scanner_is_now/)
+
 > [!IMPORTANT]
 > **Measured training speed-up: 1.39× on iPhone 17 Pro and up to 1.45× on Mac (M1 Pro).** [See the combined speed and PSNR comparison](#training-benchmarks) on the author's F21171 scan.
 
@@ -21,11 +25,20 @@ Capture photos, camera poses and point clouds with ARKit, refine the scan, then 
 
 | Requirement | Supported setup |
 | --- | --- |
-| Build | Xcode 26+ |
 | Run | iPhone or iPad with iOS 17+; on-device training needs A14 or newer |
 | Capture | LiDAR is optional; depth capture needs a LiDAR device |
 
 Use a physical device for AR capture. The Simulator is for UI checks.
+
+### Install the beta
+
+Install TestFlight on your iPhone, then open the [beta link](https://testflight.apple.com/join/hKhVdTUR) and follow the steps to install **SplatCapture Studio**.
+
+Tested so far on **iPhone 14 Pro, 16 Pro, 17 Pro and 18 Pro**. If you run into a problem, send feedback through TestFlight or leave a comment in the Reddit discussion above.
+
+### Build from source
+
+Use Xcode 26 or later.
 
 ```sh
 git clone https://github.com/KuoFengYuan/arkit-3dgs-scanner.git
@@ -33,10 +46,13 @@ cd arkit-3dgs-scanner
 open arkit-3dgs-scanner.xcodeproj
 ```
 
-1. Select the **arkit-3dgs-scanner** scheme, your signing team and a physical device, then Run. This scheme uses an optimised Release build.
-2. Tap **Start scanning** and move so each surface is seen from several positions.
-3. Stop, wait for processing and review the point cloud. Continue scanning to fill gaps.
-4. Tap **Train 3DGS** to build a model on the phone, or **Export 3DGS dataset** to share a COLMAP ZIP for a desktop trainer.
+Select the **arkit-3dgs-scanner** scheme, your signing team and a physical device, then Run. This scheme uses an optimised Release build.
+
+### Scan and train
+
+1. Tap **Start scanning** and move so each surface is seen from several positions.
+2. Stop, wait for processing and review the point cloud. Continue scanning to fill gaps.
+3. Tap **Train 3DGS** to build a model on the phone, or **Export 3DGS dataset** to share a COLMAP ZIP for a desktop trainer.
 
 ## Pipeline and features
 
